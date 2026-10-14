@@ -1,21 +1,15 @@
 package com.librats;
 
 /**
- * Notified about a peer, by id alone.
+ * Told about a peer, by id: it connected
+ * ({@link RatsNode#onPeerConnected(PeerCallback)}), or its full send queue
+ * drained ({@link RatsNode#onPeerWritable(PeerCallback)}).
  *
- * <p>Register with {@link RatsNode#onPeerConnected(PeerCallback)} or
- * {@link RatsNode#onPeerWritable(PeerCallback)} before {@link RatsNode#start()}.
- * Fires on an internal reactor thread — marshal to the UI thread before touching
- * views.</p>
- *
- * <p>Disconnects use {@link PeerDisconnectCallback} instead: they carry a reason,
- * which is what tells a peer that left apart from one this node was sending to
- * too fast.</p>
+ * <p>Register before {@link RatsNode#start()}. Runs on a reactor thread — hop to
+ * the UI thread before touching views.</p>
  */
 @FunctionalInterface
 public interface PeerCallback {
-    /**
-     * @param peerId 64-char lowercase hex of the peer's self-certifying id
-     */
+    /** @param peerId the peer's id, 64-char lowercase hex */
     void onPeer(String peerId);
 }

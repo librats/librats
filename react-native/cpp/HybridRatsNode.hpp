@@ -3,19 +3,28 @@
 #include "HybridRatsNodeSpec.hpp"
 
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 // librats headers stay out of this header so the generated Nitro umbrella does
-// not have to see them; the Node is held behind a forward declaration, which is
-// why the destructor is declared here and defined in the .cpp.
+// not have to see them; the Node and its subsystems are held behind forward
+// declarations, which is why the destructor is declared here and defined in the
+// .cpp.
 namespace librats {
 class Node;
+struct NodeConfig;
+class DhtDiscovery;
+class MdnsDiscovery;
+class PeerExchange;
+class PortMappingService;
+class HolePunch;
+class Relay;
+class MessageJson;
 class FileTransfer;
 class PubSub;
-struct NodeConfig;
+class PingService;
+class ReconnectionService;
 } // namespace librats
 
 namespace margelo::nitro::librats {
@@ -27,12 +36,13 @@ namespace margelo::nitro::librats {
  * because librats is C++ and Nitro can call C++ directly on both.
  *
  * Threading: every method here is invoked from the JS thread (Nitro dispatches
- * synchronous methods on the caller's thread), so `node_` is only mutated there.
- * librats events, by contrast, fire on reactor threads; the listeners registered
- * below are async Nitro callbacks, which Nitro is responsible for scheduling back
- * onto the JS thread. The listener lambdas deliberately capture *only* the
- * `std::function` they forward to — never `this` — so a reactor thread mid-event
- * cannot touch a partially destroyed HybridObject during teardown.
+ * synchronous methods on the caller's thread), so `node_` and the subsystem
+ * pointers are only mutated there. librats events, by contrast, fire on reactor
+ * threads; the listeners registered below are async Nitro callbacks, which
+ * Nitro schedules back onto the JS thread. The listener lambdas deliberately
+ * capture *only* the `std::function` they forward to — never `this` — so a
+ * reactor thread mid-event cannot touch a partially destroyed HybridObject
+ * during teardown.
  */
 class HybridRatsNode : public HybridRatsNodeSpec {
 public:
@@ -43,22 +53,33 @@ public:
   void configure(const RatsConfig& config) override;
   bool start() override;
   void stop() override;
-
-  // — properties —
   bool getIsRunning() override;
+
+  // — this node —
   double getListenPort() override;
   std::string getLocalId() override;
-  double getPeerCount() override;
+  std::string getProtocol() override;
+  std::vector<Transport> getTransports() override;
+  NatMapping getNatMapping() override;
+  std::vector<std::string> observedAddresses() override;
 
-  // — connections —
+  // — peers —
   void connect(const std::string& host, double port) override;
+  bool disconnect(const std::string& peerId) override;
+  double getPeerCount() override;
   std::vector<std::string> peerIds() override;
+  std::optional<PeerInfo> peerInfo(const std::string& peerId) override;
+  double getMaxPeers() override;
+  void setMaxPeers(double maxPeers) override;
 
   // — messaging —
   bool send(const std::string& peerId, const std::string& channel,
-            const std::shared_ptr<ArrayBuffer>& data) override;
-  void broadcast(const std::string& channel,
-                 const std::shared_ptr<ArrayBuffer>& data) override;
+            const std::shared_ptr<ArrayBuffer>& data,
+            std::optional<double> lifetimeMs) override;
+  bool broadcast(const std::string& channel, const std::shared_ptr<ArrayBuffer>& data,
+                 std::optional<double> lifetimeMs) override;
+  bool peerWritable(const std::string& peerId) override;
+  std::optional<PathStats> pathStats(const std::string& peerId) override;
   void onMessage(
       const std::string& channel,
       const std::function<void(const std::string& /* peerId */,
@@ -66,17 +87,48 @@ public:
           listener) override;
 
   // — peer events —
-  bool peerWritable(const std::string& peerId) override;
   void onPeerConnected(
       const std::function<void(const std::string& /* peerId */)>& listener)
       override;
   void onPeerDisconnected(
       const std::function<void(const std::string& /* peerId */,
-                               const std::string& /* reason */)>& listener)
+                               CloseReason /* reason */)>& listener) override;
+  void onDialFailed(
+      const std::function<void(const std::string& /* address */)>& listener)
       override;
   void onPeerWritable(
       const std::function<void(const std::string& /* peerId */)>& listener)
       override;
+  void onPeerPath(
+      const std::function<void(const std::string& /* peerId */,
+                               const PathStats& /* stats */)>& listener) override;
+
+  // — discovery —
+  void enableDht(const std::optional<DhtConfig>& config) override;
+  void enableMdns() override;
+  void enablePeerExchange() override;
+
+  // — NAT traversal —
+  void enablePortMapping(const std::optional<PortMappingConfig>& config) override;
+  void enableHolePunch(std::optional<bool> serveRendezvous) override;
+  bool punchPeer(const std::string& peerId) override;
+  void enableRelay(std::optional<bool> serve) override;
+  bool connectViaRelay(const std::string& peerId) override;
+
+  // — JSON messaging —
+  void enableJson() override;
+  void onJson(const std::string& type,
+              const std::function<void(const std::string& /* peerId */,
+                                       const std::string& /* json */)>& listener)
+      override;
+  void onceJson(const std::string& type,
+                const std::function<void(const std::string& /* peerId */,
+                                         const std::string& /* json */)>& listener)
+      override;
+  void offJson(const std::string& type) override;
+  bool sendJson(const std::string& peerId, const std::string& type,
+                const std::string& json) override;
+  void broadcastJson(const std::string& type, const std::string& json) override;
 
   // — file transfer —
   void enableFileTransfer(const FileTransferConfig& config) override;
@@ -113,6 +165,13 @@ public:
   std::vector<std::string> topicPeers(const std::string& topic) override;
   std::vector<std::string> meshPeers(const std::string& topic) override;
 
+  // — ping and reconnection —
+  void enablePing() override;
+  std::optional<double> peerRttMs(const std::string& peerId) override;
+  void enableReconnect() override;
+  void addReconnect(const std::string& host, double port) override;
+  void removeReconnect(const std::string& host, double port) override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -122,18 +181,34 @@ private:
    */
   ::librats::Node& node();
 
-  /// The attached FileTransfer subsystem, or throws if enableFileTransfer() was
-  /// never called. Ownership stays with the Node, which outlives every use here.
-  ::librats::FileTransfer& files();
+  /// Throws unless the node is not running yet: subsystems and event listeners
+  /// live in tables reactor threads read without a lock.
+  void require_not_started(const char* what) const;
 
-  /// The attached PubSub subsystem, or throws if enablePubSub() was never called.
-  ::librats::PubSub& pubsub();
+  /// Attach a subsystem once, before start. `slot` records it, both to refuse a
+  /// second enable and so the methods that use it can find it.
+  template <class T, class Make>
+  void enable(T*& slot, const char* what, Make make);
+
+  /// The attached subsystem, or throws naming the enable call that was missed.
+  template <class T>
+  T& require(T* slot, const char* enable_call) const;
 
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
+  bool started_ = false;
+
+  ::librats::DhtDiscovery* dht_ = nullptr;
+  ::librats::MdnsDiscovery* mdns_ = nullptr;
+  ::librats::PeerExchange* pex_ = nullptr;
+  ::librats::PortMappingService* portmap_ = nullptr;
+  ::librats::HolePunch* punch_ = nullptr;
+  ::librats::Relay* relay_ = nullptr;
+  ::librats::MessageJson* json_ = nullptr;
   ::librats::FileTransfer* files_ = nullptr;
   ::librats::PubSub* pubsub_ = nullptr;
-  bool started_ = false;
+  ::librats::PingService* ping_ = nullptr;
+  ::librats::ReconnectionService* reconnect_ = nullptr;
 };
 
 } // namespace margelo::nitro::librats

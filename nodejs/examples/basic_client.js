@@ -7,7 +7,7 @@
  *   node basic_client.js [listenPort] [connectHost] [connectPort]
  */
 
-const { RatsNode, TransportMask } = require('../lib/index');
+const { RatsNode } = require('../lib/index');
 
 const [portArg, host, peerPortArg] = process.argv.slice(2);
 const node = new RatsNode({ listenPort: portArg ? Number(portArg) : 8080 });
@@ -36,7 +36,7 @@ node.start();
 
 console.log(`peer id      ${node.localId}`);
 console.log(`listening on ${node.listenPort}`);
-console.log(`transports   ${describeTransports(node.transports)}`);
+console.log(`transports   ${node.transports.join('+')}`);
 
 if (host) {
   const peerPort = Number(peerPortArg) || 8081;
@@ -59,15 +59,8 @@ const chatter = setInterval(() => {
 process.on('SIGINT', () => {
   clearInterval(status);
   clearInterval(chatter);
-  node.stop();
-  process.exit(0);
+  node.destroy();
 });
 
 console.log('running — Ctrl+C to stop');
 
-function describeTransports(mask) {
-  const names = [];
-  if (mask & TransportMask.TCP) names.push('tcp');
-  if (mask & TransportMask.UDP) names.push('udp');
-  return names.join('+') || 'none';
-}

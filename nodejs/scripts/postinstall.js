@@ -44,9 +44,9 @@ if (!process.env.CI && !process.env.npm_config_global) {
   console.log('Quick start:');
   console.log('```javascript');
   console.log("const { RatsNode } = require('librats');");
-  console.log('const node = new RatsNode(8080);');
+  console.log('const node = new RatsNode({ listenPort: 8080 });');
   console.log('node.start();');
   console.log('```\n');
-  console.log('Documentation: https://github.com/librats/librats/tree/main/nodejs\n');
+  console.log('Documentation: https://github.com/DEgITx/librats/tree/master/nodejs\n');
 }
 

@@ -3,7 +3,6 @@
 
 # Optional dependencies for development
 # pytest>=6.0
-# pytest-asyncio
 # pytest-cov
 # black
 # flake8

@@ -618,28 +618,32 @@ Two details that bite people:
 
 ## 9. Language bindings
 
-Everything non-C++ is built on one C ABI: **`src/librats/bindings/rats.{h,cpp}`**.
+Everything non-C++ except React Native is built on one C ABI:
+**`src/librats/bindings/rats.{h,cpp}`**.
 
-- A `rats_t` is an opaque pointer wrapping a C++ `Node`.
+- A `rats_t` is an opaque handle to one `Node`. `rats_create()` takes a
+  `rats_config_t` in which zero is every field's default, so a zeroed struct (or
+  `NULL`) is a complete config; a config no node could run with returns `NULL`.
 - **Subsystems are opt-in via `rats_enable_*()`** calls made *before*
-  `rats_start()` — `rats_enable_dht`, `rats_enable_mdns`, `rats_enable_pubsub`,
-  `rats_enable_json`, `rats_enable_file_transfer`, `rats_enable_ping`,
-  `rats_enable_reconnect`, `rats_enable_port_mapping`, `rats_enable_hole_punch`,
-  `rats_enable_relay`. This mirrors C++'s `add_subsystem` exactly.
+  `rats_start()` — `rats_enable_dht`, `rats_enable_mdns`,
+  `rats_enable_peer_exchange`, `rats_enable_port_mapping`, `rats_enable_hole_punch`,
+  `rats_enable_relay`, `rats_enable_pubsub`, `rats_enable_json`,
+  `rats_enable_file_transfer`, `rats_enable_ping`, `rats_enable_reconnect`,
+  `rats_enable_bittorrent`. This mirrors C++'s `add_subsystem`.
 - **Error model:** fallible calls return a `rats_error_t` (`RATS_OK == 0`;
-  non-zero is an error — e.g. `RATS_ERR_NOT_ENABLED`, `RATS_ERR_ALREADY_STARTED`).
-  Pure getters return their value directly.
+  non-zero is an error — e.g. `RATS_ERR_NOT_ENABLED`, `RATS_ERR_ALREADY_STARTED`,
+  `RATS_ERR_NO_SUCH_PEER`). Pure getters return their value directly.
 - **Threading is the same as C++:** callbacks fire on a reactor thread — don't
-  block in them.
+  block in them — and node callbacks must be registered before `rats_start()`.
 
 The Node.js (`nodejs/`), Python (`python/`) and Java/Android (`android/`)
-wrappers all sit on top of this C ABI, and so do the two mobile packages: React
-Native (`react-native/`) is one C++ Nitro Modules `HybridObject` shared by iOS
-and Android, and iOS (`ios/`) builds the core into an `XCFramework` whose C ABI
-Swift imports directly. **The rule for contributors:**
-when you add a public C++ capability that should be reachable from other languages,
-surface it through this C API (typically as a `rats_enable_*` plus a few calls) and
-keep the language wrappers in sync.
+wrappers sit on top of this C ABI, and iOS (`ios/`) builds the core into an
+`XCFramework` whose C ABI Swift imports directly. React Native
+(`react-native/`) is the exception: one C++ Nitro Modules `HybridObject`, shared
+by iOS and Android, that calls the C++ `Node` API itself. **The rule for
+contributors:** when you add a public C++ capability that should be reachable
+from other languages, surface it through this C API (typically as a
+`rats_enable_*` plus a few calls) and keep the language wrappers in sync.
 
 ---
 
@@ -665,7 +669,7 @@ The directory tree mirrors the layers in this document:
 | `src/librats/bindings` | the C ABI all FFI bindings build on |
 | `tests/` | GoogleTest suites — one `test_*.cpp` per area |
 | `bench/` | benchmark suites (see `bench/README.md`) |
-| `nodejs/`, `python/`, `android/`, `react-native/`, `ios/` | the language bindings and mobile packages, all over the C ABI |
+| `nodejs/`, `python/`, `android/`, `react-native/`, `ios/` | the language bindings and mobile packages (all over the C ABI except React Native, which uses the C++ API) |
 
 ---
 

@@ -1,8 +1,8 @@
 package com.librats;
 
-/** Where a file transfer stands, as reported by {@link FileProgressCallback}. */
+/** Where a file transfer stands ({@code rats_file_status_t}). */
 public enum FileTransferStatus {
-    /** Offered, not yet accepted. */
+    /** Offered, not answered yet. */
     PENDING(0),
     /** Moving bytes. */
     ACTIVE(1),
@@ -21,15 +21,12 @@ public enum FileTransferStatus {
         this.value = value;
     }
 
-    /** @return the numeric status value. */
+    /** @return the numeric {@code rats_file_status_t} value. */
     public int value() {
         return value;
     }
 
-    /**
-     * @param value a numeric status value
-     * @return the matching constant, or {@link #FAILED} for an unknown value
-     */
+    /** @return the constant for a {@code rats_file_status_t} value; {@link #FAILED} if unknown. */
     public static FileTransferStatus fromValue(int value) {
         for (FileTransferStatus s : values()) {
             if (s.value == value) return s;

@@ -473,6 +473,8 @@ When contributing language bindings:
 - **Node.js**: `nodejs/` - Native addon with TypeScript support
 - **Python**: `python/` - ctypes-based wrapper
 - **Android/Java**: `android/` - JNI integration
+- **iOS**: `ios/` - XCFramework of the core; Swift imports the C API directly
+- **React Native**: `react-native/` - Nitro module over the C++ API (not the C API)
 - **React Native**: `react-native/` - one C++ Nitro Modules `HybridObject` shared by iOS and Android
 - **iOS**: `ios/` - `XCFramework` build of the core; Swift imports the C ABI directly
 

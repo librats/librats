@@ -2,40 +2,40 @@ package com.librats;
 
 import android.util.Log;
 
-import java.util.EnumSet;
+import java.util.Collections;
+import java.util.Set;
 
 /**
- * One librats node — a Java wrapper over the C ABI
+ * One librats node: a Java wrapper over the C ABI
  * ({@code src/librats/bindings/rats.h}).
  *
- * <p>On its own a node is secure transport (Noise XX over TCP <b>or</b> the
- * library's reliable stream over UDP, both on the same port), a self-certifying
- * peer id, manual dialing, and raw messaging on named channels — nothing else.
- * Discovery (DHT/mDNS), pub/sub, typed JSON messaging, file transfer, NAT port
- * mapping, hole punching, RTT probing and reconnection are opt-in subsystems.</p>
+ * <p>A bare node is encrypted transport (Noise XX over UDP or TCP, both on one
+ * port), a self-certifying peer id, dialing, and messages on named channels.
+ * Discovery, NAT traversal, pub/sub, JSON messaging, file transfer, ping and
+ * reconnection are opt-in: call the matching {@code enable*} method.</p>
  *
- * <p><b>Ordering matters.</b> Enable subsystems and register callbacks
- * <em>before</em> {@link #start()}. Enabling after start throws with
- * {@link ErrorCode#ALREADY_STARTED}; using a subsystem before its enable throws
- * with {@link ErrorCode#NOT_ENABLED}.</p>
+ * <p><b>Order.</b> Enable subsystems and register the node's callbacks before
+ * {@link #start()}. Afterwards both throw with {@link ErrorCode#ALREADY_STARTED};
+ * using a subsystem that was never enabled throws with
+ * {@link ErrorCode#NOT_ENABLED}.</p>
  *
- * <p><b>Threading.</b> Callbacks fire on an internal reactor thread — do not
- * block in them, and marshal to the UI thread (e.g. {@code runOnUiThread})
- * before touching views.</p>
+ * <p><b>Threads.</b> Every method may be called from any thread. Callbacks run on
+ * an internal reactor thread: keep them short, never block in them, and hop to
+ * the UI thread before touching views.</p>
  *
- * <p><b>Errors.</b> Every fallible method throws {@link RatsException}; getters
- * return their value. Peer ids are 64-char lowercase hex strings.</p>
+ * <p><b>Lifetime.</b> {@link #close()} stops the node and frees it; the callbacks
+ * it was given are released with it. Do not close a node while another thread is
+ * still calling into it, nor from inside one of its own callbacks (closing waits
+ * for the very thread that runs them).</p>
  *
  * <pre>{@code
- * try (RatsNode node = new RatsNode(new RatsNode.Config()
+ * RatsNode node = new RatsNode(new RatsNode.Config()
  *         .listenPort(8080)
- *         .dataDir(getFilesDir().getAbsolutePath()))) {
- *     node.onPeerConnected(id -> Log.i(TAG, "+ " + id));
- *     node.on("chat", (id, data) -> Log.i(TAG, new String(data)));
- *     node.enableDht();
- *     node.start();
- *     ...
- * }
+ *         .dataDir(getFilesDir().getAbsolutePath()));
+ * node.onPeerConnected(id -> Log.i(TAG, "+ " + id));
+ * node.on("chat", (id, data) -> Log.i(TAG, new String(data, StandardCharsets.UTF_8)));
+ * node.enableMdns();
+ * node.start();
  * }</pre>
  */
 public class RatsNode implements AutoCloseable {
@@ -45,195 +45,247 @@ public class RatsNode implements AutoCloseable {
         try {
             System.loadLibrary("rats_jni");
         } catch (UnsatisfiedLinkError e) {
-            Log.e(TAG, "Failed to load native library", e);
+            Log.e(TAG, "Failed to load librats_jni", e);
             throw e;
         }
     }
 
-    private long nativePtr;
+    /** Longest lifetime a live message may have; a longer one is cut to this. */
+    public static final int LIVE_MAX_LIFETIME_MS = 30000;
+    /** Largest payload a live message may carry. */
+    public static final int LIVE_MAX_PAYLOAD = 1024 * 1024;
 
     /**
-     * Node configuration, mirroring {@code rats_config_t}. Every setter returns
-     * {@code this}, so it reads as one expression:
+     * Node configuration ({@code rats_config_t}). Every setter returns
+     * {@code this}; anything left unset is the library default.
      *
      * <pre>{@code
      * new RatsNode.Config().listenPort(8080).protocol("myapp/1.0").maxPeers(50)
      * }</pre>
-     *
-     * <p>Every field has a working default; set only what you care about.</p>
      */
     public static final class Config {
-        int listenPort = 0;
-        boolean enableListen = true;
-        String bindAddress = null;
-        Security security = Security.NOISE;
-        String dataDir = null;
-        String protocol = null;
-        long maxPeers = 0;
-        boolean enableTcp = true;
-        boolean enableUdp = true;
-        Transport preferredTransport = Transport.UDP;
-        int transportFallbackMs = 1200;
-        int pathSampleMs = 0;
+        /** {@link #transportFallbackMs(int)} value that never races the second transport. */
+        public static final int FALLBACK_NEVER = -1;   // RATS_FALLBACK_NEVER as a uint32
 
-        /** Inbound port shared by both transports; 0 (the default) = ephemeral. */
-        public Config listenPort(int port) {
-            this.listenPort = port;
-            return this;
-        }
-
-        /** False makes a dial-only node with no listener. Default true. */
-        public Config enableListen(boolean enable) {
-            this.enableListen = enable;
-            return this;
-        }
-
-        /** Bind address; null (the default) selects the {@code "::"} dual-stack wildcard. */
-        public Config bindAddress(String address) {
-            this.bindAddress = address;
-            return this;
-        }
-
-        /** Transport security. Default {@link Security#NOISE}. */
-        public Config security(Security security) {
-            this.security = security;
-            return this;
-        }
+        // Read field by field by librats_jni.cpp (nativeCreate); names and types
+        // are part of the native contract. Zero means the library default, except
+        // for the two booleans that default to on.
+        String protocol;
+        String dataDir;
+        int security;
+        int listenPort;
+        String bindAddress;
+        boolean dialOnly;
+        long maxPeers;
+        int transports;
+        int preferredTransport;
+        int transportFallbackMs;
+        long sendQueueLimit;
+        int pathSampleMs;
+        int congestionControl;
+        long udpReceiveWindow;
+        long udpReceiveBudget;
+        boolean udpOffload = true;
+        int reactorThreads;
+        boolean networkMonitor = true;
 
         /**
-         * Directory for persistent state — the node's identity, the DHT routing
-         * table, the reconnection store. Null (the default) gives a fresh
-         * identity every run. On Android, {@code context.getFilesDir()}.
-         */
-        public Config dataDir(String dir) {
-            this.dataDir = dir;
-            return this;
-        }
-
-        /**
-         * Application protocol bound into the handshake, e.g. {@code "myapp/1.0"};
-         * null selects {@code "librats/1.0"}. Two nodes whose protocol differs
-         * cannot complete a handshake.
+         * App id bound into the handshake, e.g. {@code "myapp/1.0"}; peers with a
+         * different one cannot connect. Default {@code "librats/1.0"}.
          */
         public Config protocol(String protocol) {
             this.protocol = protocol;
             return this;
         }
 
-        /** Established-peer cap; 0 (the default) = unlimited. */
-        public Config maxPeers(long maxPeers) {
-            this.maxPeers = maxPeers;
+        /**
+         * Directory for persistent state: the identity, the DHT routing table, the
+         * reconnect list. Unset, the node gets a new identity every run. On Android,
+         * {@code context.getFilesDir()}.
+         */
+        public Config dataDir(String dir) {
+            this.dataDir = dir;
             return this;
         }
 
-        /** Accept and dial over TCP. Default true. */
-        public Config enableTcp(boolean enable) {
-            this.enableTcp = enable;
+        /** Default {@link Security#NOISE}. */
+        public Config security(Security security) {
+            this.security = security.value();
             return this;
         }
 
-        /** Accept and dial over the datagram transport. Default true. */
-        public Config enableUdp(boolean enable) {
-            this.enableUdp = enable;
+        /** Inbound port, shared by both transports. Default 0: ephemeral. */
+        public Config listenPort(int port) {
+            if (port < 0 || port > 65535) throw new IllegalArgumentException("port " + port);
+            this.listenPort = port;
             return this;
         }
 
-        /** Which transport a dial tries first. Default {@link Transport#UDP}. */
+        /** Interface to listen on. Default {@code "::"}, dual-stack on every interface. */
+        public Config bindAddress(String address) {
+            this.bindAddress = address;
+            return this;
+        }
+
+        /** True: no listener, outbound connections only. Default false. */
+        public Config dialOnly(boolean dialOnly) {
+            this.dialOnly = dialOnly;
+            return this;
+        }
+
+        /** Cap on established peers, enforced on inbound. Default 0: unlimited. */
+        public Config maxPeers(int maxPeers) {
+            this.maxPeers = nonNegative(maxPeers, "maxPeers");
+            return this;
+        }
+
+        /** Transports to run. Default both. {@link Transport#RELAY} is not one to run. */
+        public Config transports(Transport... transports) {
+            int mask = 0;
+            for (Transport t : transports) {
+                if (t == Transport.RELAY) throw new IllegalArgumentException("RELAY is not a transport to run");
+                mask |= t.mask();
+            }
+            this.transports = mask;
+            return this;
+        }
+
+        /** Transport a dial tries first. Default {@link Transport#UDP}. */
         public Config preferredTransport(Transport transport) {
-            this.preferredTransport = transport;
+            if (transport == Transport.RELAY) throw new IllegalArgumentException("a relay is never dialed");
+            this.preferredTransport = transport.value();
             return this;
         }
 
         /**
-         * How long the preferred transport dials alone before the other is raced
-         * alongside it; 0 disables the fallback. Default 1200 ms.
+         * How long the preferred transport dials alone before the other is raced.
+         * 0 is the default (1200 ms); {@link #FALLBACK_NEVER} never races it.
          */
         public Config transportFallbackMs(int ms) {
+            if (ms < 0 && ms != FALLBACK_NEVER) throw new IllegalArgumentException("transportFallbackMs " + ms);
             this.transportFallbackMs = ms;
             return this;
         }
 
         /**
-         * How often each connected peer's path is sampled for
-         * {@link RatsNode#pathStats(String)} and {@link RatsNode#onPeerPath(PathCallback)},
-         * in ms. 0 (the default) samples only while an {@code onPeerPath} callback is
-         * registered, and then every 100 ms.
+         * Bytes a peer's send queue may hold before a sender that keeps going has
+         * it dropped ({@link CloseReason#SLOW_CONSUMER}); {@link #peerWritable}
+         * turns false at a quarter of it. Not a message size limit. Default 0: 8 MiB.
          */
-        public Config pathSampleMs(int ms) {
-            this.pathSampleMs = ms;
+        public Config sendQueueLimit(long bytes) {
+            this.sendQueueLimit = nonNegative(bytes, "sendQueueLimit");
             return this;
         }
-    }
 
-    // ===================== construction =====================
+        /**
+         * How often each peer's path is sampled for {@link #pathStats(String)}.
+         * Default 0: only while an {@link #onPeerPath(PathCallback)} callback is
+         * registered, every 100 ms.
+         */
+        public Config pathSampleMs(int ms) {
+            this.pathSampleMs = (int) nonNegative(ms, "pathSampleMs");
+            return this;
+        }
 
-    /**
-     * Creates a listening node with all defaults but the port.
-     *
-     * @param listenPort inbound port, or 0 for an ephemeral one
-     */
-    public RatsNode(int listenPort) {
-        this(new Config().listenPort(listenPort));
-    }
+        /** Congestion controller of every UDP connection. Default {@link Congestion#BBR}. */
+        public Config congestionControl(Congestion congestion) {
+            this.congestionControl = congestion.value();
+            return this;
+        }
 
-    /**
-     * Creates a node from a {@link Config}.
-     *
-     * @param config the configuration; null selects all defaults
-     */
-    public RatsNode(Config config) {
-        if (config == null) config = new Config();
-        nativePtr = nativeCreateConfig(
-                config.listenPort,
-                config.enableListen,
-                config.bindAddress,
-                config.security.value(),
-                config.dataDir,
-                config.protocol,
-                config.maxPeers,
-                config.enableTcp,
-                config.enableUdp,
-                config.preferredTransport.value(),
-                config.transportFallbackMs,
-                config.pathSampleMs);
-        if (nativePtr == 0) {
-            throw new RatsException("Failed to create the native rats node");
+        /**
+         * Ceiling one UDP connection's flow-control window grows to (it starts at
+         * 1 MiB); throughput is bounded by window / round trip. Default 0: 16 MiB.
+         */
+        public Config udpReceiveWindow(long bytes) {
+            this.udpReceiveWindow = nonNegative(bytes, "udpReceiveWindow");
+            return this;
+        }
+
+        /** Bytes all UDP connections together may hold out of order. Default 0: 64 MiB. */
+        public Config udpReceiveBudget(long bytes) {
+            this.udpReceiveBudget = nonNegative(bytes, "udpReceiveBudget");
+            return this;
+        }
+
+        /** Kernel segmentation offload for UDP where the system has it. Default true. */
+        public Config udpOffload(boolean enable) {
+            this.udpOffload = enable;
+            return this;
+        }
+
+        /** I/O threads. Default 0: one, enough for thousands of peers. */
+        public Config reactorThreads(int threads) {
+            this.reactorThreads = (int) nonNegative(threads, "reactorThreads");
+            return this;
+        }
+
+        /**
+         * Watch the device for interface and address changes and react to them.
+         * Costs one mostly idle thread. Default true.
+         */
+        public Config networkMonitor(boolean enable) {
+            this.networkMonitor = enable;
+            return this;
+        }
+
+        private static long nonNegative(long value, String name) {
+            if (value < 0) throw new IllegalArgumentException(name + " must be >= 0, got " + value);
+            return value;
         }
     }
 
-    // ===================== lifecycle =====================
+    private volatile long nativePtr;
+    private final String localId;
+    private final String protocol;
+
+    // ===================== construction and lifecycle =====================
+
+    /** A node with every default: listening on an ephemeral port, both transports. */
+    public RatsNode() {
+        this(new Config());
+    }
 
     /**
-     * Binds the listener and brings up every enabled subsystem.
+     * @throws RatsException if the config is impossible: no transport, or TCP
+     *         preferred while it is turned off
+     */
+    public RatsNode(Config config) {
+        nativePtr = nativeCreate(config != null ? config : new Config());
+        if (nativePtr == 0) {
+            throw new RatsException("Could not create the node: the config is invalid");
+        }
+        localId = nativeLocalId(nativePtr);
+        protocol = nativeProtocol(nativePtr);
+    }
+
+    /**
+     * Opens the sockets and starts every enabled subsystem.
      *
-     * @throws RatsException with {@link ErrorCode#BIND} if the listener could not
-     *         bind, or {@link ErrorCode#ALREADY_STARTED} if it is already running
+     * @throws RatsException {@link ErrorCode#BIND} if the port is taken,
+     *         {@link ErrorCode#ALREADY_STARTED} if it is running
      */
     public void start() {
         check(nativeStart(ptr()), "start");
     }
 
-    /** Stops the node and closes all connections. Idempotent. */
+    /** Closes every connection and stops. Idempotent. */
     public void stop() {
-        if (nativePtr != 0) nativeStop(nativePtr);
+        long p = nativePtr;
+        if (p != 0) nativeStop(p);
     }
 
-    /**
-     * Stops the node and releases the native resources. The instance is inert
-     * afterwards — further calls throw. Idempotent.
-     */
+    /** Stops the node and frees it. Idempotent; the node is unusable afterwards. */
     @Override
-    public void close() {
-        if (nativePtr != 0) {
-            nativeDestroy(nativePtr);
+    public synchronized void close() {
+        long p = nativePtr;
+        if (p != 0) {
             nativePtr = 0;
+            nativeDestroy(p);
         }
     }
 
-    /**
-     * Safety net for a node that was never {@link #close()}d. Prefer
-     * try-with-resources; a finalizer runs at an unpredictable time, if ever.
-     */
+    /** Last-resort cleanup for a node that was never closed; close it yourself. */
     @Override
     @SuppressWarnings({"deprecation", "removal"})
     protected void finalize() throws Throwable {
@@ -244,166 +296,147 @@ public class RatsNode implements AutoCloseable {
         }
     }
 
-    // ===================== identity / info =====================
+    // ===================== this node =====================
 
-    /** @return the bound listen port (the actual one when 0 was requested). */
+    /** @return our peer id, 64-char lowercase hex. */
+    public String localId() {
+        return localId;
+    }
+
+    /** @return the protocol bound into the handshake. */
+    public String protocol() {
+        return protocol;
+    }
+
+    /** @return the bound listen port (the real one when 0 was asked for); 0 before start. */
     public int listenPort() {
         return nativeListenPort(ptr());
     }
 
-    /** @return our self-certifying peer id, 64-char lowercase hex. */
-    public String localId() {
-        return nativeLocalId(ptr());
-    }
-
-    /** @return the application protocol bound into the handshake, e.g. {@code "librats/1.0"}. */
-    public String protocol() {
-        return nativeProtocol(ptr());
-    }
-
     /**
-     * The transports this node is actually running. May be narrower than the
-     * config asked for — a UDP socket that could not be bound leaves the node
-     * TCP-only rather than failing to start.
-     *
-     * @return the running transports; empty before {@link #start()} and after
-     *         {@link #stop()}
+     * @return the transports actually running; can be narrower than configured (a
+     *         UDP socket that cannot be bound leaves the node TCP-only). Empty
+     *         when not running.
      */
-    public EnumSet<Transport> transports() {
-        return Transport.fromMask(nativeTransports(ptr()));
+    public Set<Transport> transports() {
+        return Collections.unmodifiableSet(Transport.fromMask(nativeTransports(ptr())));
     }
 
-    // ===================== connections =====================
+    /** @return what the mesh has shown about this node's NAT. */
+    public NatMapping natMapping() {
+        return NatMapping.fromValue(nativeNatMapping(ptr()));
+    }
+
+    /** @return our own addresses as peers report seeing us, {@code "ip:port"}; never null. */
+    public String[] observedAddresses() {
+        return nativeObservedAddresses(ptr());
+    }
+
+    // ===================== peers =====================
 
     /**
-     * Dials a peer. Non-blocking: success surfaces as
-     * {@link #onPeerConnected(PeerCallback)}.
+     * Dials host:port (a literal or a hostname). Non-blocking: success arrives at
+     * {@link #onPeerConnected(PeerCallback)}, failure at
+     * {@link #onDialFailed(DialFailedCallback)}.
      *
-     * @throws RatsException with {@link ErrorCode#INVALID_ARG} if the host cannot
-     *         be parsed or resolved
+     * @throws RatsException {@link ErrorCode#NOT_STARTED} before {@link #start()}
      */
     public void connect(String host, int port) {
         check(nativeConnect(ptr(), host, port), "connect to " + host + ":" + port);
     }
 
-    /** @return the number of currently-connected peers. */
-    public long peerCount() {
-        return nativePeerCount(ptr());
+    /** Closes the connection to a peer. @throws RatsException {@link ErrorCode#NO_SUCH_PEER} */
+    public void disconnect(String peerId) {
+        check(nativeDisconnect(ptr(), peerId), "disconnect " + peerId);
     }
 
-    /** @return hex ids of currently-connected peers; never null. */
+    /** @return the number of connected peers. */
+    public int peerCount() {
+        return (int) nativePeerCount(ptr());
+    }
+
+    /** @return the ids of the connected peers; never null. */
     public String[] peerIds() {
-        String[] ids = nativePeerIds(ptr());
-        return ids != null ? ids : new String[0];
+        return nativePeerIds(ptr());
     }
 
-    /** Caps established peers (0 = unlimited). May be called before or after start. */
-    public void setMaxPeers(long maxPeers) {
+    /** @return what is known about a connected peer, or null if it is not connected. */
+    public PeerInfo peerInfo(String peerId) {
+        PeerInfo[] out = new PeerInfo[1];
+        int code = nativePeerInfo(ptr(), peerId, out);
+        if (code == ErrorCode.NO_SUCH_PEER.code()) return null;
+        check(code, "peer info for " + peerId);
+        return out[0];
+    }
+
+    /** Caps established peers (0 = unlimited). Can be changed while running. */
+    public void setMaxPeers(int maxPeers) {
+        if (maxPeers < 0) throw new IllegalArgumentException("maxPeers must be >= 0");
         nativeSetMaxPeers(ptr(), maxPeers);
     }
 
-    /** @return the current established-peer cap (0 = unlimited). */
-    public long maxPeers() {
-        return nativeMaxPeers(ptr());
+    /** @return the established-peer cap (0 = unlimited). */
+    public int maxPeers() {
+        return (int) Math.min(nativeMaxPeers(ptr()), Integer.MAX_VALUE);
     }
 
-    /**
-     * @param peerId a connected peer
-     * @return which wire that peer's link runs on, or null if it is not connected
-     */
-    public Transport peerTransport(String peerId) {
-        int value = nativePeerTransport(ptr(), peerId);
-        return value < 0 ? null : Transport.fromValue(value);
-    }
+    // ===================== messaging =====================
 
-    /**
-     * The transports a connected peer advertised in its identify message.
-     *
-     * @param peerId a connected peer
-     * @return what it advertised, or null if it is not connected. An empty set
-     *         means the peer did not say (an older build) — "no information",
-     *         not "no transports".
-     */
-    public EnumSet<Transport> peerTransports(String peerId) {
-        int mask = nativePeerTransports(ptr(), peerId);
-        return mask < 0 ? null : Transport.fromMask(mask);
-    }
-
-    // ===================== raw channel messaging =====================
-
-    /** Sends raw bytes to one peer over a named channel, reliably. */
+    /** Sends bytes to one peer on a named channel, reliably. */
     public void send(String peerId, String channel, byte[] data) {
         send(peerId, channel, data, 0);
     }
 
     /**
-     * Sends raw bytes to one peer over a named channel.
+     * Sends bytes to one peer on a named channel.
      *
-     * <p>{@code lifetimeMs} 0 sends reliably: the message arrives whatever it
-     * takes, in order with the rest of this node's channel traffic. Anything else
-     * makes it a live message, worth delivering only within that many
-     * milliseconds (30000 at most): repaired while it can still arrive in time,
-     * dropped whole once it cannot, never delivered in part or twice, and ordered
-     * with nothing — number what you send if order matters. For video and audio
-     * frames. A live message carries at most 1 MiB. The receiver needs nothing:
-     * it arrives at the channel's {@link MessageCallback} like any other.</p>
+     * <p>{@code lifetimeMs} 0 is reliable: the message arrives, in order with
+     * everything else this node sends on its channels. Above 0 it is a live
+     * message, worth delivering only within that many ms (at most
+     * {@link #LIVE_MAX_LIFETIME_MS}): repaired while it can still arrive in time,
+     * dropped whole once it cannot, never delivered partly or twice, and ordered
+     * with nothing. Made for audio and video frames; at most
+     * {@link #LIVE_MAX_PAYLOAD} bytes. The receiver needs nothing special.</p>
      *
-     * @param lifetimeMs 0 for reliable, otherwise the live message's lifetime
-     * @throws IllegalArgumentException if {@code lifetimeMs} is negative
+     * <p>Returning means queued, not delivered. If you send in bulk, ask
+     * {@link #peerWritable(String)} after each send.</p>
+     *
+     * @throws RatsException {@link ErrorCode#NO_SUCH_PEER}, or
+     *         {@link ErrorCode#INVALID_ARG} for a live payload over the limit
      */
     public void send(String peerId, String channel, byte[] data, int lifetimeMs) {
         requireLifetime(lifetimeMs);
         check(nativeSend(ptr(), peerId, channel, data, lifetimeMs), "send on '" + channel + "'");
     }
 
-    /** Sends raw bytes over a named channel to every connected peer, reliably. */
+    /** Sends bytes on a named channel to every connected peer, reliably. */
     public void broadcast(String channel, byte[] data) {
         broadcast(channel, data, 0);
     }
 
-    /**
-     * Sends raw bytes over a named channel to every connected peer;
-     * {@code lifetimeMs} as for {@link #send(String, String, byte[], int)}.
-     *
-     * @throws IllegalArgumentException if {@code lifetimeMs} is negative
-     */
+    /** {@link #send(String, String, byte[], int)} to every connected peer. */
     public void broadcast(String channel, byte[] data, int lifetimeMs) {
         requireLifetime(lifetimeMs);
-        check(nativeBroadcast(ptr(), channel, data, lifetimeMs),
-              "broadcast on '" + channel + "'");
-    }
-
-    private static void requireLifetime(int lifetimeMs) {
-        if (lifetimeMs < 0) {
-            throw new IllegalArgumentException("lifetimeMs must be >= 0, got " + lifetimeMs);
-        }
+        check(nativeBroadcast(ptr(), channel, data, lifetimeMs), "broadcast on '" + channel + "'");
     }
 
     /**
-     * Whether this peer's send queue still has room; false too for a peer that is
-     * not connected.
-     *
-     * <p>{@link #send} returning normally only means the message was queued, never
-     * that it arrived — so if you send in bulk, this is how you learn you are
-     * outrunning the link. False means pause: what you just sent was queued like
-     * anything else and nothing was dropped, but keep piling on and the peer is
-     * dropped with {@code RATS_CLOSE_SLOW_CONSUMER}. Wait for
-     * {@link #onPeerWritable(PeerCallback)}, or poll this. It is not a size limit
-     * — one message of any size is always queued.</p>
+     * Whether the peer's send queue has room; false too for a peer that is not
+     * connected. False means stop: what you sent was queued, but keep adding and
+     * the peer is dropped with {@link CloseReason#SLOW_CONSUMER}. Resume on
+     * {@link #onPeerWritable(PeerCallback)}, or poll this from your own thread.
      */
     public boolean peerWritable(String peerId) {
         return nativePeerWritable(ptr(), peerId);
     }
 
     /**
-     * What the transport currently knows about the path to one peer — for a
-     * sender that sizes its own output to the path instead of letting the queue
-     * find the limit. Sampling runs only with {@link Config#pathSampleMs(int)} set
-     * or an {@link #onPeerPath(PathCallback)} callback registered.
+     * What the transport knows about the path to a peer, for a sender that sizes
+     * its output to it. Sampling runs only with {@link Config#pathSampleMs(int)}
+     * set or an {@link #onPeerPath(PathCallback)} callback registered.
      *
      * @return the latest sample, or null if the peer is not connected or nothing
-     *         has been sampled yet
-     * @throws RatsException with {@link ErrorCode#INVALID_ARG} for a malformed peer id
+     *         was sampled yet
      */
     public PathStats pathStats(String peerId) {
         PathStats[] out = new PathStats[1];
@@ -413,39 +446,36 @@ public class RatsNode implements AutoCloseable {
         return out[0];
     }
 
-    /** Registers an additive handler for a named channel. Call before start. */
+    // ===================== callbacks (before start; several may coexist) =====================
+
+    /** Messages on a named channel. */
     public void on(String channel, MessageCallback callback) {
         check(nativeOn(ptr(), channel, callback), "register handler for '" + channel + "'");
     }
 
-    // ===================== peer events (before start) =====================
-
-    /** Sets the peer-connected callback. Call before start. */
+    /** A peer connected. */
     public void onPeerConnected(PeerCallback callback) {
         check(nativeOnPeerConnected(ptr(), callback), "register peer-connected callback");
     }
 
-    /**
-     * Sets the peer-disconnected callback, which is told why the peer went.
-     * Call before start.
-     */
+    /** A peer disconnected, with the reason. */
     public void onPeerDisconnected(PeerDisconnectCallback callback) {
         check(nativeOnPeerDisconnected(ptr(), callback), "register peer-disconnected callback");
     }
 
-    /**
-     * Sets the callback fired when a peer whose send queue had filled past its
-     * mark has drained back under it — the other half of
-     * {@link #peerWritable(String)} returning false. Call before start.
-     */
+    /** A dial to a numeric address failed over every transport tried. */
+    public void onDialFailed(DialFailedCallback callback) {
+        check(nativeOnDialFailed(ptr(), callback), "register dial-failed callback");
+    }
+
+    /** A peer whose send queue had filled drained back under its mark. */
     public void onPeerWritable(PeerCallback callback) {
         check(nativeOnPeerWritable(ptr(), callback), "register peer-writable callback");
     }
 
     /**
-     * Sets the callback handed a path sample of every connected peer, every
-     * {@link Config#pathSampleMs(int)} (100 ms if 0). Registering one turns
-     * sampling on. Call before start.
+     * A path sample of every connected peer, every {@link Config#pathSampleMs(int)}
+     * (100 ms if 0). Registering one turns sampling on.
      */
     public void onPeerPath(PathCallback callback) {
         check(nativeOnPeerPath(ptr(), callback), "register peer-path callback");
@@ -454,412 +484,392 @@ public class RatsNode implements AutoCloseable {
     // ===================== discovery (enable before start) =====================
 
     /**
-     * Enables DHT discovery: announce on and search a key on the mainline DHT,
-     * dialing what it finds.
+     * Mainline DHT: announces and searches a key, dialing the peers found.
      *
-     * @param dhtPort      DHT port, or 0 for an ephemeral one
-     * @param discoveryKey app namespace; null uses the node's protocol, so only
-     *                     same-protocol peers discover each other
+     * @param dhtPort      0 for an ephemeral port
+     * @param discoveryKey null for the node's protocol, so only nodes that could
+     *                     handshake find each other
      */
     public void enableDht(int dhtPort, String discoveryKey) {
         check(nativeEnableDht(ptr(), dhtPort, discoveryKey), "enable DHT");
     }
 
-    /** Enables DHT discovery on an ephemeral port under the node's protocol. */
+    /** DHT on an ephemeral port, keyed by the protocol. */
     public void enableDht() {
         enableDht(0, null);
     }
 
-    /** Enables local-network mDNS discovery. Call before start. */
+    /** mDNS discovery on the local network. */
     public void enableMdns() {
         check(nativeEnableMdns(ptr()), "enable mDNS");
     }
 
-    // ===================== NAT traversal (enable before start) =====================
-
     /**
-     * Enables automatic NAT port forwarding for the listen port.
-     *
-     * @param enableUpnp   run the UPnP IGD backend
-     * @param enableNatpmp run the NAT-PMP backend
+     * Peer exchange: connected peers trade the addresses of peers they hold, so
+     * one contact is enough to find the rest of the mesh.
      */
-    public void enablePortMapping(boolean enableUpnp, boolean enableNatpmp) {
-        check(nativeEnablePortMapping(ptr(), enableUpnp, enableNatpmp), "enable port mapping");
+    public void enablePeerExchange() {
+        check(nativeEnablePeerExchange(ptr()), "enable peer exchange");
     }
 
-    /** Enables both port-mapping backends. */
+    // ===================== NAT traversal (enable before start) =====================
+
+    /** Asks the router to forward the listen port, over UPnP IGD and/or NAT-PMP. */
+    public void enablePortMapping(boolean upnp, boolean natpmp) {
+        check(nativeEnablePortMapping(ptr(), upnp, natpmp), "enable port mapping");
+    }
+
+    /** Port mapping over both UPnP IGD and NAT-PMP. */
     public void enablePortMapping() {
         enablePortMapping(true, true);
     }
 
     /**
-     * Enables UDP hole punching: reach a peer that no port forwarding made
-     * reachable, by arranging with a peer both sides already have that the two
-     * dial each other at the same moment. Both punching nodes must have it
-     * enabled, and so must the node that carries the rendezvous between them.
+     * UDP hole punching: reach a peer behind a NAT by having a peer both sides
+     * share arrange for the two to dial each other at the same moment. Every node
+     * involved needs it enabled.
      *
-     * @param serveAsRelay also carry other peers' rendezvous — a few dozen
-     *                     forwarded bytes per punch, only ever to peers this node
-     *                     already holds. A mesh in which nobody relays cannot
-     *                     punch at all.
+     * @param serveRendezvous also pass other peers' rendezvous along — a few dozen
+     *                        bytes per punch; a mesh where nobody does cannot punch
      */
-    public void enableHolePunch(boolean serveAsRelay) {
-        check(nativeEnableHolePunch(ptr(), serveAsRelay), "enable hole punching");
+    public void enableHolePunch(boolean serveRendezvous) {
+        check(nativeEnableHolePunch(ptr(), serveRendezvous), "enable hole punching");
     }
 
-    /** Enables hole punching and relays other peers' rendezvous. */
+    /** Hole punching, serving other peers' rendezvous too. */
     public void enableHolePunch() {
         enableHolePunch(true);
     }
 
     /**
-     * Tries to reach a peer by punching. Non-blocking: success arrives as an
-     * ordinary {@link #onPeerConnected(PeerCallback)}.
+     * Starts punching to a peer. Success arrives at
+     * {@link #onPeerConnected(PeerCallback)}.
      *
-     * @throws RatsException with {@link ErrorCode#NOT_ENABLED} if hole punching is
-     *         off, or {@link ErrorCode#NO_SUCH_PEER} when there is nothing to do
-     *         or nothing to try with — the peer is already connected, a punch to
-     *         it is already running, or this node does not yet know an external
-     *         endpoint of its own to advertise
+     * @throws RatsException {@link ErrorCode#DECLINED} if already connected,
+     *         already punching, or no external endpoint of our own is known yet
+     *         (that takes at least one UDP peer)
      */
     public void punchPeer(String peerId) {
         check(nativePunchPeer(ptr(), peerId), "punch to " + peerId);
     }
 
     /**
-     * Enables relaying: reaching a peer that neither port forwarding nor hole
-     * punching could make reachable, by routing the connection through a node both
-     * ends are already connected to. Call before start.
+     * Relaying: reach a peer nothing else can, through a node both ends are
+     * connected to. Encryption stays end to end; {@link #peerInfo(String)} reports
+     * {@link Transport#RELAY}. With hole punching enabled too, a punch that cannot
+     * work falls back to a relay by itself, and a relayed peer is upgraded to a
+     * direct connection when a later punch succeeds.
      *
-     * <p>The peer that comes out is ordinary in every way — the same end-to-end
-     * encryption, the same channels — except that {@link #peerTransport(String)}
-     * reports it as {@link Transport#RELAY}.</p>
-     *
-     * @param serveAsRelay also carry OTHER peers' connections. Unlike a hole-punch
-     *                     rendezvous this spends real bandwidth on somebody else's
-     *                     traffic, so it is off by default; a mesh in which nobody
-     *                     serves cannot relay at all.
+     * @param serve also carry OTHER peers' connections, which costs this node
+     *              their bandwidth
      */
-    public void enableRelay(boolean serveAsRelay) {
-        check(nativeEnableRelay(ptr(), serveAsRelay), "enable relaying");
+    public void enableRelay(boolean serve) {
+        check(nativeEnableRelay(ptr(), serve), "enable relaying");
     }
 
-    /** Enables relaying without carrying other peers' connections. */
+    /** Relaying for this node's own connections only. */
     public void enableRelay() {
         enableRelay(false);
     }
 
     /**
-     * Tries to reach a peer through a relay. Non-blocking: success arrives as an
-     * ordinary {@link #onPeerConnected(PeerCallback)}. Usually unnecessary: with
-     * hole punching enabled too, a punch that cannot work hands the target over by
-     * itself.
+     * Starts a relayed connection to a peer. Success arrives at
+     * {@link #onPeerConnected(PeerCallback)}.
      *
-     * @throws RatsException with {@link ErrorCode#NOT_ENABLED} if relaying is off,
-     *         or {@link ErrorCode#NO_SUCH_PEER} when there is nothing to do or
-     *         nothing to try with — the peer is already connected, an attempt is
-     *         already running, it is in cooldown, or this node has no peer that
-     *         could carry the connection
+     * @throws RatsException {@link ErrorCode#DECLINED} if already connected,
+     *         already trying or cooling down, or no connected peer can carry it
      */
     public void connectViaRelay(String peerId) {
         check(nativeConnectViaRelay(ptr(), peerId), "relay to " + peerId);
     }
 
-    /** @return what the mesh has shown about this node's own NAT. */
-    public NatMapping natMapping() {
-        return NatMapping.fromValue(nativeNatMapping(ptr()));
-    }
+    // ===================== pub/sub =====================
 
-    // ===================== pub/sub (enable before start) =====================
-
-    /** Enables the pub/sub (GossipSub) subsystem. Call before start. */
+    /** GossipSub pub/sub. Enable before start. */
     public void enablePubsub() {
         check(nativeEnablePubsub(ptr()), "enable pub/sub");
     }
 
-    /** Subscribes to a topic. Call before start. */
+    /** Subscribes to a topic; a second subscribe to the same topic replaces the handler. */
     public void subscribe(String topic, TopicCallback callback) {
         check(nativeSubscribe(ptr(), topic, callback), "subscribe to '" + topic + "'");
     }
 
-    /** Unsubscribes from a topic. */
+    /** Drops the subscription and its handler. */
     public void unsubscribe(String topic) {
         check(nativeUnsubscribe(ptr(), topic), "unsubscribe from '" + topic + "'");
     }
 
-    /** Publishes raw bytes to a topic. */
+    /** Publishes to every subscriber of the topic. */
     public void publish(String topic, byte[] data) {
         check(nativePublish(ptr(), topic, data), "publish to '" + topic + "'");
     }
 
-    // ===================== typed JSON messaging (enable before start) =====================
+    // ===================== JSON messaging =====================
 
-    /** Enables the typed-JSON messaging subsystem. Call before start. */
+    /** Typed messages carrying a JSON document. Enable before start. */
     public void enableJson() {
         check(nativeEnableJson(ptr()), "enable JSON messaging");
     }
 
-    /** Registers an additive handler for JSON messages of {@code type}. */
+    /** Adds a handler for messages of {@code type}. May be called while running. */
     public void onJson(String type, JsonCallback callback) {
         check(nativeOnJson(ptr(), type, callback), "register JSON handler '" + type + "'");
     }
 
-    /** Like {@link #onJson}, but the handler is removed after it fires once. */
+    /** Like {@link #onJson}; the handler is removed after its first message. */
     public void onceJson(String type, JsonCallback callback) {
         check(nativeOnceJson(ptr(), type, callback), "register one-shot JSON handler '" + type + "'");
     }
 
-    /** Removes the handlers for JSON messages of {@code type}. */
+    /** Removes every handler of {@code type}. */
     public void offJson(String type) {
-        check(nativeOffJson(ptr(), type), "remove JSON handler '" + type + "'");
+        check(nativeOffJson(ptr(), type), "remove JSON handlers '" + type + "'");
     }
 
-    /** Sends a typed JSON message to a peer. {@code json} must be valid JSON text. */
+    /** @throws RatsException {@link ErrorCode#INVALID_ARG} if {@code json} is not valid JSON */
     public void sendJson(String peerId, String type, String json) {
         check(nativeSendJson(ptr(), peerId, type, json), "send JSON '" + type + "'");
     }
 
-    /** Broadcasts a typed JSON message. {@code json} must be valid JSON text. */
+    /** @throws RatsException {@link ErrorCode#INVALID_ARG} if {@code json} is not valid JSON */
     public void broadcastJson(String type, String json) {
         check(nativeBroadcastJson(ptr(), type, json), "broadcast JSON '" + type + "'");
     }
 
-    // ===================== file transfer (enable before start) =====================
+    // ===================== file transfer =====================
 
     /**
-     * Enables the file-transfer subsystem. Call before start.
+     * File transfer: the sender offers, the receiver accepts. Enable before start.
      *
-     * @param tempDir directory holding in-progress downloads; null = current dir
+     * @param tempDir where partial downloads live; null for the working directory
      */
     public void enableFileTransfer(String tempDir) {
         check(nativeEnableFileTransfer(ptr(), tempDir), "enable file transfer");
     }
 
-    /** Sets the incoming-offer callback. Call before start. */
+    /** Sets the offer handler (one; a second call replaces it). Before start. */
     public void onFileOffer(FileOfferCallback callback) {
         check(nativeOnFileOffer(ptr(), callback), "register file-offer callback");
     }
 
-    /** Sets the transfer-progress callback. Call before start. */
+    /** Sets the progress handler (one; a second call replaces it). Before start. */
     public void onFileProgress(FileProgressCallback callback) {
         check(nativeOnFileProgress(ptr(), callback), "register file-progress callback");
     }
 
-    /** Sets the transfer-complete callback. Call before start. */
+    /** Sets the completion handler (one; a second call replaces it). Before start. */
     public void onFileComplete(FileCompleteCallback callback) {
         check(nativeOnFileComplete(ptr(), callback), "register file-complete callback");
     }
 
     /**
-     * Offers a file to a peer.
+     * Offers a file to a connected peer.
      *
-     * @return the transfer id, or 0 if the offer was refused outright (subsystem
-     *         off, or unknown peer)
+     * @return the transfer id
+     * @throws RatsException {@link ErrorCode#NO_SUCH_PEER} if the peer is not
+     *         connected, {@link ErrorCode#NOT_FOUND} if the file cannot be read
      */
     public long sendFile(String peerId, String path) {
-        return nativeSendFile(ptr(), peerId, path);
+        long[] id = new long[1];
+        check(nativeSendFile(ptr(), peerId, path, id), "send file");
+        return id[0];
+    }
+
+    /** Offers a directory tree; returns and throws as {@link #sendFile}. */
+    public long sendDirectory(String peerId, String path) {
+        long[] id = new long[1];
+        check(nativeSendDirectory(ptr(), peerId, path, id), "send directory");
+        return id[0];
     }
 
     /**
-     * Offers a directory tree to a peer.
+     * Accepts an offer.
      *
-     * @return the transfer id, or 0 if the offer was refused outright
-     */
-    public long sendDirectory(String peerId, String dirPath) {
-        return nativeSendDirectory(ptr(), peerId, dirPath);
-    }
-
-    /**
-     * Accepts an offered transfer.
-     *
-     * @param destPath the file path for a single file, else the destination directory
+     * @param destPath the file to write for a file, the directory to fill for a directory
      */
     public void acceptFile(String peerId, long transferId, String destPath) {
         check(nativeAcceptFile(ptr(), peerId, transferId, destPath), "accept transfer " + transferId);
     }
 
-    /** Rejects an offered transfer. */
+    /** Declines an offer. */
     public void rejectFile(String peerId, long transferId) {
         check(nativeRejectFile(ptr(), peerId, transferId), "reject transfer " + transferId);
     }
 
-    /** Cancels a live transfer (either side). */
+    /** From either side. @throws RatsException {@link ErrorCode#NOT_FOUND} for no such transfer */
     public void cancelFile(String peerId, long transferId) {
         check(nativeCancelFile(ptr(), peerId, transferId), "cancel transfer " + transferId);
     }
 
-    /** Pauses a live transfer (either side). */
+    /** From either side. @throws RatsException {@link ErrorCode#NOT_FOUND} for no such transfer */
     public void pauseFile(String peerId, long transferId) {
         check(nativePauseFile(ptr(), peerId, transferId), "pause transfer " + transferId);
     }
 
-    /** Resumes a paused transfer (either side). */
+    /** From either side. @throws RatsException {@link ErrorCode#NOT_FOUND} for no such transfer */
     public void resumeFile(String peerId, long transferId) {
         check(nativeResumeFile(ptr(), peerId, transferId), "resume transfer " + transferId);
     }
 
-    // ===================== liveness / reconnection (enable before start) =====================
+    // ===================== ping and reconnection =====================
 
-    /** Enables periodic ping/pong RTT probing of every peer. Call before start. */
+    /** Round-trip probing of every peer. Enable before start. */
     public void enablePing() {
         check(nativeEnablePing(ptr()), "enable ping");
     }
 
-    /**
-     * @return the last measured round-trip time to a peer in milliseconds, or -1
-     *         if unknown (ping not enabled, or no pong received yet)
-     */
+    /** @return the last round trip to a peer in ms, or -1 if unknown */
     public long peerRttMs(String peerId) {
         return nativePeerRttMs(ptr(), peerId);
     }
 
     /**
-     * Enables the reconnection subsystem: re-dials dropped peers with exponential
-     * backoff. Dialed peers are remembered automatically; with a
-     * {@link Config#dataDir(String)} set, targets persist across restarts.
+     * Redials dropped peers with exponential backoff. Every address dialed is
+     * remembered; with {@link Config#dataDir(String)} the list survives restarts.
+     * Enable before start — without it a node never redials on its own.
      */
     public void enableReconnect() {
         check(nativeEnableReconnect(ptr()), "enable reconnect");
     }
 
-    /** Adds an address to keep connected (re-dialed on drop). */
+    /** Keeps an address connected. May be called while running. */
     public void addReconnect(String host, int port) {
         check(nativeAddReconnect(ptr(), host, port), "add reconnect target " + host + ":" + port);
     }
 
-    /** Stops reconnecting to an address and drops it from the store. */
+    /** Stops keeping an address connected and forgets it. */
     public void removeReconnect(String host, int port) {
         check(nativeRemoveReconnect(ptr(), host, port), "remove reconnect target " + host + ":" + port);
     }
 
-    // ===================== process-global helpers =====================
+    // ===================== process-wide =====================
 
-    /** Sets the process-global log verbosity. */
+    /** Sets the process-wide log verbosity. */
     public static void setLogLevel(LogLevel level) {
         nativeSetLogLevel(level.value());
     }
 
-    /** Mirrors logs to a file; null or empty disables file logging. */
+    /** Also writes logs to {@code path}; null or empty stops file logging. */
     public static void setLogFile(String path) {
         nativeSetLogFile(path);
     }
 
-    /** @return the library version as a string, e.g. {@code "1.2.3"}. */
+    /** @return the library version, e.g. {@code "1.2.3"} */
     public static String version() {
         return nativeVersionString();
     }
 
-    /** @return the version components as {@code [major, minor, patch, build]}. */
+    /** @return {@code [major, minor, patch, build]} */
     public static int[] versionInfo() {
         return nativeVersion();
     }
 
-    /** @return git describe of the build, e.g. {@code "v1.2.3-4-gabcdef"}. */
+    /** @return {@code git describe} of the build */
     public static String gitDescribe() {
         return nativeGitDescribe();
     }
 
-    /** @return the packed ABI id, {@code (major << 16) | (minor << 8) | patch}. */
+    /** @return {@code (major << 16) | (minor << 8) | patch} */
     public static int abi() {
         return nativeAbi();
     }
 
     // ===================== internals =====================
 
-    /**
-     * The native handle, refusing to hand out one that has been released. The C
-     * ABI does not null-check its handle, so a call after {@link #close()} would
-     * be a crash rather than an exception.
-     */
+    /** The native handle; the C ABI does not check it, so a closed node must fail here. */
     private long ptr() {
-        if (nativePtr == 0) {
-            throw new RatsException("This node has been closed");
-        }
-        return nativePtr;
+        long p = nativePtr;
+        if (p == 0) throw new RatsException("This node has been closed");
+        return p;
     }
 
-    /** Turns a non-OK {@code rats_error_t} into a {@link RatsException}. */
     private static void check(int code, String operation) {
-        if (code != 0) {
-            throw new RatsException(ErrorCode.fromCode(code), operation);
-        }
+        if (code != 0) throw new RatsException(ErrorCode.fromCode(code), operation);
     }
 
-    // ===================== native declarations =====================
+    private static void requireLifetime(int lifetimeMs) {
+        if (lifetimeMs < 0) throw new IllegalArgumentException("lifetimeMs must be >= 0, got " + lifetimeMs);
+    }
 
-    private native long nativeCreateConfig(int listenPort, boolean enableListen, String bindAddress,
-                                           int security, String dataDir, String protocol,
-                                           long maxPeers, boolean enableTcp, boolean enableUdp,
-                                           int preferredTransport, int transportFallbackMs,
-                                           int pathSampleMs);
-    private native void nativeDestroy(long ptr);
-    private native int nativeStart(long ptr);
-    private native void nativeStop(long ptr);
+    @Override
+    public String toString() {
+        return "RatsNode{" + localId + (nativePtr == 0 ? ", closed" : "") + "}";
+    }
 
-    private native int nativeListenPort(long ptr);
-    private native String nativeLocalId(long ptr);
-    private native String nativeProtocol(long ptr);
-    private native int nativeTransports(long ptr);
+    // ===================== native =====================
 
-    private native int nativeConnect(long ptr, String host, int port);
-    private native long nativePeerCount(long ptr);
-    private native String[] nativePeerIds(long ptr);
-    private native void nativeSetMaxPeers(long ptr, long maxPeers);
-    private native long nativeMaxPeers(long ptr);
-    private native int nativePeerTransport(long ptr, String peerId);
-    private native int nativePeerTransports(long ptr, String peerId);
+    private static native long nativeCreate(Config config);
+    private static native void nativeDestroy(long ptr);
+    private static native int nativeStart(long ptr);
+    private static native void nativeStop(long ptr);
 
-    private native int nativeSend(long ptr, String peerId, String channel, byte[] data,
-                                  int lifetimeMs);
-    private native int nativeBroadcast(long ptr, String channel, byte[] data, int lifetimeMs);
-    private native boolean nativePeerWritable(long ptr, String peerId);
-    private native int nativePathStats(long ptr, String peerId, PathStats[] out);
-    private native int nativeOn(long ptr, String channel, MessageCallback callback);
+    private static native String nativeLocalId(long ptr);
+    private static native String nativeProtocol(long ptr);
+    private static native int nativeListenPort(long ptr);
+    private static native int nativeTransports(long ptr);
+    private static native int nativeNatMapping(long ptr);
+    private static native String[] nativeObservedAddresses(long ptr);
 
-    private native int nativeOnPeerConnected(long ptr, PeerCallback callback);
-    private native int nativeOnPeerDisconnected(long ptr, PeerDisconnectCallback callback);
-    private native int nativeOnPeerWritable(long ptr, PeerCallback callback);
-    private native int nativeOnPeerPath(long ptr, PathCallback callback);
+    private static native int nativeConnect(long ptr, String host, int port);
+    private static native int nativeDisconnect(long ptr, String peerId);
+    private static native long nativePeerCount(long ptr);
+    private static native String[] nativePeerIds(long ptr);
+    private static native int nativePeerInfo(long ptr, String peerId, PeerInfo[] out);
+    private static native void nativeSetMaxPeers(long ptr, long maxPeers);
+    private static native long nativeMaxPeers(long ptr);
 
-    private native int nativeEnableDht(long ptr, int dhtPort, String discoveryKey);
-    private native int nativeEnableMdns(long ptr);
-    private native int nativeEnablePortMapping(long ptr, boolean enableUpnp, boolean enableNatpmp);
-    private native int nativeEnableHolePunch(long ptr, boolean serveAsRelay);
-    private native int nativePunchPeer(long ptr, String peerId);
-    private native int nativeEnableRelay(long ptr, boolean serveAsRelay);
-    private native int nativeConnectViaRelay(long ptr, String peerId);
-    private native int nativeNatMapping(long ptr);
+    private static native int nativeSend(long ptr, String peerId, String channel, byte[] data, int lifetimeMs);
+    private static native int nativeBroadcast(long ptr, String channel, byte[] data, int lifetimeMs);
+    private static native boolean nativePeerWritable(long ptr, String peerId);
+    private static native int nativePathStats(long ptr, String peerId, PathStats[] out);
 
-    private native int nativeEnablePubsub(long ptr);
-    private native int nativeSubscribe(long ptr, String topic, TopicCallback callback);
-    private native int nativeUnsubscribe(long ptr, String topic);
-    private native int nativePublish(long ptr, String topic, byte[] data);
+    private static native int nativeOn(long ptr, String channel, MessageCallback callback);
+    private static native int nativeOnPeerConnected(long ptr, PeerCallback callback);
+    private static native int nativeOnPeerDisconnected(long ptr, PeerDisconnectCallback callback);
+    private static native int nativeOnDialFailed(long ptr, DialFailedCallback callback);
+    private static native int nativeOnPeerWritable(long ptr, PeerCallback callback);
+    private static native int nativeOnPeerPath(long ptr, PathCallback callback);
 
-    private native int nativeEnableJson(long ptr);
-    private native int nativeOnJson(long ptr, String type, JsonCallback callback);
-    private native int nativeOnceJson(long ptr, String type, JsonCallback callback);
-    private native int nativeOffJson(long ptr, String type);
-    private native int nativeSendJson(long ptr, String peerId, String type, String json);
-    private native int nativeBroadcastJson(long ptr, String type, String json);
+    private static native int nativeEnableDht(long ptr, int dhtPort, String discoveryKey);
+    private static native int nativeEnableMdns(long ptr);
+    private static native int nativeEnablePeerExchange(long ptr);
 
-    private native int nativeEnableFileTransfer(long ptr, String tempDir);
-    private native int nativeOnFileOffer(long ptr, FileOfferCallback callback);
-    private native int nativeOnFileProgress(long ptr, FileProgressCallback callback);
-    private native int nativeOnFileComplete(long ptr, FileCompleteCallback callback);
-    private native long nativeSendFile(long ptr, String peerId, String path);
-    private native long nativeSendDirectory(long ptr, String peerId, String dirPath);
-    private native int nativeAcceptFile(long ptr, String peerId, long transferId, String destPath);
-    private native int nativeRejectFile(long ptr, String peerId, long transferId);
-    private native int nativeCancelFile(long ptr, String peerId, long transferId);
-    private native int nativePauseFile(long ptr, String peerId, long transferId);
-    private native int nativeResumeFile(long ptr, String peerId, long transferId);
+    private static native int nativeEnablePortMapping(long ptr, boolean upnp, boolean natpmp);
+    private static native int nativeEnableHolePunch(long ptr, boolean serveRendezvous);
+    private static native int nativePunchPeer(long ptr, String peerId);
+    private static native int nativeEnableRelay(long ptr, boolean serve);
+    private static native int nativeConnectViaRelay(long ptr, String peerId);
 
-    private native int nativeEnablePing(long ptr);
-    private native long nativePeerRttMs(long ptr, String peerId);
+    private static native int nativeEnablePubsub(long ptr);
+    private static native int nativeSubscribe(long ptr, String topic, TopicCallback callback);
+    private static native int nativeUnsubscribe(long ptr, String topic);
+    private static native int nativePublish(long ptr, String topic, byte[] data);
 
-    private native int nativeEnableReconnect(long ptr);
-    private native int nativeAddReconnect(long ptr, String host, int port);
-    private native int nativeRemoveReconnect(long ptr, String host, int port);
+    private static native int nativeEnableJson(long ptr);
+    private static native int nativeOnJson(long ptr, String type, JsonCallback callback);
+    private static native int nativeOnceJson(long ptr, String type, JsonCallback callback);
+    private static native int nativeOffJson(long ptr, String type);
+    private static native int nativeSendJson(long ptr, String peerId, String type, String json);
+    private static native int nativeBroadcastJson(long ptr, String type, String json);
+
+    private static native int nativeEnableFileTransfer(long ptr, String tempDir);
+    private static native int nativeOnFileOffer(long ptr, FileOfferCallback callback);
+    private static native int nativeOnFileProgress(long ptr, FileProgressCallback callback);
+    private static native int nativeOnFileComplete(long ptr, FileCompleteCallback callback);
+    private static native int nativeSendFile(long ptr, String peerId, String path, long[] transferId);
+    private static native int nativeSendDirectory(long ptr, String peerId, String path, long[] transferId);
+    private static native int nativeAcceptFile(long ptr, String peerId, long transferId, String destPath);
+    private static native int nativeRejectFile(long ptr, String peerId, long transferId);
+    private static native int nativeCancelFile(long ptr, String peerId, long transferId);
+    private static native int nativePauseFile(long ptr, String peerId, long transferId);
+    private static native int nativeResumeFile(long ptr, String peerId, long transferId);
+
+    private static native int nativeEnablePing(long ptr);
+    private static native long nativePeerRttMs(long ptr, String peerId);
+    private static native int nativeEnableReconnect(long ptr);
+    private static native int nativeAddReconnect(long ptr, String host, int port);
+    private static native int nativeRemoveReconnect(long ptr, String host, int port);
 
     private static native void nativeSetLogLevel(int level);
     private static native void nativeSetLogFile(String path);

@@ -2,27 +2,34 @@
 
 /**
  * @file rats.h
- * @brief The canonical C ABI over Node — the foundation for all language bindings.
+ * @brief The C ABI over Node — what every language binding is built on.
  *
- * Opaque-pointer style. A `rats_t` wraps a C++ Node. Strings returned by the
- * library (e.g. peer ids) are heap-allocated and must be released with
- * rats_string_free(). Peer ids are 64-char lowercase hex of the peer's
- * self-certifying PeerId.
+ * A `rats_t` is an opaque handle to one node. Peer ids cross the ABI as 64-char
+ * lowercase hex of the peer's self-certifying PeerId.
  *
- * Error model: fallible operations return a `rats_error_t` (RATS_OK == 0 on
- * success). Pure getters return their value directly. Use rats_error_str() for a
- * static human-readable name. Delivery of messages is asynchronous and
- * best-effort: a RATS_OK from rats_send()/rats_publish() means the request was
- * accepted and queued, not that a peer received it.
+ * Configuration: `rats_config_t` is zero-initialisable — every field's zero is
+ * the library default — so `rats_config_t cfg = {0};` (or a designated
+ * initialiser naming only what you change) is a complete config, and
+ * rats_create(NULL) is a node with all defaults.
  *
- * Subsystems are explicit and opt-in: discovery, pub/sub, typed messaging, file
- * transfer and ping must each be turned on with the matching rats_enable_*()
- * BEFORE rats_start(). Calling a subsystem function before its enable returns
- * RATS_ERR_NOT_ENABLED; calling an enable after start returns
- * RATS_ERR_ALREADY_STARTED.
+ * Errors: a fallible call returns `rats_error_t`, RATS_OK (0) on success;
+ * rats_error_str() names a code. Sending is asynchronous: RATS_OK from
+ * rats_send()/rats_publish() means the message was queued, not that it arrived.
  *
- * Threading: callbacks fire on an internal reactor thread — do not block in them.
- * Register callbacks and enable subsystems BEFORE rats_start().
+ * Subsystems are opt-in. Discovery, NAT traversal, pub/sub, JSON messaging, file
+ * transfer, ping and reconnection each need their rats_enable_*() BEFORE
+ * rats_start(). Using one that was not enabled returns RATS_ERR_NOT_ENABLED;
+ * enabling after start returns RATS_ERR_ALREADY_STARTED.
+ *
+ * Threading: every call may be made from any thread. Callbacks run on an
+ * internal reactor thread — keep them short and never block in them. Register
+ * them before rats_start(); the node-level ones refuse afterwards
+ * (RATS_ERR_ALREADY_STARTED). Strings and structs handed to a callback are valid
+ * only for the duration of the call.
+ *
+ * Memory: the string arrays rats_peer_ids() and rats_observed_addresses()
+ * return are released with rats_strings_free(). Every `const char*` the library
+ * returns is its own and must not be freed.
  */
 
 #include "librats/util/rats_export.h"
@@ -34,488 +41,93 @@
 extern "C" {
 #endif
 
-typedef void* rats_t;
+typedef struct rats_node* rats_t;
+
+/* ─── Results ─────────────────────────────────────────────────────────────── */
 
 typedef enum {
-    RATS_SECURITY_NOISE     = 0,  /* Noise XX, encrypted + authenticated (default) */
-    RATS_SECURITY_PLAINTEXT = 1   /* unencrypted, ids exchanged in the clear */
+    RATS_OK                  = 0,
+    RATS_ERR_INVALID_ARG     = 1,  /* NULL or malformed argument (bad peer id, bad JSON, …) */
+    RATS_ERR_NOT_STARTED     = 2,  /* the call needs a started node */
+    RATS_ERR_ALREADY_STARTED = 3,  /* only allowed before rats_start() */
+    RATS_ERR_NOT_ENABLED     = 4,  /* the subsystem was not enabled with its rats_enable_*() */
+    RATS_ERR_NO_SUCH_PEER    = 5,  /* the peer is not connected */
+    RATS_ERR_NOT_FOUND       = 6,  /* no such transfer (or other named object) */
+    RATS_ERR_DECLINED        = 7,  /* nothing to do or nothing to try with: the peer is
+                                    * already connected, an attempt is already running
+                                    * or cooling down, or no peer can help */
+    RATS_ERR_BIND            = 8,  /* rats_start() could not open its sockets */
+    RATS_ERR_INTERNAL        = 9
+} rats_error_t;
+
+/** Static name of an error code, e.g. "RATS_ERR_NO_SUCH_PEER" (never NULL). */
+RATS_API const char* rats_error_str(rats_error_t err);
+
+/* ─── Enumerations ────────────────────────────────────────────────────────── */
+
+typedef enum {
+    RATS_SECURITY_NOISE     = 0,  /* Noise XX: encrypted and authenticated (default) */
+    RATS_SECURITY_PLAINTEXT = 1   /* no encryption; ids exchanged in the clear */
 } rats_security_t;
 
-/* Which wire a peer connection runs on. Both carry the identical protocol and
- * the identical encrypted handshake; they differ only in how the ordered,
- * reliable byte stream underneath is obtained. */
+/* Which wire a peer connection runs on. UDP and TCP carry the same protocol
+ * under the same encrypted handshake. */
 typedef enum {
-    RATS_TRANSPORT_TCP   = 0,  /* one kernel socket per peer */
-    RATS_TRANSPORT_UDP   = 1,  /* reliable stream over the shared UDP socket */
-    /* Carried inside another peer's connection (see rats_enable_relay). Reported
-       by rats_peer_transport(); never a value to put in preferred_transport,
-       which chooses what a DIAL tries and a relay is never dialed. */
+    RATS_TRANSPORT_UDP   = 0,  /* the library's own transport on one shared UDP socket */
+    RATS_TRANSPORT_TCP   = 1,  /* one kernel socket per peer */
+    /* Carried through another peer's connection (rats_enable_relay). Only ever
+     * reported, never chosen: a relay is not something a dial can try. */
     RATS_TRANSPORT_RELAY = 2
 } rats_transport_t;
 
-/* Congestion controller every datagram (UDP) stream runs; TCP is governed by the
- * kernel and ignores this. BBR holds its rate on links that lose packets for
- * reasons other than congestion (Wi-Fi, mobile, long hops) and keeps the queue
- * it builds at the bottleneck short; Reno backs off on every loss. Zero is BBR,
- * so a zeroed config gets the default. */
+/* Bitmask of transports (rats_config_t::transports, rats_transports(),
+ * rats_peer_info_t::transports). */
+#define RATS_TRANSPORT_MASK_TCP 0x1u
+#define RATS_TRANSPORT_MASK_UDP 0x2u
+
+/* Congestion controller of every UDP connection. TCP is the kernel's and
+ * ignores it. */
 typedef enum {
-    RATS_CONGESTION_BBR  = 0,  /* BBRv3 (default) */
-    RATS_CONGESTION_RENO = 1   /* NewReno with HyStart++ */
+    RATS_CONGESTION_BBR  = 0,  /* BBRv3 (default): holds its rate through loss that is
+                                * not congestion (Wi-Fi, mobile, long paths) */
+    RATS_CONGESTION_RENO = 1   /* NewReno with HyStart++: backs off on every loss */
 } rats_congestion_t;
 
-/* Why a peer connection ended, handed to rats_on_peer_disconnected(). The
- * reason is what tells "I was sending too fast" apart from "the peer left" —
- * without it both look the same and the usual answer to either is to reconnect
- * and repeat whatever caused it. Use rats_close_reason_str() for a name. */
 typedef enum {
-    RATS_CLOSE_LOCAL            = 0,  /* we asked to disconnect */
+    RATS_DIRECTION_OUTBOUND = 0,  /* we dialed it */
+    RATS_DIRECTION_INBOUND  = 1   /* it dialed us */
+} rats_direction_t;
+
+/* Why a peer connection ended (rats_on_peer_disconnected). */
+typedef enum {
+    RATS_CLOSE_LOCAL            = 0,  /* we disconnected it */
     RATS_CLOSE_PEER_CLOSED      = 1,  /* the peer closed cleanly */
     RATS_CLOSE_PEER_RESET       = 2,  /* connection reset / socket error */
     RATS_CLOSE_CONNECT_FAILED   = 3,  /* the dial never completed */
     RATS_CLOSE_HANDSHAKE_FAILED = 4,  /* secure handshake failed or timed out */
-    RATS_CLOSE_PROTOCOL_ERROR   = 5,  /* malformed frame / decryption failure */
-    /* We kept sending while this peer's queue was already past its limit. THE
-     * ONE REASON THE APPLICATION CAN PREVENT: heed rats_send()'s answer and
-     * rats_peer_writable(), and wait for the writable callback. It does NOT mean
-     * a single message was too big — one message is always accepted whatever its
-     * size; only piling more on a full queue gets a peer dropped. */
+    RATS_CLOSE_PROTOCOL_ERROR   = 5,  /* malformed frame or decryption failure */
+    /* We kept sending while the peer's queue was already past its limit. The one
+     * reason the application causes and can prevent: stop when rats_send() is
+     * followed by rats_peer_writable() == 0 and resume on rats_on_peer_writable().
+     * It never means one message was too big — a message of any size is queued. */
     RATS_CLOSE_SLOW_CONSUMER    = 6,
     RATS_CLOSE_SHUTDOWN         = 7,  /* the node is stopping */
-    RATS_CLOSE_DUPLICATE        = 8,  /* superseded by another link to the same peer */
-    RATS_CLOSE_PEER_LIMIT       = 9,  /* inbound refused: peer limit reached */
-    RATS_CLOSE_IDLE_TIMEOUT     = 10, /* datagram link went silent */
-    RATS_CLOSE_DIAL_SUPERSEDED  = 11  /* a racing dial over the other transport won */
+    RATS_CLOSE_DUPLICATE        = 8,  /* replaced by another connection to the same peer */
+    RATS_CLOSE_PEER_LIMIT       = 9,  /* inbound refused: max_peers reached */
+    RATS_CLOSE_IDLE_TIMEOUT     = 10, /* a UDP connection went silent */
+    RATS_CLOSE_DIAL_SUPERSEDED  = 11  /* a dial racing over the other transport won */
 } rats_close_reason_t;
 
-/** Static human-readable name for a close reason (never NULL, never freed). */
+/** Static name of a close reason, e.g. "RATS_CLOSE_SLOW_CONSUMER" (never NULL). */
 RATS_API const char* rats_close_reason_str(rats_close_reason_t reason);
 
-/* Bitmask of transports (see rats_transports / rats_peer_transports). */
-#define RATS_TRANSPORT_MASK_TCP 0x1u
-#define RATS_TRANSPORT_MASK_UDP 0x2u
-
-/* Result of a fallible operation. RATS_OK is 0; any non-zero value is an error.
- * NOTE: this inverts the truthiness of the old int-returning calls — test against
- * RATS_OK, not against zero/non-zero, e.g. `if (rats_start(n) != RATS_OK) …`. */
+/* What the mesh has shown about this node's own NAT (rats_nat_mapping). */
 typedef enum {
-    RATS_OK                  = 0,
-    RATS_ERR_INVALID_ARG     = 1,  /* null/malformed argument (bad peer id, null ptr, bad json) */
-    RATS_ERR_NOT_STARTED     = 2,  /* operation requires a started node */
-    RATS_ERR_ALREADY_STARTED = 3,  /* enable/attach called after rats_start() */
-    RATS_ERR_NOT_ENABLED     = 4,  /* subsystem not enabled — call the matching rats_enable_* */
-    RATS_ERR_NO_SUCH_PEER    = 5,  /* peer not connected, or transfer id not found */
-    RATS_ERR_BIND            = 6,  /* listen/bind failed during rats_start() */
-    RATS_ERR_INTERNAL        = 7
-} rats_error_t;
-
-/** Static human-readable name of an error code (do not free). */
-RATS_API const char* rats_error_str(rats_error_t err);
-
-/* — construction / lifecycle — */
-
-/** Full node configuration. Obtain a sane-defaults instance with
- *  rats_config_default(), set the fields you care about, then pass it to
- *  rats_create_config(). Zero-initialising this struct yourself is NOT safe
- *  (enable_listen would be 0 → a dial-only node); always start from the default.
- *  String fields are borrowed only for the duration of the create call; NULL on
- *  any of them selects the library default shown below. */
-typedef struct {
-    uint16_t        listen_port;      /* inbound port; 0 = ephemeral */
-    int             enable_listen;    /* 0 = dial-only node (no listener) */
-    const char*     bind_address;     /* NULL → "::" dual-stack wildcard */
-    rats_security_t security;         /* RATS_SECURITY_NOISE / _PLAINTEXT */
-    const char*     data_dir;         /* persistent state dir; NULL/"" → ephemeral identity each run */
-    const char*     protocol;         /* handshake app id (e.g. "myapp/1.0"); NULL → "librats/1.0" */
-    size_t          max_peers;        /* established-peer cap; 0 = unlimited */
-
-    /* Transports. Both are enabled by default and bind the SAME port, so one
-     * advertised address is dialable either way. */
-    int              enable_tcp;              /* accept and dial over TCP (default 1) */
-    int              enable_udp;              /* accept and dial over UDP (default 1) */
-    /* Both zero means "both enabled", not "neither": a node with no transport can
-     * neither dial nor accept, so nobody asks for one on purpose — while zeroed
-     * memory (rats_config_t cfg = {0};) asks for it by accident. Prefer
-     * rats_config_default() and change what you need. */
-    rats_transport_t preferred_transport;     /* tried first when dialing (default UDP) */
-    uint32_t         transport_fallback_ms;   /* delay before racing the other transport;
-                                               * 0 = never fall back (default 1200) */
-
-    /* Bytes a peer's send queue may hold before an application that keeps sending
-     * anyway has that peer dropped with RATS_CLOSE_SLOW_CONSUMER. 0 = the library
-     * default (8 MiB). A quarter of it is where rats_peer_writable() starts
-     * answering 0, so lowering this makes an application feel backpressure sooner.
-     * It is NOT a maximum message size: one message is always queued whatever its
-     * size. */
-    size_t           send_queue_limit;
-
-    /* Congestion controller of every UDP connection (default RATS_CONGESTION_BBR). */
-    rats_congestion_t congestion_control;
-
-    /* Bytes one UDP connection's flow-control window may grow to: the ceiling,
-     * reached while the window turns out too small for the path (every connection
-     * starts at 1 MiB). The window bounds throughput at window / round trip.
-     * 0 = the library default (16 MiB, ~1.3 Gbit/s at 100 ms). */
-    size_t           udp_receive_window;
-    /* Bytes all UDP connections together may hold out of order — what peers can
-     * make this node buffer however many there are. 0 = the library default (64 MiB). */
-    size_t           udp_receive_budget;
-
-    /* How often each connected peer's path is sampled for rats_path_stats() and
-     * rats_on_peer_path(), in ms. 0 = only when an rats_on_peer_path() callback is
-     * registered, and then every 100 ms (default 0). */
-    uint32_t         path_sample_ms;
-} rats_config_t;
-
-/** A config pre-filled with the library defaults (listening, Noise, ephemeral
- *  identity, unlimited peers). Mutate the returned struct and pass to
- *  rats_create_config(). */
-RATS_API rats_config_t rats_config_default(void);
-
-/** Create a node from a full config (NULL → all defaults). When data_dir is set,
- *  the identity persists across restarts and subsystems (DHT routing table,
- *  reconnection store) co-locate their state there. */
-RATS_API rats_t rats_create_config(const rats_config_t* config);
-
-/** Create a listening node (Noise, dual-stack, ephemeral identity, port 0 = ephemeral). */
-RATS_API rats_t rats_create(uint16_t listen_port);
-
-/** Create with basic control. enable_listen=0 makes a dial-only node. For
- *  data_dir / protocol identity / max_peers use rats_create_config(). */
-RATS_API rats_t rats_create_ex(uint16_t listen_port, int enable_listen,
-                                         const char* bind_address, rats_security_t security);
-
-RATS_API void         rats_destroy(rats_t node);
-RATS_API rats_error_t rats_start(rats_t node);   /* RATS_OK / RATS_ERR_ALREADY_STARTED / RATS_ERR_BIND */
-RATS_API void         rats_stop(rats_t node);
-RATS_API uint16_t     rats_listen_port(rats_t node);
-
-/** Transports this node is actually running, as a RATS_TRANSPORT_MASK_* bitmask.
- *  May be narrower than the config asked for: a UDP socket that could not be
- *  bound leaves the node TCP-only rather than failing to start. 0 before
- *  rats_start() and after rats_stop(). */
-RATS_API uint32_t     rats_transports(rats_t node);
-
-/** Our self-certifying peer id as hex. Caller frees with rats_string_free(). */
-RATS_API char*    rats_local_id(rats_t node);
-
-/** Application protocol identity bound into the handshake (see rats_config_t).
- *  Two nodes whose protocol differs cannot complete a handshake. Caller frees
- *  the returned string with rats_string_free(). */
-RATS_API char*    rats_protocol(rats_t node);
-
-/* — connections — */
-
-RATS_API rats_error_t rats_connect(rats_t node, const char* host, uint16_t port);
-RATS_API size_t       rats_peer_count(rats_t node);
-
-/** Cap on established peers (0 = unlimited). Guards inbound; our dials are honored.
- *  May be set before or after start(). */
-RATS_API void   rats_set_max_peers(rats_t node, size_t max_peers);
-RATS_API size_t rats_max_peers(rats_t node);
-
-/* — messaging (named application channel, raw bytes) — */
-
-/** Queue bytes for one peer on a named channel. RATS_OK means accepted and
- *  queued, never that it arrived. Pair it with rats_peer_writable() below if you
- *  send in bulk — that is the only way to learn you are outrunning the link
- *  before the peer is dropped for it.
- *
- *  lifetime_ms 0 sends reliably: the message arrives whatever it takes, in order
- *  with the rest of what this node sends on its channels. Anything else makes it
- *  a LIVE message, worth delivering only within that many milliseconds of this
- *  call (30000 at most): repaired while it can still arrive in time, dropped
- *  whole once it cannot, never delivered in part or twice, and ordered with
- *  nothing — it is handed over the moment it is complete, so number what you send
- *  if order matters. For video and audio frames, which are no use late. A live
- *  message carries at most 1 MiB. The receiver needs nothing: it arrives at the
- *  channel's rats_on() callback like any other. */
-RATS_API rats_error_t rats_send(rats_t node, const char* peer_id_hex, const char* channel,
-                                const void* data, size_t len, uint32_t lifetime_ms);
-/** rats_send() to every connected peer. */
-RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data,
-                                     size_t len, uint32_t lifetime_ms);
-
-/** Whether this peer's send queue still has room — the same question rats_send()
- *  answers, asked without sending. Returns 1 for room, 0 for none (and 0 for a
- *  peer that is not connected).
- *
- *  A 0 says "stop". The message you just sent was queued like any other and
- *  nothing was dropped, but keep piling on and this peer is dropped with
- *  RATS_CLOSE_SLOW_CONSUMER. Wait for the callback registered with
- *  rats_on_peer_writable(), or poll this from a thread of your own.
- *
- *  Ask it right after rats_send(): the bytes you just handed over are already
- *  counted, so the answer covers your own send and not just what the reactor has
- *  got round to. It is NOT a size limit — a single message of any size is always
- *  accepted; only sending more on top of a full queue drops a peer. */
-RATS_API int rats_peer_writable(rats_t node, const char* peer_id_hex);
-
-/** What the transport currently knows about the path to one peer — for a sender
- *  that sizes its own output to the path (a live encoder) instead of letting the
- *  queue find the limit. Rates are bits per second. Anything past bandwidth_bps
- *  waits in queued_bytes; divided by bandwidth_bps that is the wait in seconds. */
-typedef struct {
-    uint64_t bandwidth_bps;    /* the congestion controller's estimate; 0 = none yet */
-    int      app_limited;      /* 1: the sender was not filling the path, so the
-                                * estimate is a floor (what was used), not the path */
-    uint64_t pacing_bps;       /* current release rate; 0 = unpaced */
-    uint32_t srtt_us;          /* smoothed round trip */
-    uint32_t min_rtt_us;       /* lowest round trip seen: the path without queues */
-    uint64_t queued_bytes;     /* accepted for the peer, not yet sent */
-    uint64_t bytes_in_flight;  /* sent, not yet acknowledged */
-    double   loss;             /* share of bytes lost over the last sample interval, 0..1 */
-    uint64_t bytes_delivered;  /* acknowledged since the connection opened */
-    uint64_t bytes_lost;       /* declared lost since the connection opened */
-    uint64_t live_sent;        /* live messages (lifetime_ms > 0) sent since it opened */
-    uint64_t live_expired;     /* of those, dropped because their lifetime ran out: the
-                                * first thing a source asking for more than the path
-                                * carries will see */
-    uint64_t live_repair_bytes; /* bytes of repair symbols (forward error correction)
-                                 * sent with live messages on a lossy path: carried
-                                 * beside the source's own, so a source sized to
-                                 * bandwidth_bps leaves room for them */
-} rats_path_stats_t;
-
-/** The latest path sample for a peer, from any thread. RATS_ERR_NO_SUCH_PEER if the
- *  peer is not connected or nothing has been sampled yet — sampling runs only with
- *  path_sample_ms set or an rats_on_peer_path() callback registered. Over TCP the
- *  path's figures are the kernel's, on Linux only; elsewhere they stay 0 and only
- *  queued_bytes and the live counters are filled. */
-RATS_API rats_error_t rats_path_stats(rats_t node, const char* peer_id_hex,
-                                      rats_path_stats_t* out);
-
-/* — callbacks (register before start; invoked on a reactor thread) — */
-
-typedef void (*rats_peer_cb)(void* user, const char* peer_id_hex);
-typedef void (*rats_peer_disconnect_cb)(void* user, const char* peer_id_hex,
-                                        rats_close_reason_t reason);
-typedef void (*rats_message_cb)(void* user, const char* peer_id_hex, const void* data, size_t len);
-
-RATS_API rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user);
-RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_disconnect_cb cb,
-                                                          void* user);
-/** "This peer can be written to again" — fired when a peer whose queue had filled
- *  past its mark has drained back under it. The other half of rats_send()
- *  reporting 0; an application that never asks never needs this. */
-RATS_API rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user);
-RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user);
-/** A path sample of every connected peer, every path_sample_ms (100 ms if 0).
- *  Registering one turns sampling on. Keep it cheap: it runs once per peer per
- *  interval, on a reactor thread. `stats` is valid only for the call. */
-typedef void (*rats_path_cb)(void* user, const char* peer_id_hex, const rats_path_stats_t* stats);
-RATS_API rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user);
-
-/* — optional subsystems (enable before start) — */
-
-/** DHT discovery. dht_port 0 = ephemeral; discovery_key namespaces the app
- *  (NULL → the node's protocol, so only same-protocol peers discover each other). */
-RATS_API rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key);
-/** Local-network mDNS discovery. */
-RATS_API rats_error_t rats_enable_mdns(rats_t node);
-/** Automatic NAT port forwarding for the listen port (UPnP IGD + NAT-PMP).
- *  Pass non-zero to enable each backend; both run in parallel. */
-RATS_API rats_error_t rats_enable_port_mapping(rats_t node, int enable_upnp, int enable_natpmp);
-
-/** UDP hole punching: reach a peer that no port forwarding made reachable, by
- *  arranging with a peer both sides already have that the two dial each other at
- *  the same moment. Call before start(); both punching nodes must have it enabled,
- *  and so must the node that carries the rendezvous between them.
- *
- *  `serve_as_relay` (non-zero) also carries other peers' rendezvous — a few dozen
- *  forwarded bytes per punch, only ever to peers this node already holds. A mesh in
- *  which nobody relays cannot punch at all. */
-RATS_API rats_error_t rats_enable_hole_punch(rats_t node, int serve_as_relay);
-
-/** Try to reach `peer_id_hex` by punching. Non-blocking: success arrives as an
- *  ordinary peer-connected callback. RATS_OK if a rendezvous was started;
- *  RATS_ERR_NOT_ENABLED if hole punching is off; RATS_ERR_NO_SUCH_PEER if there is
- *  nothing to do or nothing to try with — the peer is already connected, a punch to
- *  it is already running, or this node does not yet know an external endpoint of
- *  its own to advertise (it needs at least one datagram peer first). */
-RATS_API rats_error_t rats_punch_peer(rats_t node, const char* peer_id_hex);
-
-/** Relaying: reach a peer that neither port forwarding nor hole punching could
- *  make reachable, by routing the connection through a node both ends are already
- *  connected to. Call before start(). The peer that comes out is ordinary in every
- *  way — the same end-to-end encryption, the same channels — except that its bytes
- *  take a detour, which rats_peer_transport() reports as RATS_TRANSPORT_RELAY.
- *
- *  `serve_as_relay` (non-zero) also carries OTHER peers' connections. Unlike a
- *  hole-punch rendezvous, that spends real bandwidth on somebody else's traffic, so
- *  it is off by default and opted into here; a mesh in which nobody serves cannot
- *  relay at all. A serving node forwards only between peers it already holds, never
- *  chains circuits, and caps each one by bytes, duration and count. */
-RATS_API rats_error_t rats_enable_relay(rats_t node, int serve_as_relay);
-
-/** Try to reach `peer_id_hex` through a relay. Non-blocking: success arrives as an
- *  ordinary peer-connected callback. RATS_OK if an attempt was started;
- *  RATS_ERR_NOT_ENABLED if relaying is off; RATS_ERR_NO_SUCH_PEER if there is
- *  nothing to do or nothing to try with — the peer is already connected, an attempt
- *  is already running, it is in cooldown, or this node has no peer that could carry
- *  the connection.
- *
- *  Usually there is no need to call this: with hole punching enabled too, a punch
- *  that cannot work hands the target over by itself. */
-RATS_API rats_error_t rats_connect_via_relay(rats_t node, const char* peer_id_hex);
-
-/** What the mesh has shown about this node's own NAT, from the endpoints datagram
- *  peers report seeing its shared UDP socket at. One of the RATS_NAT_* values;
- *  RATS_NAT_ENDPOINT_DEPENDENT means punching cannot work from here. */
-RATS_API int rats_nat_mapping(rats_t node);
-
-enum {
     RATS_NAT_UNKNOWN              = 0,  /* not enough independent observations yet */
     RATS_NAT_OPEN                 = 1,  /* no NAT in the path */
-    RATS_NAT_ENDPOINT_INDEPENDENT = 2,  /* one external port for every peer — punchable */
-    RATS_NAT_ENDPOINT_DEPENDENT   = 3   /* a fresh mapping per peer (symmetric) — not punchable */
-};
-
-/* — peer enumeration — */
-
-/** Hex ids of currently-connected peers. Writes the count to *count and returns a
- *  heap array of `count` heap strings; free the whole thing with rats_free_peer_ids().
- *  Returns NULL (and *count = 0) when there are no peers. */
-RATS_API char** rats_peer_ids(rats_t node, size_t* count);
-RATS_API void   rats_free_peer_ids(char** ids, size_t count);
-
-/** Which transport a connected peer's link runs on, or -1 if not connected. */
-RATS_API int rats_peer_transport(rats_t node, const char* peer_id_hex);
-
-/** Transports a connected peer advertised in its identify message, as a
- *  RATS_TRANSPORT_MASK_* bitmask. 0 means the peer did not say (an older build),
- *  which is "no information", not "none". -1 if the peer is not connected. */
-RATS_API int rats_peer_transports(rats_t node, const char* peer_id_hex);
-
-/* — pub/sub (topic-based, raw bytes; enable + subscribe before start) — */
-
-typedef void (*rats_topic_cb)(void* user, const char* peer_id_hex,
-                              const char* topic, const void* data, size_t len);
-
-/** Enable the pub/sub (GossipSub) subsystem. Call before start(). */
-RATS_API rats_error_t rats_enable_pubsub(rats_t node);
-/** Subscribe to `topic`; matching messages invoke `cb` on a reactor thread. */
-RATS_API rats_error_t rats_subscribe(rats_t node, const char* topic, rats_topic_cb cb, void* user);
-RATS_API rats_error_t rats_unsubscribe(rats_t node, const char* topic);
-/** Publish `data` on `topic` to every subscribed peer (and local subscribers). */
-RATS_API rats_error_t rats_publish(rats_t node, const char* topic, const void* data, size_t len);
-
-/* — typed JSON messaging (named message type; payload is JSON text) — */
-
-typedef void (*rats_json_cb)(void* user, const char* peer_id_hex, const char* json);
-
-/** Enable the JSON-messaging subsystem (the C view of MessageJson). Call before start(). */
-RATS_API rats_error_t rats_enable_json(rats_t node);
-/** Register a handler for JSON messages of `type`. `json` is compact JSON text owned
- *  by the library (valid only for the duration of the call). Additive: multiple
- *  handlers may coexist. The sender id is the authenticated handshake PeerId. */
-RATS_API rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user);
-/** Like rats_on_json, but the handler is removed right after it fires once. */
-RATS_API rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void* user);
-RATS_API rats_error_t rats_off_json(rats_t node, const char* type);
-/** Send/broadcast a JSON message. `json` must be valid JSON text (invalid → RATS_ERR_INVALID_ARG). */
-RATS_API rats_error_t rats_send_json(rats_t node, const char* peer_id_hex, const char* type, const char* json);
-RATS_API rats_error_t rats_broadcast_json(rats_t node, const char* type, const char* json);
-
-/* — file transfer (push model; enable + register callbacks before start) — */
-
-typedef void (*rats_file_offer_cb)(void* user, const char* peer_id_hex, uint64_t transfer_id,
-                                   const char* name, uint64_t size, int is_directory);
-typedef void (*rats_file_progress_cb)(void* user, uint64_t transfer_id, const char* peer_id_hex,
-                                      uint64_t bytes_transferred, uint64_t total_bytes, int status);
-typedef void (*rats_file_complete_cb)(void* user, uint64_t transfer_id, const char* peer_id_hex,
-                                      int success, const char* path);
-
-/** Enable the file-transfer subsystem. `temp_dir` holds in-progress downloads
- *  (NULL → current directory). Call before start(). */
-RATS_API rats_error_t rats_enable_file_transfer(rats_t node, const char* temp_dir);
-
-RATS_API rats_error_t rats_on_file_offer(rats_t node, rats_file_offer_cb cb, void* user);
-RATS_API rats_error_t rats_on_file_progress(rats_t node, rats_file_progress_cb cb, void* user);
-RATS_API rats_error_t rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* user);
-
-/** Offer a file / directory tree to a peer. Returns the transfer id (0 on failure,
- *  e.g. file transfer not enabled or bad peer id). */
-RATS_API uint64_t rats_send_file(rats_t node, const char* peer_id_hex, const char* path);
-RATS_API uint64_t rats_send_directory(rats_t node, const char* peer_id_hex, const char* dir_path);
-
-/** Respond to an offer. For a single file, dest_path is the file path; for a
- *  directory, the destination directory. (peer_id, transfer_id) names the offer. */
-RATS_API rats_error_t rats_accept_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id, const char* dest_path);
-RATS_API rats_error_t rats_reject_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id);
-
-/** Control a live transfer (either side). RATS_OK if the transfer was found and
- *  the action applied; RATS_ERR_NO_SUCH_PEER if no matching transfer. */
-RATS_API rats_error_t rats_cancel_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id);
-RATS_API rats_error_t rats_pause_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id);
-RATS_API rats_error_t rats_resume_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id);
-
-/* — liveness (RTT probing) — */
-
-/** Enable periodic ping/pong RTT probing of every peer. Call before start(). */
-RATS_API rats_error_t rats_enable_ping(rats_t node);
-/** Last measured round-trip time to a peer in milliseconds, or -1 if unknown
- *  (ping not enabled, or no pong received yet). */
-RATS_API int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id_hex);
-
-/* — automatic reconnection — */
-
-/** Enable the reconnection subsystem: re-dials dropped peers with exponential
- *  backoff. Dialed peers are remembered automatically; when the node has a
- *  data_dir, targets persist to "<data_dir>/peers.json" across restarts. Call
- *  before start(). A bare node never reconnects on its own. */
-RATS_API rats_error_t rats_enable_reconnect(rats_t node);
-/** Add an address to keep connected (re-dialed on drop). Persisted if a store is
- *  configured. May be called before or after start(). */
-RATS_API rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port);
-/** Stop reconnecting to an address and drop it from the store. */
-RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port);
-
-/* — BitTorrent —
- * Only functional when the library is built with RATS_SEARCH_FEATURES; the calls
- * otherwise return RATS_ERR_NOT_ENABLED. The client keeps its own transport and,
- * when DHT is enabled on the node first, shares it. Enable before start(). */
-
-/** Enable BitTorrent. listen_port 0 picks an ephemeral port; download_path is the
- *  default save directory (NULL = "."). Enable DHT first to share the node's DHT. */
-RATS_API rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const char* download_path);
-
-/** MSE/PE connection obfuscation policy (see librats/bittorrent/mse.h). */
-typedef enum {
-    RATS_BT_ENC_FORCED   = 0,  /**< obfuscated connections only, both directions */
-    RATS_BT_ENC_ENABLED  = 1,  /**< default: obfuscate first, fall back to plaintext */
-    RATS_BT_ENC_DISABLED = 2,  /**< plaintext only */
-} rats_bt_enc_policy_t;
-
-/**
- * Set the BitTorrent encryption policy. Optional — the default (ENABLED for both)
- * already dials obfuscated first, which is what reaches the large part of the swarm
- * that refuses plaintext. Must be called BEFORE rats_enable_bittorrent, since the
- * policy is fixed when the session is created.
- */
-RATS_API rats_error_t rats_bt_set_encryption(rats_t node, rats_bt_enc_policy_t out_policy,
-                                             rats_bt_enc_policy_t in_policy);
-
-/**
- * Turn uTP (BEP 29) on or off, per direction. Optional — both are on by default,
- * which is what every modern client ships: uTP's delay-based congestion control
- * yields to other traffic instead of saturating the user's uplink, and much of the
- * swarm answers UDP more readily than TCP. A peer with no uTP costs one connect
- * timeout before the dial falls back to TCP, and is remembered.
- *
- * Pass non-zero to enable each direction. Turning outgoing uTP off makes every dial TCP. Turning incoming off still dials
- * out over uTP but never answers, which is what a blocked inbound UDP port looks
- * like anyway. Must be called BEFORE rats_enable_bittorrent, since the setting is
- * fixed when the session is created.
- */
-RATS_API rats_error_t rats_bt_set_utp(rats_t node, int enable_outgoing, int enable_incoming);
-/** Start downloading a magnet link (metadata is fetched from peers). */
-RATS_API rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path);
-/** Start a torrent from a .torrent file on disk. */
-RATS_API rats_error_t rats_bt_add_torrent_file(rats_t node, const char* torrent_path, const char* save_path);
-/** Remove a torrent by its 40-char hex info-hash (downloaded files are kept). */
-RATS_API rats_error_t rats_bt_remove_torrent(rats_t node, const char* info_hash_hex);
-
-/* — logging (process-global; no node required) — */
+    RATS_NAT_ENDPOINT_INDEPENDENT = 2,  /* one external port for every peer: punchable */
+    RATS_NAT_ENDPOINT_DEPENDENT   = 3   /* a new mapping per peer (symmetric): not punchable */
+} rats_nat_mapping_t;
 
 typedef enum {
     RATS_LOG_DEBUG = 0,
@@ -524,25 +136,423 @@ typedef enum {
     RATS_LOG_ERROR = 3
 } rats_log_level_t;
 
+/* ─── Configuration and lifecycle ─────────────────────────────────────────── */
+
+/* transport_fallback_ms value that never races the second transport. */
+#define RATS_FALLBACK_NEVER 0xFFFFFFFFu
+
+/* Node configuration. Zero in any field is the default named beside it. Strings
+ * are copied by rats_create(); they need not outlive the call. */
+typedef struct {
+    /* — identity — */
+    const char*     protocol;   /* app id bound into the handshake, e.g. "myapp/1.0";
+                                 * peers with a different one cannot connect.
+                                 * NULL → "librats/1.0" */
+    const char*     data_dir;   /* persistent state (identity.key, DHT routing table,
+                                 * reconnect store). NULL → a new identity every run */
+    rats_security_t security;   /* RATS_SECURITY_NOISE */
+
+    /* — listening — */
+    uint16_t        listen_port;   /* shared by both transports; 0 → ephemeral */
+    const char*     bind_address;  /* NULL → "::", dual-stack on every interface */
+    int             dial_only;     /* non-zero: no listener, outbound connections only */
+    size_t          max_peers;     /* cap on established peers, enforced on inbound;
+                                    * 0 → unlimited */
+
+    /* — transports — */
+    uint32_t         transports;            /* RATS_TRANSPORT_MASK_* to run; 0 → both */
+    rats_transport_t preferred_transport;   /* tried first by a dial; RATS_TRANSPORT_UDP */
+    uint32_t         transport_fallback_ms; /* the preferred transport dials alone this
+                                             * long before the other is raced; 0 → 1200,
+                                             * RATS_FALLBACK_NEVER → never */
+
+    /* — sending — */
+    size_t   send_queue_limit;  /* bytes a peer's queue may hold before a sender that
+                                 * keeps going has it dropped (RATS_CLOSE_SLOW_CONSUMER);
+                                 * rats_peer_writable() turns 0 at a quarter of it.
+                                 * Not a message size limit. 0 → 8 MiB */
+    uint32_t path_sample_ms;    /* how often each peer's path is sampled for
+                                 * rats_path_stats(); 0 → only while a
+                                 * rats_on_peer_path() callback is registered, every 100 ms */
+
+    /* — UDP transport — */
+    rats_congestion_t congestion_control;  /* RATS_CONGESTION_BBR */
+    size_t udp_receive_window;   /* ceiling one connection's flow-control window grows
+                                  * to (it starts at 1 MiB); throughput is bounded by
+                                  * window / round trip. 0 → 16 MiB */
+    size_t udp_receive_budget;   /* bytes all connections together may hold out of
+                                  * order. 0 → 64 MiB */
+    int    disable_udp_offload;  /* non-zero: no kernel segmentation offload
+                                  * (UDP_SEGMENT/GRO, USO/URO), for comparison or a
+                                  * host where it misbehaves */
+
+    /* — runtime — */
+    size_t reactor_threads;          /* I/O threads; 0 → 1, enough for thousands of peers */
+    int    disable_network_monitor;  /* non-zero: do not watch the host for interface and
+                                      * address changes (saves one mostly idle thread) */
+} rats_config_t;
+
+/** Create a node. `config` may be NULL for all defaults. Returns NULL when the
+ *  config is invalid: no transport, an out-of-range enum, or TCP preferred while
+ *  turned off. With a data_dir the identity is loaded from it, or created and
+ *  saved there. No socket is opened until rats_start(). */
+RATS_API rats_t rats_create(const rats_config_t* config);
+
+/** Stop the node if running and free it. The handle is invalid afterwards. */
+RATS_API void rats_destroy(rats_t node);
+
+/** Open the sockets, start the I/O threads and every enabled subsystem.
+ *  RATS_ERR_ALREADY_STARTED, or RATS_ERR_BIND if the listen port is taken. */
+RATS_API rats_error_t rats_start(rats_t node);
+
+/** Close every connection and stop. Idempotent. */
+RATS_API void rats_stop(rats_t node);
+
+/* ─── This node ───────────────────────────────────────────────────────────── */
+
+/** Our peer id as hex. Owned by the node, valid until rats_destroy(). */
+RATS_API const char* rats_local_id(rats_t node);
+
+/** The protocol bound into the handshake. Owned by the node, valid until
+ *  rats_destroy(). */
+RATS_API const char* rats_protocol(rats_t node);
+
+/** The bound listen port (the real one when 0 was asked for); 0 before start. */
+RATS_API uint16_t rats_listen_port(rats_t node);
+
+/** Transports actually running, as RATS_TRANSPORT_MASK_* bits. Can be narrower
+ *  than the config asked for: a UDP socket that cannot be bound leaves the node
+ *  TCP-only rather than failing to start. 0 when not running. */
+RATS_API uint32_t rats_transports(rats_t node);
+
+/** What the mesh has shown about this node's NAT, from where UDP peers report
+ *  seeing its socket. */
+RATS_API rats_nat_mapping_t rats_nat_mapping(rats_t node);
+
+/** Our own addresses as peers report seeing us ("ip:port", our listen port).
+ *  Returns an array of *count strings, NULL when there are none; release with
+ *  rats_strings_free(). */
+RATS_API char** rats_observed_addresses(rats_t node, size_t* count);
+
+/* ─── Peers ───────────────────────────────────────────────────────────────── */
+
+/** Dial host:port (a literal or a hostname). Non-blocking: success arrives as
+ *  rats_on_peer_connected, failure as rats_on_dial_failed. */
+RATS_API rats_error_t rats_connect(rats_t node, const char* host, uint16_t port);
+
+/** Close the connection to a peer. RATS_ERR_NO_SUCH_PEER if it is not connected. */
+RATS_API rats_error_t rats_disconnect(rats_t node, const char* peer_id);
+
+RATS_API size_t rats_peer_count(rats_t node);
+
+/** Ids of the connected peers: an array of *count strings, NULL when there are
+ *  none. Release with rats_strings_free(). */
+RATS_API char** rats_peer_ids(rats_t node, size_t* count);
+
+typedef struct {
+    rats_transport_t transport;   /* the wire this connection runs on */
+    uint32_t         transports;  /* RATS_TRANSPORT_MASK_* the peer says it accepts;
+                                   * 0 → it did not say */
+    rats_direction_t direction;
+    char             address[64]; /* where the peer can be dialed, "ip:port" or
+                                   * "[ip]:port"; "" until known */
+} rats_peer_info_t;
+
+/** Fill `out` for a connected peer. RATS_ERR_NO_SUCH_PEER if not connected. */
+RATS_API rats_error_t rats_peer_info(rats_t node, const char* peer_id, rats_peer_info_t* out);
+
+/** Cap on established peers (0 = unlimited). Can be changed while running. */
+RATS_API void   rats_set_max_peers(rats_t node, size_t max_peers);
+RATS_API size_t rats_max_peers(rats_t node);
+
+/* ─── Messaging ───────────────────────────────────────────────────────────── */
+
+/* Limits of a live message (lifetime_ms > 0). A longer lifetime is cut to the
+ * maximum; a larger payload is refused. */
+#define RATS_LIVE_MAX_LIFETIME_MS 30000u
+#define RATS_LIVE_MAX_PAYLOAD     (1024u * 1024u)
+
+/** Queue bytes for one peer on a named channel. RATS_ERR_NO_SUCH_PEER if the
+ *  peer is not connected.
+ *
+ *  lifetime_ms 0 is reliable: the message arrives, in order with everything else
+ *  this node sends on its channels. Non-zero makes it a live message, worth
+ *  delivering only within that many ms of this call: repaired while it can still
+ *  arrive in time, dropped whole once it cannot, never delivered partly or twice,
+ *  and ordered with nothing (number them if order matters). Made for audio and
+ *  video frames. The receiver needs nothing special — it arrives at rats_on()
+ *  like any message.
+ *
+ *  If you send in bulk, ask rats_peer_writable() after each send: that is the
+ *  only warning before the peer is dropped as a slow consumer. */
+RATS_API rats_error_t rats_send(rats_t node, const char* peer_id, const char* channel,
+                                const void* data, size_t len, uint32_t lifetime_ms);
+
+/** rats_send() to every connected peer. */
+RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data,
+                                     size_t len, uint32_t lifetime_ms);
+
+/** 1 while the peer's send queue has room, 0 when it does not or the peer is not
+ *  connected. 0 means stop: what you sent was queued, but keep adding and the
+ *  peer is dropped with RATS_CLOSE_SLOW_CONSUMER. Resume on
+ *  rats_on_peer_writable(), or poll this from a thread of your own. It counts
+ *  bytes just handed to rats_send() too, so asking right after a send is exact. */
+RATS_API int rats_peer_writable(rats_t node, const char* peer_id);
+
+/* What the transport knows about the path to one peer, for a sender that sizes
+ * its output to the path (a live encoder). Rates are bits per second. A new
+ * message waits behind queued_bytes; queued_bytes * 8 / bandwidth_bps is that
+ * wait in seconds. Over TCP the path figures are the kernel's and exist on Linux
+ * only; elsewhere, and over a relay, only queued_bytes and the live counters are
+ * filled. */
+typedef struct {
+    uint64_t bandwidth_bps;      /* the congestion controller's estimate; 0 = none yet */
+    int      app_limited;        /* 1: the sender was not filling the path, so the
+                                  * estimate is a floor, not the path's capacity */
+    uint64_t pacing_bps;         /* current release rate; 0 = unpaced */
+    uint32_t srtt_us;            /* smoothed round trip */
+    uint32_t min_rtt_us;         /* lowest round trip seen: the path without queues */
+    uint64_t queued_bytes;       /* accepted for the peer, not yet sent */
+    uint64_t bytes_in_flight;    /* sent, not yet acknowledged */
+    double   loss;               /* share of bytes lost over the last interval, 0..1 */
+    uint64_t bytes_delivered;    /* acknowledged since the connection opened */
+    uint64_t bytes_lost;         /* declared lost since the connection opened */
+    uint64_t live_sent;          /* live messages sent since the connection opened */
+    uint64_t live_expired;       /* of those, dropped because their lifetime ran out */
+    uint64_t live_repair_bytes;  /* forward-error-correction bytes sent with live
+                                  * messages on a lossy path, on top of the source's own */
+} rats_path_stats_t;
+
+/** The latest path sample for a peer. RATS_ERR_NO_SUCH_PEER if the peer is not
+ *  connected or nothing was sampled yet (sampling runs only with path_sample_ms
+ *  set or a rats_on_peer_path() callback registered). */
+RATS_API rats_error_t rats_path_stats(rats_t node, const char* peer_id, rats_path_stats_t* out);
+
+/* ─── Callbacks (register before rats_start; run on a reactor thread) ────── */
+
+typedef void (*rats_peer_cb)(void* user, const char* peer_id);
+typedef void (*rats_disconnect_cb)(void* user, const char* peer_id, rats_close_reason_t reason);
+typedef void (*rats_dial_failed_cb)(void* user, const char* address);
+typedef void (*rats_message_cb)(void* user, const char* peer_id, const void* data, size_t len);
+typedef void (*rats_path_cb)(void* user, const char* peer_id, const rats_path_stats_t* stats);
+
+/* Each registration adds a handler; several may coexist. */
+RATS_API rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user);
+RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_disconnect_cb cb, void* user);
+/** A dial to a numeric address failed over every transport tried — one made by
+ *  rats_connect() or by a discovery subsystem. `address` is "ip:port"; a dial by
+ *  hostname is not reported. */
+RATS_API rats_error_t rats_on_dial_failed(rats_t node, rats_dial_failed_cb cb, void* user);
+/** A peer whose queue had filled has drained back under its mark. */
+RATS_API rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user);
+/** A path sample of every connected peer, every path_sample_ms (100 ms if 0).
+ *  Registering one turns sampling on. Runs once per peer per interval. */
+RATS_API rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user);
+/** Messages arriving on a named channel. */
+RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user);
+
+/* ─── Discovery (enable before start) ─────────────────────────────────────── */
+
+/** Mainline DHT: announce and search a key, dialing the peers found. dht_port 0
+ *  is ephemeral. discovery_key NULL → the node's protocol, so only nodes that
+ *  could handshake find each other. */
+RATS_API rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key);
+
+/** mDNS discovery on the local network. */
+RATS_API rats_error_t rats_enable_mdns(rats_t node);
+
+/** Peer exchange: connected peers trade the addresses of peers they hold, so a
+ *  node needs one contact to find the rest of the mesh. */
+RATS_API rats_error_t rats_enable_peer_exchange(rats_t node);
+
+/* ─── NAT traversal (enable before start) ─────────────────────────────────── */
+
+/** Ask the router to forward the listen port, over UPnP IGD and/or NAT-PMP
+ *  (non-zero enables each; both run in parallel). */
+RATS_API rats_error_t rats_enable_port_mapping(rats_t node, int upnp, int natpmp);
+
+/** UDP hole punching: reach a peer behind a NAT by having a peer both sides
+ *  share arrange for the two to dial each other at the same moment. Every node
+ *  involved needs it enabled. `serve_rendezvous` non-zero also passes other
+ *  peers' rendezvous along — a few dozen bytes per punch; a mesh where nobody
+ *  does this cannot punch. */
+RATS_API rats_error_t rats_enable_hole_punch(rats_t node, int serve_rendezvous);
+
+/** Start punching to a peer. Success arrives as rats_on_peer_connected.
+ *  RATS_ERR_DECLINED: already connected, already punching, or no external
+ *  endpoint of our own known yet (that takes at least one UDP peer). */
+RATS_API rats_error_t rats_punch_peer(rats_t node, const char* peer_id);
+
+/** Relaying: reach a peer nothing else can, through a node both ends are
+ *  connected to. Encryption stays end to end; rats_peer_info() reports
+ *  RATS_TRANSPORT_RELAY. `serve` non-zero also carries OTHER peers'
+ *  connections, which costs this node their bandwidth (each circuit is capped
+ *  by bytes, time and count). With hole punching enabled too, a punch that
+ *  cannot work falls back to a relay by itself, and a relayed peer is upgraded
+ *  to a direct connection when a punch later succeeds. */
+RATS_API rats_error_t rats_enable_relay(rats_t node, int serve);
+
+/** Start a relayed connection to a peer. Success arrives as
+ *  rats_on_peer_connected. RATS_ERR_DECLINED: already connected, already
+ *  trying or cooling down, or no connected peer could carry it. */
+RATS_API rats_error_t rats_connect_via_relay(rats_t node, const char* peer_id);
+
+/* ─── Pub/sub (GossipSub) ─────────────────────────────────────────────────── */
+
+typedef void (*rats_topic_cb)(void* user, const char* peer_id, const char* topic,
+                              const void* data, size_t len);
+
+/** Enable before start. */
+RATS_API rats_error_t rats_enable_pubsub(rats_t node);
+/** Subscribe to a topic; one handler per topic, a second subscribe replaces it. */
+RATS_API rats_error_t rats_subscribe(rats_t node, const char* topic, rats_topic_cb cb, void* user);
+RATS_API rats_error_t rats_unsubscribe(rats_t node, const char* topic);
+/** Publish to every subscriber of the topic. */
+RATS_API rats_error_t rats_publish(rats_t node, const char* topic, const void* data, size_t len);
+
+/* ─── JSON messaging (typed messages carrying a JSON document) ───────────── */
+
+/* `json` is compact JSON text. The sender id is the one authenticated by the
+ * handshake. */
+typedef void (*rats_json_cb)(void* user, const char* peer_id, const char* json);
+
+/** Enable before start. */
+RATS_API rats_error_t rats_enable_json(rats_t node);
+/** Add a handler for messages of `type`. May be called while running. */
+RATS_API rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user);
+/** Like rats_on_json(); the handler is removed after its first message. */
+RATS_API rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void* user);
+/** Remove every handler of `type`. */
+RATS_API rats_error_t rats_off_json(rats_t node, const char* type);
+/** `json` must be valid JSON text (else RATS_ERR_INVALID_ARG). */
+RATS_API rats_error_t rats_send_json(rats_t node, const char* peer_id, const char* type,
+                                     const char* json);
+RATS_API rats_error_t rats_broadcast_json(rats_t node, const char* type, const char* json);
+
+/* ─── File transfer (push: the sender offers, the receiver accepts) ──────── */
+
+typedef enum {
+    RATS_FILE_PENDING   = 0,  /* offered, not answered yet */
+    RATS_FILE_ACTIVE    = 1,
+    RATS_FILE_PAUSED    = 2,
+    RATS_FILE_COMPLETED = 3,
+    RATS_FILE_FAILED    = 4,
+    RATS_FILE_CANCELLED = 5
+} rats_file_status_t;
+
+typedef struct {
+    uint64_t            transfer_id;
+    const char*         peer_id;
+    rats_direction_t    direction;          /* OUTBOUND = we send, INBOUND = we receive */
+    rats_file_status_t  status;
+    uint64_t            bytes_transferred;
+    uint64_t            total_bytes;
+    uint32_t            files_completed;
+    uint32_t            total_files;
+    double              rate_bytes_per_sec; /* recent, smoothed */
+} rats_file_progress_t;
+
+typedef void (*rats_file_offer_cb)(void* user, const char* peer_id, uint64_t transfer_id,
+                                   const char* name, uint64_t size, int is_directory);
+typedef void (*rats_file_progress_cb)(void* user, const rats_file_progress_t* progress);
+typedef void (*rats_file_complete_cb)(void* user, const char* peer_id, uint64_t transfer_id,
+                                      int success, const char* path);
+
+/** Enable before start. `temp_dir` holds partial downloads (NULL → "."). */
+RATS_API rats_error_t rats_enable_file_transfer(rats_t node, const char* temp_dir);
+
+/* One handler each, set before start; a second call replaces the first. */
+RATS_API rats_error_t rats_on_file_offer(rats_t node, rats_file_offer_cb cb, void* user);
+RATS_API rats_error_t rats_on_file_progress(rats_t node, rats_file_progress_cb cb, void* user);
+RATS_API rats_error_t rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* user);
+
+/** Offer a file or a directory tree to a connected peer; the transfer id is
+ *  written to *transfer_id (which may be NULL). RATS_ERR_NO_SUCH_PEER if the peer
+ *  is not connected, RATS_ERR_NOT_FOUND if the path cannot be read. */
+RATS_API rats_error_t rats_send_file(rats_t node, const char* peer_id, const char* path,
+                                     uint64_t* transfer_id);
+RATS_API rats_error_t rats_send_directory(rats_t node, const char* peer_id, const char* path,
+                                          uint64_t* transfer_id);
+
+/** Answer an offer. dest_path is the file to write for a file, the directory to
+ *  fill for a directory. */
+RATS_API rats_error_t rats_accept_file(rats_t node, const char* peer_id, uint64_t transfer_id,
+                                       const char* dest_path);
+RATS_API rats_error_t rats_reject_file(rats_t node, const char* peer_id, uint64_t transfer_id);
+
+/** Control a running transfer from either side. RATS_ERR_NOT_FOUND if there is
+ *  no such transfer. */
+RATS_API rats_error_t rats_cancel_file(rats_t node, const char* peer_id, uint64_t transfer_id);
+RATS_API rats_error_t rats_pause_file(rats_t node, const char* peer_id, uint64_t transfer_id);
+RATS_API rats_error_t rats_resume_file(rats_t node, const char* peer_id, uint64_t transfer_id);
+
+/* ─── Ping (round-trip probing of every peer) ─────────────────────────────── */
+
+/** Enable before start. */
+RATS_API rats_error_t rats_enable_ping(rats_t node);
+/** Last measured round trip to a peer in ms; -1 if unknown (ping not enabled,
+ *  no answer yet). */
+RATS_API int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id);
+
+/* ─── Reconnection ────────────────────────────────────────────────────────── */
+
+/** Re-dial dropped peers with exponential backoff. Every address dialed is
+ *  remembered; with a data_dir the list survives restarts (peers.json). Enable
+ *  before start — a node without it never redials on its own. */
+RATS_API rats_error_t rats_enable_reconnect(rats_t node);
+/** Keep an address connected. May be called while running. */
+RATS_API rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port);
+/** Stop keeping an address connected and forget it. */
+RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port);
+
+/* ─── BitTorrent ──────────────────────────────────────────────────────────────
+ * Available only in builds with RATS_SEARCH_FEATURES; elsewhere every call
+ * returns RATS_ERR_NOT_ENABLED. The client runs its own sockets; enable the DHT
+ * first and it shares the node's. */
+
+typedef enum {
+    RATS_BT_ENC_ENABLED  = 0,  /* obfuscate (MSE/PE) first, fall back to plaintext (default) */
+    RATS_BT_ENC_FORCED   = 1,  /* obfuscated connections only */
+    RATS_BT_ENC_DISABLED = 2   /* plaintext only */
+} rats_bt_encryption_t;
+
+/* Zero in any field is the default named beside it. */
+typedef struct {
+    uint16_t             listen_port;          /* 0 → ephemeral */
+    const char*          download_path;        /* NULL → "." */
+    rats_bt_encryption_t outgoing_encryption;  /* RATS_BT_ENC_ENABLED */
+    rats_bt_encryption_t incoming_encryption;  /* RATS_BT_ENC_ENABLED */
+    int                  disable_outgoing_utp; /* non-zero: dial over TCP only */
+    int                  disable_incoming_utp; /* non-zero: never answer uTP */
+} rats_bt_config_t;
+
+/** Enable before start. `config` may be NULL for the defaults. */
+RATS_API rats_error_t rats_enable_bittorrent(rats_t node, const rats_bt_config_t* config);
+/** Start a download from a magnet link (metadata is fetched from peers). */
+RATS_API rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path);
+/** Start a download from a .torrent file. */
+RATS_API rats_error_t rats_bt_add_torrent_file(rats_t node, const char* torrent_path,
+                                               const char* save_path);
+/** Remove a torrent by its 40-char hex info-hash. Downloaded files are kept. */
+RATS_API rats_error_t rats_bt_remove_torrent(rats_t node, const char* info_hash_hex);
+
+/* ─── Process-wide ────────────────────────────────────────────────────────── */
+
 RATS_API void rats_set_log_level(rats_log_level_t level);
-/** Mirror logs to `path` (NULL/empty disables file logging). */
+/** Also write logs to `path`; NULL or "" stops file logging. */
 RATS_API void rats_set_log_file(const char* path);
 
-/* — library info (process-global; no node required) — */
-
-/** Library version as a static string, e.g. "1.2.3" (do not free). */
+/** Library version with the build number, e.g. "2.3.7.884". */
 RATS_API const char* rats_version_string(void);
-/** Library version components. Any out-pointer may be NULL. */
+/** Version components; any pointer may be NULL. */
 RATS_API void        rats_version(int* major, int* minor, int* patch, int* build);
-/** Git describe of the build, e.g. "v1.2.3-4-gabcdef" (static; do not free). */
+/** `git describe` of the build, e.g. "v1.2.3-4-gabcdef". */
 RATS_API const char* rats_git_describe(void);
-/** Packed ABI id as (major<<16)|(minor<<8)|patch — MAJOR bumps on breaking
- *  changes, MINOR on additive ones. */
+/** (major << 16) | (minor << 8) | patch. */
 RATS_API uint32_t    rats_abi(void);
 
-/* — utility — */
-
-RATS_API void rats_string_free(char* str);
+/** Free an array from rats_peer_ids() / rats_observed_addresses(). NULL is a no-op. */
+RATS_API void rats_strings_free(char** strings, size_t count);
 
 #ifdef __cplusplus
 }

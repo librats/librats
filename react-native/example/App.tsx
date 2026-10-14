@@ -105,7 +105,7 @@ function Demo() {
       const client = createNode({
         listenPort: 0,
         protocol: 'example/1.0',
-        enableListen: false, // dial-only, the usual shape for a mobile peer
+        dialOnly: true, // the usual shape for a mobile peer
       });
       nodes.current = [server, client];
 
@@ -163,7 +163,10 @@ function Demo() {
         });
         cli.onMessage(CHANNEL, (_from, data) => resolveEcho(decodeUtf8(data)));
       });
-      append(`handshake with ${serverId.slice(0, 8)}`);
+      append(
+        `handshake with ${serverId.slice(0, 8)} over ` +
+          `${client.peerInfo(serverId)?.transport ?? 'nothing'}`,
+      );
 
       client.send(serverId, CHANNEL, encodeUtf8(MESSAGE));
       const reply = await Promise.race([echoed, timeout(15000, 'no echo')]);
@@ -228,7 +231,7 @@ function Demo() {
           }
         });
 
-        cli.onFileComplete((_id, success, path) => {
+        cli.onFileComplete((_id, _peerId, success, path) => {
           if (success) {
             resolveDone(path);
           } else {

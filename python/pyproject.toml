@@ -17,30 +17,26 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Internet",
     "Topic :: System :: Networking",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 dependencies = []
 
 [project.optional-dependencies]
 dev = [
     "pytest>=6.0",
-    "pytest-asyncio",
     "pytest-cov",
     "black",
     "flake8",
     "mypy",
-]
-examples = [
-    "click",
 ]
 
 [project.urls]
@@ -57,7 +53,7 @@ librats_py = ["*.so", "*.so.*", "*.dll", "*.dylib"]
 
 [tool.black]
 line-length = 100
-target-version = ['py37']
+target-version = ['py38']
 
 [tool.pytest.ini_options]
 testpaths = ["librats_py/tests"]
@@ -66,12 +62,11 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 markers = [
-    "integration: integration tests requiring native library",
-    "slow: slow running tests",
+    "native: needs the librats shared library",
 ]
 
 [tool.mypy]
-python_version = "3.7"
+python_version = "3.8"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

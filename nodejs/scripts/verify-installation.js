@@ -29,19 +29,12 @@ check('load the module', () => {
 
 if (librats) {
   check('version info', () => {
-    const v = librats.versionInfo();
-    return `${librats.version()} (${v.major}.${v.minor}.${v.patch}.${v.build})`;
-  });
-
-  check('enums', () => {
-    const need = ['Security', 'Transport', 'TransportMask', 'NatMapping', 'LogLevel'];
-    const missing = need.filter((k) => typeof librats[k] !== 'object');
-    if (missing.length) throw new Error(`missing: ${missing.join(', ')}`);
-    return need.join(', ');
+    const v = librats.version();
+    return `${v.string} (${v.gitDescribe})`;
   });
 
   check('create, start and stop a node', () => {
-    const node = new librats.RatsNode(0); // ephemeral port — never collides
+    const node = new librats.RatsNode(); // ephemeral port — never collides
     try {
       node.start();
       const id = node.localId;
@@ -65,7 +58,7 @@ const failed = checks.filter((c) => !c.ok);
 if (failed.length === 0) {
   console.log('\nAll checks passed. Use it like this:\n');
   console.log("  const { RatsNode } = require('librats');");
-  console.log('  const node = new RatsNode(8080);');
+  console.log('  const node = new RatsNode({ listenPort: 8080 });');
   console.log('  node.start();\n');
   process.exit(0);
 }

@@ -1,77 +1,52 @@
 """
-Callback type definitions for the librats Python bindings.
+Callback types of the librats Python bindings.
 
-The ``*Type`` names are the raw ``ctypes`` CFUNCTYPE prototypes that match the
-typedefs in the C ABI (``src/librats/bindings/rats.h``). Every C callback takes an
-opaque ``void* user`` as its first argument. Binary payloads arrive as a
-``void*`` + ``size_t`` length pair (declared ``c_void_p`` + ``c_size_t``);
-string-ish arguments (peer ids, topics, type names, JSON text) arrive as
-``c_char_p``.
-
-The matching ``*Callback`` aliases describe the Pythonic signatures exposed by
-:class:`~librats_py.core.RatsNode`, after the wrappers in ``core.py`` decode
-hex ids and copy payload bytes.
+The ``*Type`` names are the raw ``CFUNCTYPE`` prototypes matching the typedefs
+in ``src/librats/bindings/rats.h``; every C callback takes ``void* user`` first.
+Struct pointers (path stats, file progress) arrive as ``c_void_p`` and are read
+in ``core.py``. The other names are the Pythonic signatures
+:class:`~librats_py.core.RatsNode` calls once ids, payloads and structs are
+decoded.
 """
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 from ctypes import CFUNCTYPE, c_void_p, c_char_p, c_size_t, c_int, c_uint64
 
-from .enums import PathStats
+from .enums import CloseReason, FileProgress, PathStats
 
-# --- Raw C callback prototypes (must mirror rats.h exactly) ---
+# --- Raw C prototypes (must mirror rats.h exactly) ---
 
-# rats_peer_cb(user, peer_id_hex)
+# rats_peer_cb(user, peer_id)
 PeerCallbackType = CFUNCTYPE(None, c_void_p, c_char_p)
-
-# rats_peer_disconnect_cb(user, peer_id_hex, reason). Its own prototype and not
-# PeerCallbackType: the C side really does push a third argument, and a ctypes
-# trampoline declared with two would be called through a mismatched signature.
-PeerDisconnectCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_int)
-
-# rats_path_cb(user, peer_id_hex, const rats_path_stats_t*) — the struct pointer
-# arrives as a plain void* and is read through RatsPathStats in core.py.
-PathCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p)
-
-# rats_message_cb(user, peer_id_hex, data, len)
+# rats_disconnect_cb(user, peer_id, reason)
+DisconnectCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_int)
+# rats_dial_failed_cb(user, address)
+DialFailedCallbackType = CFUNCTYPE(None, c_void_p, c_char_p)
+# rats_message_cb(user, peer_id, data, len)
 MessageCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t)
-
-# rats_topic_cb(user, peer_id_hex, topic, data, len)
+# rats_path_cb(user, peer_id, const rats_path_stats_t*)
+PathCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p)
+# rats_topic_cb(user, peer_id, topic, data, len)
 TopicCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, c_void_p, c_size_t)
-
-# rats_json_cb(user, peer_id_hex, json)
+# rats_json_cb(user, peer_id, json)
 JsonCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p)
+# rats_file_offer_cb(user, peer_id, transfer_id, name, size, is_directory)
+FileOfferCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_uint64, c_char_p, c_uint64, c_int)
+# rats_file_progress_cb(user, const rats_file_progress_t*)
+FileProgressCallbackType = CFUNCTYPE(None, c_void_p, c_void_p)
+# rats_file_complete_cb(user, peer_id, transfer_id, success, path)
+FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_uint64, c_int, c_char_p)
 
-# rats_file_offer_cb(user, peer_id_hex, transfer_id, name, size, is_directory)
-FileOfferCallbackType = CFUNCTYPE(
-    None, c_void_p, c_char_p, c_uint64, c_char_p, c_uint64, c_int
-)
+# --- Pythonic signatures ---
 
-# rats_file_progress_cb(user, transfer_id, peer_id_hex, bytes_transferred, total_bytes, status)
-FileProgressCallbackType = CFUNCTYPE(
-    None, c_void_p, c_uint64, c_char_p, c_uint64, c_uint64, c_int
-)
-
-# rats_file_complete_cb(user, transfer_id, peer_id_hex, success, path)
-FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_uint64, c_char_p, c_int, c_char_p)
-
-
-# --- Pythonic callback signatures (post-decoding) ---
-
-# (peer_id: str) -> None
-PeerCallback = Optional[Callable[[str], None]]
-# callback(peer_id, reason) — reason is a name like "RATS_CLOSE_SLOW_CONSUMER"
-PeerDisconnectCallback = Optional[Callable[[str, str], None]]
-# (peer_id: str, stats: PathStats) -> None
-PathCallback = Optional[Callable[[str, PathStats], None]]
-# (peer_id: str, data: bytes) -> None
-MessageCallback = Optional[Callable[[str, bytes], None]]
-# (peer_id: str, topic: str, data: bytes) -> None
-TopicCallback = Optional[Callable[[str, str, bytes], None]]
-# (peer_id: str, payload: Any) -> None  (payload is parsed JSON)
-JsonCallback = Optional[Callable[[str, Any], None]]
-# (peer_id: str, transfer_id: int, name: str, size: int, is_directory: bool) -> None
-FileOfferCallback = Optional[Callable[[str, int, str, int, bool], None]]
-# (transfer_id: int, peer_id: str, bytes_transferred: int, total_bytes: int, status: int) -> None
-FileProgressCallback = Optional[Callable[[int, str, int, int, int], None]]
-# (transfer_id: int, peer_id: str, success: bool, path: str) -> None
-FileCompleteCallback = Optional[Callable[[int, str, bool, str], None]]
+PeerCallback = Callable[[str], None]                          # (peer_id)
+DisconnectCallback = Callable[[str, CloseReason], None]       # (peer_id, reason)
+DialFailedCallback = Callable[[str], None]                    # (address "ip:port")
+MessageCallback = Callable[[str, bytes], None]                # (peer_id, data)
+PathCallback = Callable[[str, PathStats], None]               # (peer_id, stats)
+TopicCallback = Callable[[str, str, bytes], None]             # (peer_id, topic, data)
+JsonCallback = Callable[[str, Any], None]                     # (peer_id, parsed value)
+FileOfferCallback = Callable[[str, int, str, int, bool], None]
+#                            (peer_id, transfer_id, name, size, is_directory)
+FileProgressCallback = Callable[[FileProgress], None]
+FileCompleteCallback = Callable[[str, int, bool, str], None]  # (peer_id, transfer_id, success, path)

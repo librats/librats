@@ -1,28 +1,50 @@
 import { NitroModules } from 'react-native-nitro-modules'
 import type {
+  CloseReason,
+  CongestionControl,
+  DhtConfig,
   FileEntry,
   FileOffer,
   FileProgress,
   FileTransferConfig,
+  NatMapping,
+  PathStats,
+  PeerDirection,
+  PeerInfo,
+  PeerTransport,
+  PortMappingConfig,
   PubSubConfig,
   RatsConfig,
   RatsNode,
+  Security,
   TransferDirection,
   TransferStats,
   TransferStatus,
+  Transport,
 } from './specs/RatsNode.nitro'
 
 export type {
+  CloseReason,
+  CongestionControl,
+  DhtConfig,
   FileEntry,
   FileOffer,
   FileProgress,
   FileTransferConfig,
+  NatMapping,
+  PathStats,
+  PeerDirection,
+  PeerInfo,
+  PeerTransport,
+  PortMappingConfig,
   PubSubConfig,
   RatsConfig,
   RatsNode,
+  Security,
   TransferDirection,
   TransferStats,
   TransferStatus,
+  Transport,
 }
 
 /**
@@ -38,9 +60,9 @@ export type {
  * node.start()
  * ```
  *
- * Every `on*` registration must come before `start()` -- librats keeps those
- * handlers in unsynchronized state that reactor threads read, so the binding
- * throws rather than let a registration race with live traffic.
+ * Every `enable*()` and every event listener must come before `start()` --
+ * librats keeps them in tables reactor threads read without a lock, so the
+ * binding throws rather than let a registration race with live traffic.
  *
  * Remember that a node holds live sockets and threads: stop it when the app goes
  * to the background (iOS suspends the process and tears the sockets down

@@ -25,6 +25,28 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 10s) {
     return pred();
 }
 
+// A listening node on loopback.
+rats_t make_server() {
+    rats_config_t cfg{};
+    cfg.bind_address = "127.0.0.1";
+    return rats_create(&cfg);
+}
+
+// A dial-only node.
+rats_t make_client() {
+    rats_config_t cfg{};
+    cfg.dial_only = 1;
+    return rats_create(&cfg);
+}
+
+// Start both, connect client → server and wait until each side holds the other.
+void connect_pair(rats_t client, rats_t server) {
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    ASSERT_EQ(rats_connect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1 && rats_peer_count(server) == 1; }));
+}
+
 struct EchoCtx { rats_t node; };
 void echo_cb(void* user, const char* peer_id, const void* data, size_t len) {
     auto* ctx = static_cast<EchoCtx*>(user);
@@ -43,100 +65,14 @@ void collect_cb(void* user, const char*, const void* data, size_t len) {
     ctx->got.assign(static_cast<const char*>(data), len);
 }
 
-} // namespace
-
-// Drive two nodes entirely through the C ABI: connect, send on a channel, echo.
-// A zeroed config is the commonest way of filling a struct in C, and it must not
-// produce a node with no transport at all — which is what "0 = disabled" on the
-// two enable_* fields would otherwise mean. The failure that guards against is a
-// quiet one: the node starts, reports no error, and never connects to anything.
-TEST(NodeCApiTest, AZeroedConfigStillGetsBothTransports) {
-    rats_config_t cfg;
-    std::memset(&cfg, 0, sizeof(cfg));   // exactly `rats_config_t cfg = {0};`
-    cfg.enable_listen = 1;
-
-    rats_t node = rats_create_config(&cfg);
-    ASSERT_NE(node, nullptr);
-    ASSERT_EQ(rats_start(node), RATS_OK) << "a zeroed config left the node with no "
-                                            "transport to listen on";
-    EXPECT_EQ(rats_transports(node),
-              RATS_TRANSPORT_MASK_TCP | RATS_TRANSPORT_MASK_UDP);
-    rats_stop(node);
-    rats_destroy(node);
-
-    // Asking for one transport still means one — the rule only rescues "neither".
-    std::memset(&cfg, 0, sizeof(cfg));
-    cfg.enable_listen = 1;
-    cfg.enable_tcp    = 1;
-    node = rats_create_config(&cfg);
-    ASSERT_NE(node, nullptr);
-    ASSERT_EQ(rats_start(node), RATS_OK);
-    EXPECT_EQ(rats_transports(node), RATS_TRANSPORT_MASK_TCP);
-    rats_stop(node);
-    rats_destroy(node);
+struct BinCtx { std::mutex mu; std::vector<uint8_t> got; };
+void bin_collect_cb(void* user, const char*, const void* data, size_t len) {
+    auto* ctx = static_cast<BinCtx*>(user);
+    std::lock_guard<std::mutex> l(ctx->mu);
+    const auto* p = static_cast<const uint8_t*>(data);
+    ctx->got.assign(p, p + len);
 }
 
-TEST(NodeCApiTest, ConnectSendAndEcho) {
-    rats_t server = rats_create(0);  // listening, ephemeral
-    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
-    ASSERT_NE(server, nullptr);
-    ASSERT_NE(client, nullptr);
-
-    EchoCtx echo{server};
-    CollectCtx client_ctx;
-    rats_on(server, "chat", echo_cb, &echo);
-    rats_on_peer_connected(client, peer_cb, &client_ctx);
-    rats_on(client, "chat", collect_cb, &client_ctx);
-
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    // Wait on the connected callback, not peer_count: the peer table is updated
-    // (so peer_count flips to 1) just before the on_peer_connected callbacks fire,
-    // so polling peer_count can win the race against the callback counter.
-    ASSERT_TRUE(wait_for([&] { return client_ctx.peers.load() == 1; }));
-    EXPECT_EQ(rats_peer_count(client), 1u);
-
-    char* server_id = rats_local_id(server);
-    ASSERT_NE(server_id, nullptr);
-    EXPECT_EQ(std::strlen(server_id), 64u);
-
-    const char* msg = "hello capi";
-    rats_send(client, server_id, "chat", msg, std::strlen(msg), 0);
-
-    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(client_ctx.mu); return client_ctx.got == msg; }))
-        << "no echo via C API";
-
-    rats_string_free(server_id);
-    rats_stop(client);
-    rats_stop(server);
-    rats_destroy(client);
-    rats_destroy(server);
-}
-
-// local_id is stable and distinct per node; lifecycle is clean.
-TEST(NodeCApiTest, LocalIdAndLifecycle) {
-    rats_t a = rats_create(0);
-    rats_t b = rats_create(0);
-
-    char* ida = rats_local_id(a);
-    char* idb = rats_local_id(b);
-    ASSERT_NE(ida, nullptr);
-    ASSERT_NE(idb, nullptr);
-    EXPECT_STRNE(ida, idb);
-
-    EXPECT_EQ(rats_start(a), RATS_OK);
-    EXPECT_NE(rats_listen_port(a), 0);
-    rats_stop(a);
-
-    rats_string_free(ida);
-    rats_string_free(idb);
-    rats_destroy(a);
-    rats_destroy(b);
-}
-
-namespace {
 struct TopicCtx {
     std::mutex mu;
     std::string topic, data;
@@ -147,175 +83,267 @@ void topic_cb(void* user, const char*, const char* topic, const void* data, size
     ctx->topic = topic;
     ctx->data.assign(static_cast<const char*>(data), len);
 }
-struct TypedCtx {
+
+struct JsonCtx {
     std::mutex mu;
     std::string json;
 };
-void typed_cb(void* user, const char*, const char* json) {
-    auto* ctx = static_cast<TypedCtx*>(user);
+void json_cb(void* user, const char*, const char* json) {
+    auto* ctx = static_cast<JsonCtx*>(user);
     std::lock_guard<std::mutex> lock(ctx->mu);
     ctx->json = json;
 }
+
 } // namespace
 
-// Connect two nodes, then exercise pub/sub and typed JSON messaging via the C ABI.
-TEST(NodeCApiTest, PubSubAndTypedMessaging) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
-    ASSERT_NE(server, nullptr);
-    ASSERT_NE(client, nullptr);
+// ─── configuration ──────────────────────────────────────────────────────────
 
-    // Subsystems must be configured before start(). Both nodes subscribe / register
-    // so each has the subsystem attached; we then assert on one direction.
-    TopicCtx topic_ctx, client_topic_ctx;
-    TypedCtx typed_ctx, server_typed_ctx;
-    ASSERT_EQ(rats_enable_pubsub(server), RATS_OK);
-    ASSERT_EQ(rats_enable_pubsub(client), RATS_OK);
-    ASSERT_EQ(rats_enable_json(server), RATS_OK);
-    ASSERT_EQ(rats_enable_json(client), RATS_OK);
-    rats_subscribe(server, "news", topic_cb, &topic_ctx);
-    rats_subscribe(client, "news", topic_cb, &client_topic_ctx);
-    rats_on_json(client, "greet", typed_cb, &typed_ctx);
-    rats_on_json(server, "greet", typed_cb, &server_typed_ctx);
-
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1 && rats_peer_count(client) == 1; }));
-
-    // peer enumeration: the client should list exactly the server's id.
-    char* server_id = rats_local_id(server);
-    size_t n = 0;
-    char** ids = rats_peer_ids(client, &n);
-    ASSERT_EQ(n, 1u);
-    ASSERT_NE(ids, nullptr);
-    EXPECT_STREQ(ids[0], server_id);
-    rats_free_peer_ids(ids, n);
-
-    // pub/sub: client publishes once the server's subscription has propagated.
-    const char* payload = "breaking";
-    ASSERT_TRUE(wait_for([&] {
-        rats_publish(client, "news", payload, std::strlen(payload));
-        std::lock_guard<std::mutex> l(topic_ctx.mu);
-        return topic_ctx.data == payload;
-    })) << "pub/sub message not delivered";
-    {
-        std::lock_guard<std::mutex> l(topic_ctx.mu);
-        EXPECT_EQ(topic_ctx.topic, "news");
+// Zero is the default in every field, so a zeroed struct and NULL are the same
+// complete config: listening, both transports, UDP preferred.
+TEST(NodeCApiTest, AZeroedConfigIsTheDefaultConfig) {
+    rats_config_t cfg;
+    std::memset(&cfg, 0, sizeof(cfg));
+    for (const rats_config_t* c : {static_cast<const rats_config_t*>(&cfg),
+                                   static_cast<const rats_config_t*>(nullptr)}) {
+        rats_t node = rats_create(c);
+        ASSERT_NE(node, nullptr);
+        EXPECT_EQ(rats_transports(node), 0u) << "nothing runs before start";
+        ASSERT_EQ(rats_start(node), RATS_OK);
+        EXPECT_NE(rats_listen_port(node), 0);
+        EXPECT_EQ(rats_transports(node), RATS_TRANSPORT_MASK_TCP | RATS_TRANSPORT_MASK_UDP);
+        EXPECT_STREQ(rats_protocol(node), "librats/1.0");
+        rats_stop(node);
+        EXPECT_EQ(rats_transports(node), 0u);
+        rats_destroy(node);
     }
-
-    // typed JSON messaging: server → client.
-    char* client_id = rats_local_id(client);
-    ASSERT_TRUE(wait_for([&] {
-        rats_send_json(server, client_id, "greet", "{\"text\":\"hi\"}");
-        std::lock_guard<std::mutex> l(typed_ctx.mu);
-        return typed_ctx.json.find("\"text\"") != std::string::npos;
-    })) << "typed message not delivered";
-
-    rats_string_free(server_id);
-    rats_string_free(client_id);
-    rats_stop(client);
-    rats_stop(server);
-    rats_destroy(client);
-    rats_destroy(server);
 }
 
-// rats_config_default + rats_create_config: a data_dir makes the identity stable
-// across restarts (PeerId persisted to <data_dir>/identity.key), and protocol
-// fields are accepted. Proves the construction-time config is bridged.
+// A config no node can run with is refused at create, not discovered later from
+// a node that never connects.
+TEST(NodeCApiTest, AnImpossibleConfigIsRefused) {
+    rats_config_t cfg{};
+    cfg.transports = 0x4;   // no such transport
+    EXPECT_EQ(rats_create(&cfg), nullptr);
+
+    cfg = rats_config_t{};
+    cfg.preferred_transport = RATS_TRANSPORT_RELAY;   // a relay is never dialed
+    EXPECT_EQ(rats_create(&cfg), nullptr);
+
+    cfg = rats_config_t{};
+    cfg.transports          = RATS_TRANSPORT_MASK_UDP;
+    cfg.preferred_transport = RATS_TRANSPORT_TCP;     // asks for a transport it turned off
+    EXPECT_EQ(rats_create(&cfg), nullptr);
+
+    cfg = rats_config_t{};
+    cfg.security = static_cast<rats_security_t>(7);
+    EXPECT_EQ(rats_create(&cfg), nullptr);
+
+    cfg = rats_config_t{};
+    cfg.congestion_control = static_cast<rats_congestion_t>(7);
+    EXPECT_EQ(rats_create(&cfg), nullptr);
+
+    // The default preference follows the transports: TCP-only is not a contradiction.
+    cfg = rats_config_t{};
+    cfg.transports = RATS_TRANSPORT_MASK_TCP;
+    rats_t node = rats_create(&cfg);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(rats_start(node), RATS_OK);
+    EXPECT_EQ(rats_transports(node), RATS_TRANSPORT_MASK_TCP);
+    rats_destroy(node);   // destroy stops a running node
+}
+
+// data_dir makes the identity survive a restart; protocol reaches the node.
 TEST(NodeCApiTest, ConfigDataDirPersistsIdentity) {
     const std::filesystem::path dir =
         std::filesystem::temp_directory_path() / "librats_capi_identity_test";
     std::filesystem::remove_all(dir);
 
-    rats_config_t cfg = rats_config_default();
+    rats_config_t cfg{};
     const std::string dir_str = dir.string();
-    cfg.data_dir         = dir_str.c_str();
-    cfg.protocol         = "capi-test/2.0";
+    cfg.data_dir = dir_str.c_str();
+    cfg.protocol = "capi-test/2.0";
 
-    rats_t a = rats_create_config(&cfg);
+    rats_t a = rats_create(&cfg);
     ASSERT_NE(a, nullptr);
-    char* id_a = rats_local_id(a);
-    ASSERT_NE(id_a, nullptr);
-    const std::string first(id_a);
+    const std::string first = rats_local_id(a);
     EXPECT_EQ(first.size(), 64u);
-    rats_string_free(id_a);
+    EXPECT_STREQ(rats_protocol(a), "capi-test/2.0");
     rats_destroy(a);
 
-    // A second node over the SAME data_dir must load the same identity.
-    rats_t b = rats_create_config(&cfg);
-    char* id_b = rats_local_id(b);
-    EXPECT_EQ(std::string(id_b), first) << "identity not persisted via data_dir";
-    rats_string_free(id_b);
+    rats_t b = rats_create(&cfg);
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(std::string(rats_local_id(b)), first) << "identity not persisted via data_dir";
     rats_destroy(b);
 
     std::filesystem::remove_all(dir);
 }
 
-// Reconnection subsystem: an added target is actively dialed, so the node
-// connects without an explicit rats_connect. Error codes guard the contract.
-TEST(NodeCApiTest, ReconnectDialsTarget) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
+// The UDP knobs are ordinary config fields: two nodes squeezed to Reno, a small
+// window and budget, no offload and two reactor threads still talk — slower,
+// never wrong.
+TEST(NodeCApiTest, UdpTuningIsConfigurable) {
+    rats_config_t cfg{};
+    cfg.bind_address            = "127.0.0.1";
+    cfg.transports              = RATS_TRANSPORT_MASK_UDP;
+    cfg.congestion_control      = RATS_CONGESTION_RENO;
+    cfg.udp_receive_window      = 64 * 1024;
+    cfg.udp_receive_budget      = 256 * 1024;
+    cfg.disable_udp_offload     = 1;
+    cfg.reactor_threads         = 2;
+    cfg.disable_network_monitor = 1;
+    rats_t server = rats_create(&cfg);
+    rats_t client = rats_create(&cfg);
+    ASSERT_NE(server, nullptr);
+    ASSERT_NE(client, nullptr);
 
-    // Before enabling, add/remove report NOT_ENABLED.
-    EXPECT_EQ(rats_add_reconnect(client, "127.0.0.1", 1234), RATS_ERR_NOT_ENABLED);
+    BinCtx ctx;
+    ASSERT_EQ(rats_on(server, "rw", bin_collect_cb, &ctx), RATS_OK);
+    connect_pair(client, server);
 
-    ASSERT_EQ(rats_enable_reconnect(client), RATS_OK);
-    EXPECT_EQ(rats_enable_reconnect(client), RATS_OK);  // idempotent
+    const char* server_id = rats_local_id(server);
+    rats_peer_info_t info{};
+    ASSERT_EQ(rats_peer_info(client, server_id, &info), RATS_OK);
+    EXPECT_EQ(info.transport, RATS_TRANSPORT_UDP);
 
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
+    std::vector<uint8_t> payload(2 * 1024 * 1024);
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i * 131);
+    ASSERT_EQ(rats_send(client, server_id, "rw", payload.data(), payload.size(), 0), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
+    {
+        std::lock_guard<std::mutex> l(ctx.mu);
+        EXPECT_EQ(ctx.got, payload);
+    }
 
-    // Enabling a subsystem after start() is rejected.
-    EXPECT_EQ(rats_enable_reconnect(server), RATS_ERR_ALREADY_STARTED);
-
-    // Register the server's address as a reconnect target; the subsystem dials it.
-    ASSERT_EQ(rats_add_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }, 15s))
-        << "reconnect did not dial the added target";
-
-    EXPECT_EQ(rats_remove_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
-
-    rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
 
-// rats_once_json fires exactly once, then auto-removes.
-TEST(NodeCApiTest, OnceJsonFiresOnce) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+// ─── lifecycle and peers ────────────────────────────────────────────────────
 
-    std::atomic<int> hits{0};
-    ASSERT_EQ(rats_enable_json(server), RATS_OK);
-    ASSERT_EQ(rats_enable_json(client), RATS_OK);
-    rats_once_json(client, "ping", [](void* u, const char*, const char*) {
-        static_cast<std::atomic<int>*>(u)->fetch_add(1);
-    }, &hits);
+TEST(NodeCApiTest, LifecycleRules) {
+    rats_t a = make_server();
+    rats_t b = make_server();
+    EXPECT_EQ(std::strlen(rats_local_id(a)), 64u);
+    EXPECT_STRNE(rats_local_id(a), rats_local_id(b));
 
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1; }));
+    // Dialing needs a running node; registering node callbacks needs one that is not.
+    EXPECT_EQ(rats_connect(a, "127.0.0.1", 1), RATS_ERR_NOT_STARTED);
+    EXPECT_EQ(rats_on_peer_connected(a, nullptr, nullptr), RATS_ERR_INVALID_ARG);
 
-    char* client_id = rats_local_id(client);
-    for (int i = 0; i < 3; ++i) rats_send_json(server, client_id, "ping", "{}");
-    // Give all three a chance to arrive; only the first should be delivered.
-    ASSERT_TRUE(wait_for([&] { return hits.load() >= 1; }));
-    std::this_thread::sleep_for(300ms);
-    EXPECT_EQ(hits.load(), 1) << "once handler fired more than once";
+    ASSERT_EQ(rats_start(a), RATS_OK);
+    EXPECT_EQ(rats_start(a), RATS_ERR_ALREADY_STARTED);
+    EXPECT_NE(rats_listen_port(a), 0);
+    EXPECT_EQ(rats_on_peer_connected(a, [](void*, const char*) {}, nullptr), RATS_ERR_ALREADY_STARTED);
+    EXPECT_EQ(rats_on(a, "x", [](void*, const char*, const void*, size_t) {}, nullptr),
+              RATS_ERR_ALREADY_STARTED);
+    EXPECT_EQ(rats_enable_ping(a), RATS_ERR_ALREADY_STARTED);
+    EXPECT_EQ(rats_connect(a, nullptr, 1), RATS_ERR_INVALID_ARG);
 
-    rats_string_free(client_id);
-    rats_stop(client); rats_stop(server);
+    rats_stop(a);
+    rats_stop(a);   // idempotent
+    rats_destroy(a);
+    rats_destroy(b);
+}
+
+TEST(NodeCApiTest, ConnectSendAndEcho) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+
+    EchoCtx echo{server};
+    CollectCtx client_ctx;
+    ASSERT_EQ(rats_on(server, "chat", echo_cb, &echo), RATS_OK);
+    ASSERT_EQ(rats_on_peer_connected(client, peer_cb, &client_ctx), RATS_OK);
+    ASSERT_EQ(rats_on(client, "chat", collect_cb, &client_ctx), RATS_OK);
+
+    connect_pair(client, server);
+    // The peer table flips just before the connected callbacks run.
+    ASSERT_TRUE(wait_for([&] { return client_ctx.peers.load() == 1; }));
+
+    const char* msg = "hello capi";
+    ASSERT_EQ(rats_send(client, rats_local_id(server), "chat", msg, std::strlen(msg), 0), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(client_ctx.mu); return client_ctx.got == msg; }))
+        << "no echo via C API";
+
+    EXPECT_EQ(rats_send(client, rats_local_id(client), "chat", msg, 1, 0), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_send(client, "not-hex", "chat", msg, 1, 0), RATS_ERR_INVALID_ARG);
+
     rats_destroy(client); rats_destroy(server);
 }
 
-// max_peers is settable/readable via the ABI and actually caps inbound peers.
+// Everything the C API says about one peer: ids, wire, direction, address — and
+// that it can be told to go.
+TEST(NodeCApiTest, PeerEnumerationInfoAndDisconnect) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+
+    std::atomic<int> reason{-1};
+    ASSERT_EQ(rats_on_peer_disconnected(server, [](void* u, const char*, rats_close_reason_t why) {
+        static_cast<std::atomic<int>*>(u)->store(static_cast<int>(why));
+    }, &reason), RATS_OK);
+    connect_pair(client, server);
+
+    size_t n = 0;
+    char** ids = rats_peer_ids(client, &n);
+    ASSERT_EQ(n, 1u);
+    ASSERT_NE(ids, nullptr);
+    EXPECT_STREQ(ids[0], rats_local_id(server));
+    rats_strings_free(ids, n);
+
+    rats_peer_info_t info{};
+    ASSERT_EQ(rats_peer_info(client, rats_local_id(server), &info), RATS_OK);
+    EXPECT_EQ(info.direction, RATS_DIRECTION_OUTBOUND);
+    EXPECT_EQ(info.transport, RATS_TRANSPORT_UDP) << "UDP is the default first choice";
+    const std::string port = ":" + std::to_string(rats_listen_port(server));
+    EXPECT_NE(std::string(info.address).find(port), std::string::npos) << info.address;
+    ASSERT_TRUE(wait_for([&] {
+        return rats_peer_info(client, rats_local_id(server), &info) == RATS_OK &&
+               info.transports == (RATS_TRANSPORT_MASK_TCP | RATS_TRANSPORT_MASK_UDP);
+    })) << "the server's identify never said what it accepts";
+
+    ASSERT_EQ(rats_peer_info(server, rats_local_id(client), &info), RATS_OK);
+    EXPECT_EQ(info.direction, RATS_DIRECTION_INBOUND);
+    EXPECT_EQ(rats_peer_info(server, rats_local_id(server), &info), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_peer_info(server, rats_local_id(client), nullptr), RATS_ERR_INVALID_ARG);
+
+    ASSERT_EQ(rats_disconnect(client, rats_local_id(server)), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 0 && reason.load() != -1; }));
+    EXPECT_NE(reason.load(), static_cast<int>(RATS_CLOSE_SLOW_CONSUMER));
+    EXPECT_STRNE(rats_close_reason_str(static_cast<rats_close_reason_t>(reason.load())),
+                 "RATS_CLOSE_UNKNOWN");
+    EXPECT_EQ(rats_disconnect(client, rats_local_id(server)), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_peer_ids(client, &n), nullptr);
+    EXPECT_EQ(n, 0u);
+
+    rats_destroy(client); rats_destroy(server);
+}
+
+// A dial nothing answers reports its address once every transport has given up.
+TEST(NodeCApiTest, DialFailedNamesTheAddress) {
+    rats_t closed = make_server();
+    ASSERT_EQ(rats_start(closed), RATS_OK);
+    const uint16_t port = rats_listen_port(closed);
+    rats_destroy(closed);   // nothing listens on the port any more
+
+    rats_t client = make_client();
+    struct Ctx { std::mutex mu; std::string address; } ctx;
+    ASSERT_EQ(rats_on_dial_failed(client, [](void* u, const char* address) {
+        auto* c = static_cast<Ctx*>(u);
+        std::lock_guard<std::mutex> l(c->mu);
+        c->address = address;
+    }, &ctx), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    ASSERT_EQ(rats_connect(client, "127.0.0.1", port), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return !ctx.address.empty(); }, 15s));
+    {
+        std::lock_guard<std::mutex> l(ctx.mu);
+        EXPECT_EQ(ctx.address, "127.0.0.1:" + std::to_string(port));
+    }
+    rats_destroy(client);
+}
+
 TEST(NodeCApiTest, MaxPeersCapsInbound) {
-    rats_t server = rats_create(0);
-    rats_t a = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
-    rats_t b = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t server = make_server();
+    rats_t a = make_client();
+    rats_t b = make_client();
 
     rats_set_max_peers(server, 1);
     EXPECT_EQ(rats_max_peers(server), 1u);
@@ -324,98 +352,59 @@ TEST(NodeCApiTest, MaxPeersCapsInbound) {
     ASSERT_EQ(rats_start(a), RATS_OK);
     ASSERT_EQ(rats_start(b), RATS_OK);
 
-    uint16_t port = rats_listen_port(server);
+    const uint16_t port = rats_listen_port(server);
     rats_connect(a, "127.0.0.1", port);
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1; }));
 
-    rats_connect(b, "127.0.0.1", port);            // refused: server already at its cap
+    rats_connect(b, "127.0.0.1", port);   // refused: the server is at its cap
     std::this_thread::sleep_for(700ms);
     EXPECT_EQ(rats_peer_count(server), 1u);
 
-    rats_stop(a); rats_stop(b); rats_stop(server);
     rats_destroy(a); rats_destroy(b); rats_destroy(server);
 }
 
-// The disconnect callback fires — with the peer id AND why it went. The reason is
-// the half that lets an application respond: a peer that left is one to redial, a
-// peer dropped as a slow consumer means "you were sending too fast", and redialing
-// that one just repeats the overload. They are indistinguishable without it.
-namespace {
-struct GoneCtx { std::atomic<int> count{0}; std::atomic<int> reason{-1}; };
-} // namespace
+// ─── messaging ──────────────────────────────────────────────────────────────
 
-TEST(NodeCApiTest, DisconnectCallbackFires) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+// The payload is length-framed, not NUL-terminated.
+TEST(NodeCApiTest, BinaryPayloadWithNuls) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+    BinCtx ctx;
+    ASSERT_EQ(rats_on(server, "bin", bin_collect_cb, &ctx), RATS_OK);
+    connect_pair(client, server);
 
-    GoneCtx gone;
-    rats_on_peer_disconnected(server, [](void* u, const char* id, rats_close_reason_t why) {
-        auto* c = static_cast<GoneCtx*>(u);
-        c->reason.store(static_cast<int>(why));
-        if (id && std::strlen(id) == 64) c->count.fetch_add(1);
-    }, &gone);
-    std::atomic<int>& disconnects = gone.count;
-
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1; }));
-
-    rats_stop(client);  // drops the connection
-    ASSERT_TRUE(wait_for([&] { return disconnects.load() == 1; }));
-    EXPECT_EQ(rats_peer_count(server), 0u);
-
-    // A clean stop at the far end, not something we did — and above all not
-    // RATS_CLOSE_SLOW_CONSUMER, the one reason an application must act on.
-    const int why = gone.reason.load();
-    EXPECT_NE(why, -1) << "the callback ran without ever setting a reason";
-    EXPECT_NE(why, static_cast<int>(RATS_CLOSE_SLOW_CONSUMER));
-    EXPECT_STRNE(rats_close_reason_str(static_cast<rats_close_reason_t>(why)),
-                 "RATS_CLOSE_UNKNOWN")
-        << "a reason crossed the C ABI that rats_close_reason_str cannot name";
-
-    rats_stop(server);
-    rats_destroy(client);
-    rats_destroy(server);
+    const uint8_t payload[] = {0x00, 0x01, 0xFF, 0x00, 0x42};
+    ASSERT_EQ(rats_send(client, rats_local_id(server), "bin", payload, sizeof(payload), 0), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == sizeof(payload); }));
+    {
+        std::lock_guard<std::mutex> l(ctx.mu);
+        EXPECT_EQ(std::memcmp(ctx.got.data(), payload, sizeof(payload)), 0);
+    }
+    rats_destroy(client); rats_destroy(server);
 }
 
-// Backpressure, through the C ABI. Every FFI binding is built on this header, so
-// a signal missing here is a signal missing from Node.js, Python, Java and Android
-// alike — and there, the only way an application ever learned it was sending too
-// fast was the disconnection itself.
-namespace {
-struct WritableCtx { std::atomic<int> openings{0}; std::atomic<int> lost{0}; };
-} // namespace
-
+// Backpressure is the one signal an application has before a peer is dropped for
+// sending too fast; every binding gets it from here.
 TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
-    rats_config_t cfg = rats_config_default();
-    cfg.listen_port      = 0;
-    cfg.bind_address     = "127.0.0.1";
+    rats_config_t cfg{};
+    cfg.dial_only        = 1;
     cfg.send_queue_limit = 256 * 1024;   // ⇒ 64 KiB before "no room"
+    rats_t server = make_server();
+    rats_t client = rats_create(&cfg);
 
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_config(&cfg);
-
-    WritableCtx ctx;
+    struct Ctx { std::atomic<int> openings{0}; std::atomic<int> lost{0}; } ctx;
     rats_on_peer_writable(client, [](void* u, const char*) {
-        static_cast<WritableCtx*>(u)->openings.fetch_add(1);
+        static_cast<Ctx*>(u)->openings.fetch_add(1);
     }, &ctx);
     rats_on_peer_disconnected(client, [](void* u, const char*, rats_close_reason_t) {
-        static_cast<WritableCtx*>(u)->lost.fetch_add(1);
+        static_cast<Ctx*>(u)->lost.fetch_add(1);
     }, &ctx);
+    connect_pair(client, server);
 
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
-
-    char* server_id = rats_local_id(server);
-    ASSERT_NE(server_id, nullptr);
-
+    const char* server_id = rats_local_id(server);
     EXPECT_EQ(rats_peer_writable(client, server_id), 1) << "an idle peer reported no room";
     EXPECT_EQ(rats_peer_writable(client, "not-a-peer-id"), 0);
 
-    // Fill it, heeding the answer — which is only possible now that there is one.
     const std::vector<uint8_t> chunk(32 * 1024, 'c');
     bool told_to_stop = false;
     for (int i = 0; i < 64 && !told_to_stop; ++i) {
@@ -429,32 +418,23 @@ TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
     EXPECT_EQ(rats_peer_writable(client, server_id), 1);
     EXPECT_EQ(ctx.lost.load(), 0) << "a sender that heeded the answer lost its peer anyway";
 
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
 
-// Path samples cross the C ABI both ways an application can ask for them: the
-// callback that turns sampling on, and the getter that answers from any thread.
+// Path samples reach an application both ways: the callback that turns sampling
+// on, and the getter that answers from any thread.
 TEST(NodeCApiTest, PathStatsReachAnApplication) {
-    rats_config_t cfg = rats_config_default();
-    cfg.enable_listen = 0;
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_config(&cfg);
+    rats_t server = make_server();
+    rats_t client = make_client();
 
     std::atomic<int> samples{0};
     ASSERT_EQ(rats_on_peer_path(client, [](void* u, const char* id, const rats_path_stats_t* st) {
         if (id && st && st->srtt_us > 0) static_cast<std::atomic<int>*>(u)->fetch_add(1);
     }, &samples), RATS_OK);
     EXPECT_EQ(rats_on_peer_path(client, nullptr, nullptr), RATS_ERR_INVALID_ARG);
+    connect_pair(client, server);
 
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
-
-    char* server_id = rats_local_id(server);
-    ASSERT_NE(server_id, nullptr);
+    const char* server_id = rats_local_id(server);
     const std::vector<uint8_t> chunk(32 * 1024, 'p');
     for (int i = 0; i < 16; ++i) rats_send(client, server_id, "bulk", chunk.data(), chunk.size(), 0);
 
@@ -465,168 +445,115 @@ TEST(NodeCApiTest, PathStatsReachAnApplication) {
     EXPECT_GT(st.bandwidth_bps, 0u);
     EXPECT_EQ(rats_path_stats(client, "not-a-peer-id", &st), RATS_ERR_INVALID_ARG);
     EXPECT_EQ(rats_path_stats(client, server_id, nullptr), RATS_ERR_INVALID_ARG);
-
-    char* client_id = rats_local_id(client);
-    EXPECT_EQ(rats_path_stats(server, client_id, &st), RATS_ERR_NO_SUCH_PEER)
+    EXPECT_EQ(rats_path_stats(server, rats_local_id(client), &st), RATS_ERR_NO_SUCH_PEER)
         << "the server never asked for samples";
 
-    rats_string_free(client_id);
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
 
-namespace {
-struct BinCtx { std::mutex mu; std::vector<uint8_t> got; };
-void bin_collect_cb(void* user, const char*, const void* data, size_t len) {
-    auto* ctx = static_cast<BinCtx*>(user);
-    std::lock_guard<std::mutex> l(ctx->mu);
-    const auto* p = static_cast<const uint8_t*>(data);
-    ctx->got.assign(p, p + len);
-}
-} // namespace
-
-// The congestion controller is a config field like any other: BBR unless asked,
-// and zeroed memory reads as BBR too. Two Reno nodes still talk over UDP — the
-// controller decides how fast, never whether.
-TEST(NodeCApiTest, CongestionControlIsConfigurable) {
-    EXPECT_EQ(rats_config_default().congestion_control, RATS_CONGESTION_BBR);
-    EXPECT_EQ(static_cast<int>(RATS_CONGESTION_BBR), 0) << "zeroed memory must mean the default";
-
-    rats_config_t cfg = rats_config_default();
-    cfg.bind_address        = "127.0.0.1";
-    cfg.enable_tcp          = 0;   // UDP only, or the controller would not be in play
-    cfg.congestion_control  = RATS_CONGESTION_RENO;
-    rats_t server = rats_create_config(&cfg);
-    rats_t client = rats_create_config(&cfg);
-
+// A lifetime makes a message live: it arrives at the same callback, the path stats
+// count it, and a payload past what a live message may carry is refused.
+TEST(NodeCApiTest, ALiveMessageArrivesAtTheChannelCallback) {
+    rats_config_t cfg{};
+    cfg.dial_only      = 1;
+    cfg.path_sample_ms = 20;
+    rats_t server = make_server();
+    rats_t client = rats_create(&cfg);
     BinCtx ctx;
-    rats_on(server, "cc", bin_collect_cb, &ctx);
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+    ASSERT_EQ(rats_on(server, "video", bin_collect_cb, &ctx), RATS_OK);
+    connect_pair(client, server);
 
-    char* server_id = rats_local_id(server);
-    ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
-    const std::vector<uint8_t> payload(200 * 1024, 0x5A);
-    ASSERT_EQ(rats_send(client, server_id, "cc", payload.data(), payload.size(), 0), RATS_OK);
-    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
+    const char* server_id = rats_local_id(server);
+    const std::vector<uint8_t> frame(20000, 'k');
+    ASSERT_EQ(rats_send(client, server_id, "video", frame.data(), frame.size(), 500), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got == frame; }))
+        << "the live message never reached the callback";
 
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
+    const std::vector<uint8_t> too_big(RATS_LIVE_MAX_PAYLOAD + 1, 'x');
+    EXPECT_EQ(rats_send(client, server_id, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_broadcast(client, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
+
+    rats_path_stats_t st{};
+    EXPECT_TRUE(wait_for([&] {
+        return rats_path_stats(client, server_id, &st) == RATS_OK && st.live_sent == 1;
+    })) << "the live message was not counted";
+    EXPECT_EQ(st.live_expired, 0u);
+
     rats_destroy(client); rats_destroy(server);
 }
 
+// ─── subsystems ─────────────────────────────────────────────────────────────
 
-// The UDP receive window's ceiling and the budget all streams share are config
-// fields too: 0 (and so zeroed memory) is the library default, and a node squeezed
-// to a small window and a small budget is slower, never wrong.
-TEST(NodeCApiTest, UdpReceiveLimitsAreConfigurable) {
-    EXPECT_EQ(rats_config_default().udp_receive_window, 0u);
-    EXPECT_EQ(rats_config_default().udp_receive_budget, 0u);
+TEST(NodeCApiTest, PubSubAndJsonMessaging) {
+    rats_t server = make_server();
+    rats_t client = make_client();
 
-    rats_config_t cfg = rats_config_default();
-    cfg.bind_address       = "127.0.0.1";
-    cfg.enable_tcp         = 0;
-    cfg.udp_receive_window = 64 * 1024;
-    cfg.udp_receive_budget = 256 * 1024;
-    rats_t server = rats_create_config(&cfg);
-    rats_t client = rats_create_config(&cfg);
+    EXPECT_EQ(rats_publish(client, "news", "x", 1), RATS_ERR_NOT_ENABLED);
+    TopicCtx topic_ctx, client_topic_ctx;
+    JsonCtx json_ctx, server_json_ctx;
+    for (rats_t n : {server, client}) {
+        ASSERT_EQ(rats_enable_pubsub(n), RATS_OK);
+        ASSERT_EQ(rats_enable_json(n), RATS_OK);
+    }
+    ASSERT_EQ(rats_subscribe(server, "news", topic_cb, &topic_ctx), RATS_OK);
+    ASSERT_EQ(rats_subscribe(client, "news", topic_cb, &client_topic_ctx), RATS_OK);
+    ASSERT_EQ(rats_on_json(client, "greet", json_cb, &json_ctx), RATS_OK);
+    ASSERT_EQ(rats_on_json(server, "greet", json_cb, &server_json_ctx), RATS_OK);
+    connect_pair(client, server);
 
-    BinCtx ctx;
-    rats_on(server, "rw", bin_collect_cb, &ctx);
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
-
-    char* server_id = rats_local_id(server);
-    ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
-    std::vector<uint8_t> payload(2 * 1024 * 1024);
-    for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i * 131);
-    ASSERT_EQ(rats_send(client, server_id, "rw", payload.data(), payload.size(), 0), RATS_OK);
-    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
+    const char* payload = "breaking";
+    ASSERT_TRUE(wait_for([&] {
+        rats_publish(client, "news", payload, std::strlen(payload));
+        std::lock_guard<std::mutex> l(topic_ctx.mu);
+        return topic_ctx.data == payload;
+    })) << "pub/sub message not delivered";
     {
-        std::lock_guard<std::mutex> l(ctx.mu);
-        EXPECT_EQ(ctx.got, payload);
+        std::lock_guard<std::mutex> l(topic_ctx.mu);
+        EXPECT_EQ(topic_ctx.topic, "news");
     }
 
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
+    const char* client_id = rats_local_id(client);
+    EXPECT_EQ(rats_send_json(server, client_id, "greet", "{not json"), RATS_ERR_INVALID_ARG);
+    ASSERT_TRUE(wait_for([&] {
+        rats_send_json(server, client_id, "greet", "{\"text\":\"hi\"}");
+        std::lock_guard<std::mutex> l(json_ctx.mu);
+        return json_ctx.json.find("\"text\"") != std::string::npos;
+    })) << "JSON message not delivered";
+
     rats_destroy(client); rats_destroy(server);
 }
 
-// rats_send carries (void*, len) faithfully — a payload with embedded NUL bytes
-// round-trips intact, proving the channel is length-framed, not NUL-terminated.
-TEST(NodeCApiTest, BinaryPayloadWithNuls) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+TEST(NodeCApiTest, OnceJsonFiresOnce) {
+    rats_t server = make_server();
+    rats_t client = make_client();
 
-    BinCtx ctx;
-    rats_on(server, "bin", bin_collect_cb, &ctx);
+    std::atomic<int> hits{0};
+    ASSERT_EQ(rats_enable_json(server), RATS_OK);
+    ASSERT_EQ(rats_enable_json(client), RATS_OK);
+    ASSERT_EQ(rats_once_json(client, "ping", [](void* u, const char*, const char*) {
+        static_cast<std::atomic<int>*>(u)->fetch_add(1);
+    }, &hits), RATS_OK);
+    connect_pair(client, server);
 
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+    for (int i = 0; i < 3; ++i) rats_send_json(server, rats_local_id(client), "ping", "{}");
+    ASSERT_TRUE(wait_for([&] { return hits.load() >= 1; }));
+    std::this_thread::sleep_for(300ms);
+    EXPECT_EQ(hits.load(), 1) << "once handler fired more than once";
 
-    const uint8_t payload[] = {0x00, 0x01, 0xFF, 0x00, 0x42};
-    char* server_id = rats_local_id(server);
-    rats_send(client, server_id, "bin", payload, sizeof(payload), 0);
-
-    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == sizeof(payload); }));
-    {
-        std::lock_guard<std::mutex> l(ctx.mu);
-        EXPECT_EQ(std::memcmp(ctx.got.data(), payload, sizeof(payload)), 0);
-    }
-
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
 
-// File-transfer negative/control paths: bad inputs return 0 / are no-ops, never crash.
-TEST(NodeCApiTest, FileTransferNegativePaths) {
-    rats_t node = rats_create(0);
-    rats_enable_file_transfer(node, ".");
-    ASSERT_EQ(rats_start(node), RATS_OK);
-
-    char* self = rats_local_id(node);  // a valid 64-hex id (but no transfer exists for it)
-
-    EXPECT_EQ(rats_send_file(node, "not-a-valid-hex-id", "whatever.bin"), 0u);   // bad hex
-    EXPECT_EQ(rats_send_file(node, self, "no_such_file_98765.bin"), 0u);          // missing path
-    EXPECT_EQ(rats_send_directory(node, self, "no_such_dir_98765"), 0u);          // missing dir
-    EXPECT_EQ(rats_cancel_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);       // unknown transfer
-    EXPECT_EQ(rats_pause_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);
-    EXPECT_EQ(rats_resume_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);
-    EXPECT_NO_THROW(rats_accept_file(node, self, 999999u, "dest.bin"));           // no-op, no crash
-    EXPECT_NO_THROW(rats_reject_file(node, self, 999999u));
-
-    rats_string_free(self);
-    rats_stop(node);
-    rats_destroy(node);
-}
-
-// rats_broadcast (raw) and rats_broadcast_typed (JSON) both reach a connected peer.
-TEST(NodeCApiTest, BroadcastRawAndTyped) {
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+TEST(NodeCApiTest, BroadcastRawAndJson) {
+    rats_t server = make_server();
+    rats_t client = make_client();
 
     CollectCtx raw_ctx;
-    TypedCtx typed_ctx, server_typed_ctx;
+    JsonCtx json_ctx;
     ASSERT_EQ(rats_enable_json(client), RATS_OK);
     ASSERT_EQ(rats_enable_json(server), RATS_OK);
-    rats_on(client, "raw", collect_cb, &raw_ctx);
-    rats_on_json(client, "ev", typed_cb, &typed_ctx);
-    // The server must own a MessageExchange before start() to broadcast typed
-    // messages (subsystems attach pre-start), so register a handler on it too.
-    rats_on_json(server, "ev", typed_cb, &server_typed_ctx);
-
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1 && rats_peer_count(client) == 1; }));
+    ASSERT_EQ(rats_on(client, "raw", collect_cb, &raw_ctx), RATS_OK);
+    ASSERT_EQ(rats_on_json(client, "ev", json_cb, &json_ctx), RATS_OK);
+    connect_pair(client, server);
 
     const char* raw = "via-broadcast";
     ASSERT_TRUE(wait_for([&] {
@@ -637,137 +564,201 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
 
     ASSERT_TRUE(wait_for([&] {
         rats_broadcast_json(server, "ev", "{\"k\":99}");
-        std::lock_guard<std::mutex> l(typed_ctx.mu);
-        return typed_ctx.json.find("\"k\"") != std::string::npos;
-    })) << "typed broadcast not delivered";
+        std::lock_guard<std::mutex> l(json_ctx.mu);
+        return json_ctx.json.find("\"k\"") != std::string::npos;
+    })) << "JSON broadcast not delivered";
 
-    rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
 
-// Hole punching through the C ABI: the whole capability has to be reachable from a
-// binding, not just from C++ — enable it, ask about the NAT, and punch.
+// An added target is dialed by the subsystem, without a rats_connect.
+TEST(NodeCApiTest, ReconnectDialsTarget) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+
+    EXPECT_EQ(rats_add_reconnect(client, "127.0.0.1", 1234), RATS_ERR_NOT_ENABLED);
+    ASSERT_EQ(rats_enable_reconnect(client), RATS_OK);
+    EXPECT_EQ(rats_enable_reconnect(client), RATS_OK);   // idempotent
+
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    EXPECT_EQ(rats_enable_reconnect(server), RATS_ERR_ALREADY_STARTED);
+
+    ASSERT_EQ(rats_add_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }, 15s))
+        << "reconnect did not dial the added target";
+    EXPECT_EQ(rats_remove_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+
+    rats_destroy(client); rats_destroy(server);
+}
+
+// Bad inputs return 0 or an error, never crash; an unknown transfer is NOT_FOUND.
+TEST(NodeCApiTest, FileTransferNegativePaths) {
+    rats_t node = make_server();
+    EXPECT_EQ(rats_cancel_file(node, rats_local_id(node), 1), RATS_ERR_NOT_ENABLED);
+    ASSERT_EQ(rats_enable_file_transfer(node, "."), RATS_OK);
+    ASSERT_EQ(rats_on_file_progress(node, [](void*, const rats_file_progress_t*) {}, nullptr), RATS_OK);
+    ASSERT_EQ(rats_start(node), RATS_OK);
+    EXPECT_EQ(rats_on_file_offer(node, [](void*, const char*, uint64_t, const char*, uint64_t, int) {},
+                                 nullptr), RATS_ERR_ALREADY_STARTED);
+
+    const char* self = rats_local_id(node);   // valid hex, but no transfer exists for it
+    uint64_t tid = 7;
+    EXPECT_EQ(rats_send_file(node, "not-a-valid-hex-id", "whatever.bin", &tid), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(tid, 0u);
+    EXPECT_EQ(rats_send_file(node, self, "whatever.bin", &tid), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_send_directory(node, self, "no_such_dir_98765", nullptr), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_cancel_file(node, self, 999999u), RATS_ERR_NOT_FOUND);
+    EXPECT_EQ(rats_pause_file(node, self, 999999u), RATS_ERR_NOT_FOUND);
+    EXPECT_EQ(rats_resume_file(node, self, 999999u), RATS_ERR_NOT_FOUND);
+    EXPECT_EQ(rats_accept_file(node, self, 999999u, "dest.bin"), RATS_OK);   // nothing to accept: no-op
+    EXPECT_EQ(rats_reject_file(node, self, 999999u), RATS_OK);
+
+    rats_destroy(node);
+}
+
+// A real offer: a path that cannot be read is NOT_FOUND, a readable one gets an id
+// and the receiver hears of it.
+TEST(NodeCApiTest, FileOfferReachesThePeer) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+    std::atomic<uint64_t> offered{0};
+    for (rats_t n : {server, client}) ASSERT_EQ(rats_enable_file_transfer(n, "."), RATS_OK);
+    ASSERT_EQ(rats_on_file_offer(server, [](void* u, const char*, uint64_t id, const char*, uint64_t, int) {
+        static_cast<std::atomic<uint64_t>*>(u)->store(id);
+    }, &offered), RATS_OK);
+    connect_pair(client, server);
+
+    const auto file = std::filesystem::temp_directory_path() / "librats_capi_offer.bin";
+    { FILE* f = std::fopen(file.string().c_str(), "wb"); ASSERT_NE(f, nullptr); std::fputs("x", f); std::fclose(f); }
+
+    const char* server_id = rats_local_id(server);
+    uint64_t tid = 0;
+    EXPECT_EQ(rats_send_file(client, server_id, "no_such_file_98765.bin", &tid), RATS_ERR_NOT_FOUND);
+    ASSERT_EQ(rats_send_file(client, server_id, file.string().c_str(), &tid), RATS_OK);
+    EXPECT_NE(tid, 0u);
+    EXPECT_TRUE(wait_for([&] { return offered.load() == tid; })) << "the offer never arrived";
+    EXPECT_EQ(rats_cancel_file(client, server_id, tid), RATS_OK);
+
+    rats_destroy(client); rats_destroy(server);
+    std::filesystem::remove(file);
+}
+
+// One contact is enough: b learns of a from the hub it shares with it, and dials.
+TEST(NodeCApiTest, PeerExchangeIntroducesPeers) {
+    rats_t hub = make_server();
+    rats_t a   = make_server();
+    rats_t b   = make_server();
+    for (rats_t n : {hub, a, b}) {
+        ASSERT_EQ(rats_enable_peer_exchange(n), RATS_OK);
+        ASSERT_EQ(rats_start(n), RATS_OK);
+    }
+    rats_connect(a, "127.0.0.1", rats_listen_port(hub));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(hub) == 1; }));
+    rats_connect(b, "127.0.0.1", rats_listen_port(hub));
+
+    EXPECT_TRUE(wait_for([&] { return rats_peer_count(a) == 2 && rats_peer_count(b) == 2; }, 15s))
+        << "peer exchange never introduced a and b";
+
+    rats_destroy(a); rats_destroy(b); rats_destroy(hub);
+}
+
+// Hole punching is reachable end to end from the C ABI: enable, read the NAT
+// classification, punch.
 TEST(NodeCApiTest, HolePunchIsReachableFromTheCApi) {
-    rats_t hub = rats_create_ex(0, /*enable_listen=*/1, "127.0.0.1", RATS_SECURITY_NOISE);
-    rats_t a   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
-    rats_t b   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t hub = make_server();
+    rats_t a   = make_server();
+    rats_t b   = make_server();
 
-    // Before enabling there is nothing to punch with.
-    EXPECT_EQ(rats_punch_peer(a, "00"), RATS_ERR_NOT_ENABLED);
+    EXPECT_EQ(rats_punch_peer(a, "00"), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_punch_peer(a, rats_local_id(b)), RATS_ERR_NOT_ENABLED);
 
-    ASSERT_EQ(rats_enable_hole_punch(hub, /*serve_as_relay=*/1), RATS_OK);
+    ASSERT_EQ(rats_enable_hole_punch(hub, /*serve_rendezvous=*/1), RATS_OK);
     ASSERT_EQ(rats_enable_hole_punch(a, 0), RATS_OK);
     ASSERT_EQ(rats_enable_hole_punch(b, 0), RATS_OK);
-    EXPECT_EQ(rats_enable_hole_punch(a, 0), RATS_OK);  // idempotent
+    EXPECT_EQ(rats_enable_hole_punch(a, 0), RATS_OK);   // idempotent
 
-    ASSERT_EQ(rats_start(hub), RATS_OK);
-    ASSERT_EQ(rats_start(a), RATS_OK);
-    ASSERT_EQ(rats_start(b), RATS_OK);
+    for (rats_t n : {hub, a, b}) ASSERT_EQ(rats_start(n), RATS_OK);
     EXPECT_EQ(rats_enable_hole_punch(a, 0), RATS_ERR_ALREADY_STARTED);
 
     rats_connect(a, "127.0.0.1", rats_listen_port(hub));
     rats_connect(b, "127.0.0.1", rats_listen_port(hub));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(hub) == 2; }));
 
-    // With no NAT between them the mesh reports an open path — and, either way, an
-    // external endpoint has been learned, which is what a punch needs.
+    // No NAT on loopback; either way an external endpoint was learned, which is
+    // what a punch needs.
     ASSERT_TRUE(wait_for([&] { return rats_nat_mapping(a) == RATS_NAT_OPEN; }))
         << "the node never classified its own path";
+    size_t n = 0;
+    char** seen = rats_observed_addresses(a, &n);
+    EXPECT_GE(n, 1u) << "no peer reported where it sees us";
+    rats_strings_free(seen, n);
 
-    char* b_id = rats_local_id(b);
-    ASSERT_NE(b_id, nullptr);
+    const char* b_id = rats_local_id(b);
     EXPECT_EQ(rats_punch_peer(a, b_id), RATS_OK);
-    EXPECT_EQ(rats_punch_peer(a, "not-a-peer-id"), RATS_ERR_INVALID_ARG);
-
     EXPECT_TRUE(wait_for([&] { return rats_peer_count(a) == 2 && rats_peer_count(b) == 2; }, 15s))
         << "the punch never produced a direct link";
+    EXPECT_EQ(rats_punch_peer(a, b_id), RATS_ERR_DECLINED) << "already connected";
 
-    // And a punch to somebody already connected is declined rather than started.
-    EXPECT_EQ(rats_punch_peer(a, b_id), RATS_ERR_NO_SUCH_PEER);
-    rats_string_free(b_id);
-
-    rats_stop(a); rats_stop(b); rats_stop(hub);
     rats_destroy(a); rats_destroy(b); rats_destroy(hub);
 }
 
-// Relaying through the C ABI, for the same reason: a binding has to be able to reach
-// the last rung of the ladder too. The peer it produces is ordinary except for one
-// thing, and that one thing is what the C API has to be able to report.
+// Relaying likewise — and the one thing that tells a relayed peer apart is
+// reported through rats_peer_info.
 TEST(NodeCApiTest, RelayingIsReachableFromTheCApi) {
-    rats_t hub = rats_create_ex(0, /*enable_listen=*/1, "127.0.0.1", RATS_SECURITY_NOISE);
-    rats_t a   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
-    rats_t b   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t hub = make_server();
+    rats_t a   = make_server();
+    rats_t b   = make_server();
 
-    // Before enabling there is nothing to relay through.
-    EXPECT_EQ(rats_connect_via_relay(a, "00"), RATS_ERR_NOT_ENABLED);
+    EXPECT_EQ(rats_connect_via_relay(a, rats_local_id(b)), RATS_ERR_NOT_ENABLED);
 
-    ASSERT_EQ(rats_enable_relay(hub, /*serve_as_relay=*/1), RATS_OK);
+    ASSERT_EQ(rats_enable_relay(hub, /*serve=*/1), RATS_OK);
     ASSERT_EQ(rats_enable_relay(a, 0), RATS_OK);
     ASSERT_EQ(rats_enable_relay(b, 0), RATS_OK);
-    EXPECT_EQ(rats_enable_relay(a, 0), RATS_OK);  // idempotent
+    EXPECT_EQ(rats_enable_relay(a, 0), RATS_OK);   // idempotent
 
-    ASSERT_EQ(rats_start(hub), RATS_OK);
-    ASSERT_EQ(rats_start(a), RATS_OK);
-    ASSERT_EQ(rats_start(b), RATS_OK);
+    for (rats_t n : {hub, a, b}) ASSERT_EQ(rats_start(n), RATS_OK);
     EXPECT_EQ(rats_enable_relay(a, 0), RATS_ERR_ALREADY_STARTED);
 
     rats_connect(a, "127.0.0.1", rats_listen_port(hub));
     rats_connect(b, "127.0.0.1", rats_listen_port(hub));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(hub) == 2; }));
 
-    char* b_id = rats_local_id(b);
-    ASSERT_NE(b_id, nullptr);
+    const char* b_id = rats_local_id(b);
     EXPECT_EQ(rats_connect_via_relay(a, "not-a-peer-id"), RATS_ERR_INVALID_ARG);
     EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_OK);
-
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(a) == 2 && rats_peer_count(b) == 2; }, 20s))
         << "the relay never produced a connection";
-    // The one thing that distinguishes it from any other peer.
-    EXPECT_EQ(rats_peer_transport(a, b_id), RATS_TRANSPORT_RELAY);
 
-    // And a second attempt to somebody already connected is declined, not started.
-    EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_ERR_NO_SUCH_PEER);
-    rats_string_free(b_id);
+    rats_peer_info_t info{};
+    ASSERT_EQ(rats_peer_info(a, b_id, &info), RATS_OK);
+    EXPECT_EQ(info.transport, RATS_TRANSPORT_RELAY);
+    EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_ERR_DECLINED) << "already connected";
 
-    rats_stop(a); rats_stop(b); rats_stop(hub);
     rats_destroy(a); rats_destroy(b); rats_destroy(hub);
 }
 
-// A lifetime makes a message live through the C ABI as it does in C++: it arrives
-// at the same callback, the path stats count it, and one past the size a live
-// message may carry is refused at the call.
-TEST(NodeCApiTest, ALiveMessageArrivesAtTheChannelCallback) {
-    rats_config_t cfg = rats_config_default();
-    cfg.enable_listen  = 0;
-    cfg.path_sample_ms = 20;
-    rats_t server = rats_create(0);
-    rats_t client = rats_create_config(&cfg);
-    BinCtx ctx;
-    ASSERT_EQ(rats_on(server, "video", bin_collect_cb, &ctx), RATS_OK);
-    ASSERT_EQ(rats_start(server), RATS_OK);
-    ASSERT_EQ(rats_start(client), RATS_OK);
-    rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1 && rats_peer_count(server) == 1; }));
+#ifndef RATS_SEARCH_FEATURES
+TEST(NodeCApiTest, BitTorrentIsUnavailableWithoutTheFeature) {
+    rats_t node = make_server();
+    EXPECT_EQ(rats_enable_bittorrent(node, nullptr), RATS_ERR_NOT_ENABLED);
+    EXPECT_EQ(rats_bt_add_magnet(node, "magnet:?xt=urn:btih:00", nullptr), RATS_ERR_NOT_ENABLED);
+    rats_destroy(node);
+}
+#endif
 
-    char* server_id = rats_local_id(server);
-    const std::vector<uint8_t> frame(20000, 'k');
-    ASSERT_EQ(rats_send(client, server_id, "video", frame.data(), frame.size(), 500), RATS_OK);
-    ASSERT_TRUE(wait_for([&] {
-        std::lock_guard<std::mutex> l(ctx.mu);
-        return ctx.got == frame;
-    })) << "the live message never reached the callback";
+// ─── process-wide ───────────────────────────────────────────────────────────
 
-    const std::vector<uint8_t> too_big(1024 * 1024 + 1, 'x');
-    EXPECT_EQ(rats_send(client, server_id, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
-    EXPECT_EQ(rats_broadcast(client, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
+TEST(NodeCApiTest, NamesAndVersion) {
+    EXPECT_STREQ(rats_error_str(RATS_ERR_DECLINED), "RATS_ERR_DECLINED");
+    EXPECT_STREQ(rats_error_str(static_cast<rats_error_t>(99)), "RATS_ERR_UNKNOWN");
+    EXPECT_STREQ(rats_close_reason_str(RATS_CLOSE_DIAL_SUPERSEDED), "RATS_CLOSE_DIAL_SUPERSEDED");
 
-    rats_path_stats_t st{};
-    EXPECT_TRUE(wait_for([&] {
-        return rats_path_stats(client, server_id, &st) == RATS_OK && st.live_sent == 1;
-    })) << "the live message was not counted";
-    EXPECT_EQ(st.live_expired, 0u);
-
-    rats_string_free(server_id);
-    rats_stop(client); rats_stop(server);
-    rats_destroy(client); rats_destroy(server);
+    int major = -1, minor = -1, patch = -1;
+    rats_version(&major, &minor, &patch, nullptr);
+    EXPECT_GE(major, 0);
+    EXPECT_EQ(rats_abi(), (static_cast<uint32_t>(major) << 16) | (static_cast<uint32_t>(minor) << 8) |
+                              static_cast<uint32_t>(patch));
+    EXPECT_NE(rats_version_string(), nullptr);
+    rats_strings_free(nullptr, 0);
 }

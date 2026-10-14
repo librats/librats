@@ -10,7 +10,7 @@ enabled/registered before ``start()``.
 import os
 import sys
 
-from librats_py import RatsNode, RatsError, LogLevel, FileTransferStatus, set_log_level
+from librats_py import RatsNode, RatsError, LogLevel, FileProgress, set_log_level
 
 
 class FileTransferExample:
@@ -24,7 +24,7 @@ class FileTransferExample:
         # Register callbacks + enable subsystem BEFORE start().
         self.node.on_peer_connected(lambda pid: print(f"+ Peer connected: {pid}"))
         self.node.on_peer_disconnected(
-            lambda pid, why: print(f"- Peer disconnected: {pid} ({why})"))
+            lambda pid, why: print(f"- Peer disconnected: {pid} ({why.name})"))
 
         self.node.enable_file_transfer(temp_dir=download_dir)
         self.node.on_file_offer(self.on_offer)
@@ -40,12 +40,13 @@ class FileTransferExample:
         self.node.accept_file(peer_id, transfer_id, dest)
         print(f"Accepted → {dest}")
 
-    def on_progress(self, transfer_id, peer_id, done, total, status):
-        pct = (done * 100 // total) if total else 0
-        print(f"  transfer {transfer_id}: {pct}% ({done}/{total}) "
-              f"[{FileTransferStatus(status).name}]")
+    def on_progress(self, p: FileProgress):
+        pct = (p.bytes_transferred * 100 // p.total_bytes) if p.total_bytes else 0
+        print(f"  transfer {p.transfer_id} ({p.direction.name.lower()}): {pct}% "
+              f"({p.bytes_transferred}/{p.total_bytes}, {p.rate_bytes_per_sec / 1024:.0f} KiB/s) "
+              f"[{p.status.name}]")
 
-    def on_complete(self, transfer_id, peer_id, success, path):
+    def on_complete(self, peer_id, transfer_id, success, path):
         state = "completed" if success else "failed"
         print(f"\nTransfer {transfer_id} with {peer_id[:8]} {state}: {path}")
 

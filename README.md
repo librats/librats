@@ -646,50 +646,54 @@ Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` *
 
 ### C API (`bindings/rats.h`)
 
-The canonical opaque-pointer C ABI — the foundation for every language binding. A `rats_t` wraps a `Node`. Fallible calls return `rats_error_t` (`RATS_OK == 0`); pure getters return their value directly. Subsystems are opt-in: enable each with the matching `rats_enable_*()` **before** `rats_start()`. Strings returned by the library are heap-allocated — free them with `rats_string_free()`.
+The C ABI every language binding is built on. A `rats_t` is an opaque handle to one node. `rats_config_t` is zero-initialisable — zero in any field is that field's default — so `rats_create(NULL)` or a designated initialiser naming only what you change is a complete config; a config no node could run with makes `rats_create()` return `NULL`. Fallible calls return `rats_error_t` (`RATS_OK == 0`). Subsystems are enabled with their `rats_enable_*()` before `rats_start()`, and node callbacks are registered before it too. Peer ids are 64-char hex; `rats_local_id()` and the other `const char*` results belong to the library, and the arrays from `rats_peer_ids()` / `rats_observed_addresses()` are freed with `rats_strings_free()`.
 
 ```c
 #include <librats/bindings/rats.h>
 #include <stdio.h>
 
-static void on_connected(void* user, const char* peer_id_hex) {
-    printf("[+] connected: %s\n", peer_id_hex);
+static void on_connected(void* user, const char* peer_id) {
+    printf("[+] connected: %s
+", peer_id);
 }
-static void on_chat(void* user, const char* peer_id_hex, const void* data, size_t len) {
-    printf("%s: %.*s\n", peer_id_hex, (int)len, (const char*)data);
+static void on_chat(void* user, const char* peer_id, const void* data, size_t len) {
+    printf("%s: %.*s
+", peer_id, (int)len, (const char*)data);
 }
 
 int main(void) {
-    rats_t node = rats_create(8080);
+    rats_config_t cfg = { .listen_port = 8080, .protocol = "chat/1.0" };
+    rats_t node = rats_create(&cfg);
+    if (!node) return 1;
 
-    rats_on_peer_connected(node, on_connected, NULL);
+    rats_on_peer_connected(node, on_connected, NULL);   /* before start */
     rats_on(node, "chat", on_chat, NULL);
-
-    rats_enable_pubsub(node);          // before start
     rats_enable_dht(node, 0, NULL);
 
     if (rats_start(node) != RATS_OK) return 1;
 
     rats_connect(node, "127.0.0.1", 8081);
-    rats_broadcast(node, "chat", "hello", 5, 0);   // lifetime 0: reliable
+    rats_broadcast(node, "chat", "hello", 5, 0);   /* lifetime 0: reliable */
 
     /* ... run ... */
-    rats_stop(node);
-    rats_destroy(node);
+    rats_destroy(node);   /* stops it first */
     return 0;
 }
 ```
 
-The C API covers the same ground as the C++ one, subsystem by subsystem:
-
 | Area | Calls |
 |------|-------|
-| Lifecycle | `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop` |
-| Peers & messaging | `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on`, `rats_on_peer_connected` / `rats_on_peer_disconnected` / `rats_on_peer_writable`, `rats_peer_writable`, `rats_peer_ids`, `rats_peer_count`, `rats_close_reason_str` |
-| Enable subsystems | `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping,hole_punch,relay}` |
-| Pub/sub, JSON, files | `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_send_directory` / `rats_accept_file` / `rats_reject_file` |
-| NAT | `rats_punch_peer`, `rats_nat_mapping`, `rats_connect_via_relay` |
-| Info & logging | `rats_local_id`, `rats_protocol`, `rats_listen_port`, `rats_version` / `rats_version_string` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file` |
+| Lifecycle | `rats_create`, `rats_destroy`, `rats_start` / `rats_stop` |
+| This node | `rats_local_id`, `rats_protocol`, `rats_listen_port`, `rats_transports`, `rats_nat_mapping`, `rats_observed_addresses` |
+| Peers | `rats_connect`, `rats_disconnect`, `rats_peer_count`, `rats_peer_ids`, `rats_peer_info`, `rats_set_max_peers` |
+| Messaging | `rats_send` / `rats_broadcast` (reliable or live), `rats_peer_writable`, `rats_path_stats` |
+| Callbacks | `rats_on`, `rats_on_peer_connected` / `_disconnected` / `_writable` / `_path`, `rats_on_dial_failed` |
+| Discovery, NAT | `rats_enable_{dht,mdns,peer_exchange,port_mapping,hole_punch,relay}`, `rats_punch_peer`, `rats_connect_via_relay` |
+| Pub/sub, JSON | `rats_enable_pubsub`, `rats_subscribe` / `rats_publish`; `rats_enable_json`, `rats_on_json` / `rats_send_json` / `rats_broadcast_json` |
+| Files | `rats_enable_file_transfer`, `rats_on_file_{offer,progress,complete}`, `rats_send_file` / `rats_send_directory`, `rats_accept_file` / `rats_reject_file`, `rats_{cancel,pause,resume}_file` |
+| Ping, reconnect | `rats_enable_ping`, `rats_peer_rtt_ms`; `rats_enable_reconnect`, `rats_add_reconnect` / `rats_remove_reconnect` |
+| BitTorrent | `rats_enable_bittorrent`, `rats_bt_add_magnet` / `rats_bt_add_torrent_file` / `rats_bt_remove_torrent` (`RATS_SEARCH_FEATURES` builds) |
+| Process-wide | `rats_set_log_level` / `rats_set_log_file`, `rats_version` / `rats_version_string` / `rats_abi`, `rats_error_str`, `rats_close_reason_str` |
 
 ## 🏢 Architecture
 

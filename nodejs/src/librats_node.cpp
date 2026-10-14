@@ -1,1192 +1,1149 @@
 /**
- * LibRats Node.js native addon.
+ * librats Node.js addon: an N-API wrapper over the C ABI in
+ * src/librats/bindings/rats.h.
  *
- * N-API wrapper over the canonical C ABI in src/librats/bindings/rats.h. Callbacks fire
- * on librats' internal reactor thread, so every native callback marshals into
- * the JS thread with a Napi::ThreadSafeFunction (TSFN). Per-channel / per-topic
- * / per-json-type handlers are kept in maps owned by the RatsNode instance and
- * torn down on destruction.
+ * Enumerations cross into JS as lowercase strings ("udp", "slow-consumer", …)
+ * and failures as an Error whose `code` is the C error name without its
+ * RATS_ERR_ prefix ("NOT_ENABLED", "NO_SUCH_PEER", …).
  *
- * Contract reminder (enforced by the C core, surfaced here as thrown errors):
- *   - Register callbacks and enable subsystems BEFORE start().
- *   - Calling an enable after start() -> RATS_ERR_ALREADY_STARTED.
- *   - Calling a subsystem op before its enable -> RATS_ERR_NOT_ENABLED.
+ * librats calls back on its own reactor threads. Every callback registration
+ * owns a Napi::ThreadSafeFunction that carries the call over to the JS thread;
+ * all of them live until the node is destroyed, because librats keeps the
+ * `user` pointer it was given for as long as the node exists.
  */
 
 #include <napi.h>
+#include <librats/bindings/rats.h>
+
 #include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
-#include <librats/bindings/rats.h>
-
-using namespace Napi;
 
 namespace {
 
-// Translate a rats_error_t into a JS exception when it is not RATS_OK.
-// Returns true if an error was thrown (caller should bail out / return).
+// ── errors ──────────────────────────────────────────────────────────────────
+
+void throw_code(Napi::Env env, const std::string& code, const std::string& detail = "") {
+    Napi::Error err = Napi::Error::New(env, "librats: " + code + (detail.empty() ? "" : " (" + detail + ")"));
+    err.Set("code", Napi::String::New(env, code));
+    err.ThrowAsJavaScriptException();
+}
+
+// Throw for anything but RATS_OK. Returns true when it threw.
 bool throw_on_error(Napi::Env env, rats_error_t err) {
     if (err == RATS_OK) return false;
-    Napi::Error::New(env, std::string("librats: ") + rats_error_str(err))
-        .ThrowAsJavaScriptException();
+    std::string name = rats_error_str(err);
+    const std::string prefix = "RATS_ERR_";
+    if (name.compare(0, prefix.size(), prefix) == 0) name.erase(0, prefix.size());
+    throw_code(env, name);
     return true;
 }
 
-// Every instance method funnels through this: the C ABI does not null-check its
-// handle, and destroy() legitimately leaves us without one. The variadic
-// argument is the value to return — empty for a void method.
-#define RATS_REQUIRE_NODE(...)                                            \
-    do {                                                                  \
-        if (!node_) {                                                     \
-            Napi::Error::New(info.Env(), "librats: node has been destroyed") \
-                .ThrowAsJavaScriptException();                            \
-            return __VA_ARGS__;                                           \
-        }                                                                 \
-    } while (0)
+void throw_type(Napi::Env env, const std::string& what) {
+    Napi::TypeError::New(env, what).ThrowAsJavaScriptException();
+}
+
+// ── enumerations as strings ─────────────────────────────────────────────────
+
+const char* transport_name(rats_transport_t t) {
+    switch (t) {
+        case RATS_TRANSPORT_UDP:   return "udp";
+        case RATS_TRANSPORT_TCP:   return "tcp";
+        case RATS_TRANSPORT_RELAY: return "relay";
+    }
+    return "unknown";
+}
+
+const char* close_reason_name(rats_close_reason_t r) {
+    switch (r) {
+        case RATS_CLOSE_LOCAL:            return "local";
+        case RATS_CLOSE_PEER_CLOSED:      return "peer-closed";
+        case RATS_CLOSE_PEER_RESET:       return "peer-reset";
+        case RATS_CLOSE_CONNECT_FAILED:   return "connect-failed";
+        case RATS_CLOSE_HANDSHAKE_FAILED: return "handshake-failed";
+        case RATS_CLOSE_PROTOCOL_ERROR:   return "protocol-error";
+        case RATS_CLOSE_SLOW_CONSUMER:    return "slow-consumer";
+        case RATS_CLOSE_SHUTDOWN:         return "shutdown";
+        case RATS_CLOSE_DUPLICATE:        return "duplicate";
+        case RATS_CLOSE_PEER_LIMIT:       return "peer-limit";
+        case RATS_CLOSE_IDLE_TIMEOUT:     return "idle-timeout";
+        case RATS_CLOSE_DIAL_SUPERSEDED:  return "dial-superseded";
+    }
+    return "unknown";
+}
+
+const char* nat_name(rats_nat_mapping_t m) {
+    switch (m) {
+        case RATS_NAT_UNKNOWN:              return "unknown";
+        case RATS_NAT_OPEN:                 return "open";
+        case RATS_NAT_ENDPOINT_INDEPENDENT: return "endpoint-independent";
+        case RATS_NAT_ENDPOINT_DEPENDENT:   return "endpoint-dependent";
+    }
+    return "unknown";
+}
+
+const char* direction_name(rats_direction_t d) {
+    return d == RATS_DIRECTION_INBOUND ? "inbound" : "outbound";
+}
+
+const char* file_status_name(rats_file_status_t s) {
+    switch (s) {
+        case RATS_FILE_PENDING:   return "pending";
+        case RATS_FILE_ACTIVE:    return "active";
+        case RATS_FILE_PAUSED:    return "paused";
+        case RATS_FILE_COMPLETED: return "completed";
+        case RATS_FILE_FAILED:    return "failed";
+        case RATS_FILE_CANCELLED: return "cancelled";
+    }
+    return "unknown";
+}
+
+Napi::Array transport_mask_to_js(Napi::Env env, uint32_t mask) {
+    Napi::Array out = Napi::Array::New(env);
+    uint32_t i = 0;
+    if (mask & RATS_TRANSPORT_MASK_UDP) out[i++] = Napi::String::New(env, "udp");
+    if (mask & RATS_TRANSPORT_MASK_TCP) out[i++] = Napi::String::New(env, "tcp");
+    return out;
+}
+
+Napi::Array strings_to_js(Napi::Env env, char** strings, size_t count) {
+    Napi::Array out = Napi::Array::New(env, count);
+    for (size_t i = 0; i < count; ++i) out[static_cast<uint32_t>(i)] = Napi::String::New(env, strings[i]);
+    rats_strings_free(strings, count);
+    return out;
+}
+
+// ── argument helpers ────────────────────────────────────────────────────────
+
+bool arg_string(const Napi::CallbackInfo& info, size_t i, const char* name, std::string& out) {
+    if (info.Length() <= i || !info[i].IsString()) {
+        throw_type(info.Env(), std::string("Expected ") + name + " (string)");
+        return false;
+    }
+    out = info[i].As<Napi::String>().Utf8Value();
+    return true;
+}
+
+bool arg_function(const Napi::CallbackInfo& info, size_t i, Napi::Function& out) {
+    if (info.Length() <= i || !info[i].IsFunction()) {
+        throw_type(info.Env(), "Expected a callback function");
+        return false;
+    }
+    out = info[i].As<Napi::Function>();
+    return true;
+}
+
+// An integer in [0, max]; `required` false accepts a missing/undefined argument
+// as `fallback`.
+bool arg_uint(const Napi::CallbackInfo& info, size_t i, const char* name, double max,
+              double& out, bool required = true, double fallback = 0) {
+    if (info.Length() <= i || info[i].IsUndefined()) {
+        if (required) {
+            throw_type(info.Env(), std::string("Expected ") + name + " (number)");
+            return false;
+        }
+        out = fallback;
+        return true;
+    }
+    const double v = info[i].IsNumber() ? info[i].As<Napi::Number>().DoubleValue() : -1;
+    if (!(v >= 0 && v <= max) || v != std::floor(v)) {
+        Napi::RangeError::New(info.Env(), std::string(name) + " must be an integer in [0, " +
+                                              std::to_string(static_cast<uint64_t>(max)) + "]")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+bool arg_port(const Napi::CallbackInfo& info, size_t i, uint16_t& out, bool required = true) {
+    double v = 0;
+    if (!arg_uint(info, i, "port", 65535, v, required)) return false;
+    out = static_cast<uint16_t>(v);
+    return true;
+}
+
+bool arg_bool(const Napi::CallbackInfo& info, size_t i, bool fallback) {
+    if (info.Length() <= i || info[i].IsUndefined()) return fallback;
+    return info[i].ToBoolean().Value();
+}
+
+// A string or Buffer as bytes.
+bool arg_bytes(const Napi::CallbackInfo& info, size_t i, std::vector<uint8_t>& out) {
+    if (info.Length() > i && info[i].IsBuffer()) {
+        auto buf = info[i].As<Napi::Buffer<uint8_t>>();
+        out.assign(buf.Data(), buf.Data() + buf.Length());
+        return true;
+    }
+    if (info.Length() > i && info[i].IsString()) {
+        const std::string s = info[i].As<Napi::String>().Utf8Value();
+        out.assign(s.begin(), s.end());
+        return true;
+    }
+    throw_type(info.Env(), "Expected data (string or Buffer)");
+    return false;
+}
+
+// ── config ──────────────────────────────────────────────────────────────────
+
+// Strings the config points at, kept alive until rats_create() has copied them.
+struct ConfigStrings {
+    std::string protocol, data_dir, bind_address;
+};
+
+bool cfg_number(Napi::Env env, const Napi::Object& cfg, const char* key, double max, double& out) {
+    const Napi::Value v = cfg.Get(key);
+    if (v.IsUndefined()) return false;
+    const double d = v.IsNumber() ? v.As<Napi::Number>().DoubleValue() : -1;
+    if (!(d >= 0 && d <= max) || d != std::floor(d)) {
+        Napi::RangeError::New(env, std::string("config.") + key + " must be a non-negative integer")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    out = d;
+    return true;
+}
+
+bool cfg_string(Napi::Env env, const Napi::Object& cfg, const char* key, std::string& out,
+                bool& present) {
+    present = false;
+    const Napi::Value v = cfg.Get(key);
+    if (v.IsUndefined()) return true;
+    if (!v.IsString()) {
+        throw_type(env, std::string("config.") + key + " must be a string");
+        return false;
+    }
+    out = v.As<Napi::String>().Utf8Value();
+    present = true;
+    return true;
+}
+
+// Map one of a fixed set of strings to its value; `key` names the field in errors.
+template <class T>
+bool cfg_choice(Napi::Env env, const Napi::Object& cfg, const char* key,
+                std::initializer_list<std::pair<const char*, T>> choices, T& out) {
+    const Napi::Value v = cfg.Get(key);
+    if (v.IsUndefined()) return true;
+    if (v.IsString()) {
+        const std::string s = v.As<Napi::String>().Utf8Value();
+        for (const auto& c : choices)
+            if (s == c.first) { out = c.second; return true; }
+    }
+    std::string allowed;
+    for (const auto& c : choices) allowed += std::string(allowed.empty() ? "" : ", ") + "'" + c.first + "'";
+    throw_type(env, std::string("config.") + key + " must be one of " + allowed);
+    return false;
+}
+
+// Fill a zeroed rats_config_t (zero is the default in every field) from a JS
+// object. Returns false with a JS exception pending on a malformed field.
+bool to_config(Napi::Env env, const Napi::Object& cfg, rats_config_t& c, ConfigStrings& s) {
+    bool present = false;
+    double n = 0;
+
+    if (!cfg_string(env, cfg, "protocol", s.protocol, present)) return false;
+    if (present) c.protocol = s.protocol.c_str();
+    if (!cfg_string(env, cfg, "dataDir", s.data_dir, present)) return false;
+    if (present) c.data_dir = s.data_dir.c_str();
+    if (!cfg_choice<rats_security_t>(env, cfg, "security",
+            {{"noise", RATS_SECURITY_NOISE}, {"plaintext", RATS_SECURITY_PLAINTEXT}}, c.security))
+        return false;
+
+    if (cfg_number(env, cfg, "listenPort", 65535, n)) c.listen_port = static_cast<uint16_t>(n);
+    if (env.IsExceptionPending()) return false;
+    if (!cfg_string(env, cfg, "bindAddress", s.bind_address, present)) return false;
+    if (present) c.bind_address = s.bind_address.c_str();
+    c.dial_only = cfg.Get("dialOnly").ToBoolean().Value() ? 1 : 0;
+    if (cfg_number(env, cfg, "maxPeers", 9007199254740991.0, n)) c.max_peers = static_cast<size_t>(n);
+    if (env.IsExceptionPending()) return false;
+
+    const Napi::Value transports = cfg.Get("transports");
+    if (!transports.IsUndefined()) {
+        if (!transports.IsArray()) {
+            throw_type(env, "config.transports must be an array of 'udp' / 'tcp'");
+            return false;
+        }
+        const Napi::Array list = transports.As<Napi::Array>();
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < list.Length(); ++i) {
+            const Napi::Value item = list.Get(i);
+            const std::string t = item.IsString() ? item.As<Napi::String>().Utf8Value() : "";
+            if (t == "udp")      mask |= RATS_TRANSPORT_MASK_UDP;
+            else if (t == "tcp") mask |= RATS_TRANSPORT_MASK_TCP;
+            else {
+                throw_type(env, "config.transports must be an array of 'udp' / 'tcp'");
+                return false;
+            }
+        }
+        if (mask == 0) {
+            throw_type(env, "config.transports must name at least one transport");
+            return false;
+        }
+        c.transports = mask;
+    }
+    if (!cfg_choice<rats_transport_t>(env, cfg, "preferredTransport",
+            {{"udp", RATS_TRANSPORT_UDP}, {"tcp", RATS_TRANSPORT_TCP}}, c.preferred_transport))
+        return false;
+
+    const Napi::Value fallback = cfg.Get("transportFallbackMs");
+    if (!fallback.IsUndefined()) {
+        const double d = fallback.IsNumber() ? fallback.As<Napi::Number>().DoubleValue() : -1;
+        if (std::isinf(d) && d > 0) {
+            c.transport_fallback_ms = RATS_FALLBACK_NEVER;
+        } else if (d >= 1 && d < 4294967295.0 && d == std::floor(d)) {
+            c.transport_fallback_ms = static_cast<uint32_t>(d);
+        } else {
+            Napi::RangeError::New(env, "config.transportFallbackMs must be a positive integer or Infinity")
+                .ThrowAsJavaScriptException();
+            return false;
+        }
+    }
+
+    if (cfg_number(env, cfg, "sendQueueLimit", 9007199254740991.0, n)) c.send_queue_limit = static_cast<size_t>(n);
+    if (cfg_number(env, cfg, "pathSampleMs", 4294967295.0, n)) c.path_sample_ms = static_cast<uint32_t>(n);
+    if (env.IsExceptionPending()) return false;
+
+    if (!cfg_choice<rats_congestion_t>(env, cfg, "congestionControl",
+            {{"bbr", RATS_CONGESTION_BBR}, {"reno", RATS_CONGESTION_RENO}}, c.congestion_control))
+        return false;
+    if (cfg_number(env, cfg, "udpReceiveWindow", 9007199254740991.0, n)) c.udp_receive_window = static_cast<size_t>(n);
+    if (cfg_number(env, cfg, "udpReceiveBudget", 9007199254740991.0, n)) c.udp_receive_budget = static_cast<size_t>(n);
+    if (cfg_number(env, cfg, "reactorThreads", 1024, n)) c.reactor_threads = static_cast<size_t>(n);
+    if (env.IsExceptionPending()) return false;
+
+    // Both default to on; only an explicit false turns them off.
+    const Napi::Value offload = cfg.Get("udpOffload");
+    c.disable_udp_offload = (!offload.IsUndefined() && !offload.ToBoolean().Value()) ? 1 : 0;
+    const Napi::Value monitor = cfg.Get("networkMonitor");
+    c.disable_network_monitor = (!monitor.IsUndefined() && !monitor.ToBoolean().Value()) ? 1 : 0;
+    return true;
+}
+
+// ── JS objects built from C structs ─────────────────────────────────────────
+
+Napi::Object path_stats_to_js(Napi::Env env, const rats_path_stats_t& s) {
+    // uint64 counters become Numbers, exact up to 2^53.
+    Napi::Object o = Napi::Object::New(env);
+    o.Set("bandwidthBps",    Napi::Number::New(env, static_cast<double>(s.bandwidth_bps)));
+    o.Set("appLimited",      Napi::Boolean::New(env, s.app_limited != 0));
+    o.Set("pacingBps",       Napi::Number::New(env, static_cast<double>(s.pacing_bps)));
+    o.Set("srttUs",          Napi::Number::New(env, s.srtt_us));
+    o.Set("minRttUs",        Napi::Number::New(env, s.min_rtt_us));
+    o.Set("queuedBytes",     Napi::Number::New(env, static_cast<double>(s.queued_bytes)));
+    o.Set("bytesInFlight",   Napi::Number::New(env, static_cast<double>(s.bytes_in_flight)));
+    o.Set("loss",            Napi::Number::New(env, s.loss));
+    o.Set("bytesDelivered",  Napi::Number::New(env, static_cast<double>(s.bytes_delivered)));
+    o.Set("bytesLost",       Napi::Number::New(env, static_cast<double>(s.bytes_lost)));
+    o.Set("liveSent",        Napi::Number::New(env, static_cast<double>(s.live_sent)));
+    o.Set("liveExpired",     Napi::Number::New(env, static_cast<double>(s.live_expired)));
+    o.Set("liveRepairBytes", Napi::Number::New(env, static_cast<double>(s.live_repair_bytes)));
+    return o;
+}
+
+// The copyable part of rats_file_progress_t (its peer_id pointer is valid only
+// during the C callback).
+struct FileProgress {
+    rats_file_progress_t c;
+    std::string          peer;
+};
+
+Napi::Object file_progress_to_js(Napi::Env env, const FileProgress& p) {
+    Napi::Object o = Napi::Object::New(env);
+    o.Set("transferId",       Napi::Number::New(env, static_cast<double>(p.c.transfer_id)));
+    o.Set("peerId",           Napi::String::New(env, p.peer));
+    o.Set("direction",        Napi::String::New(env, direction_name(p.c.direction)));
+    o.Set("status",           Napi::String::New(env, file_status_name(p.c.status)));
+    o.Set("bytesTransferred", Napi::Number::New(env, static_cast<double>(p.c.bytes_transferred)));
+    o.Set("totalBytes",       Napi::Number::New(env, static_cast<double>(p.c.total_bytes)));
+    o.Set("filesCompleted",   Napi::Number::New(env, p.c.files_completed));
+    o.Set("totalFiles",       Napi::Number::New(env, p.c.total_files));
+    o.Set("rateBytesPerSec",  Napi::Number::New(env, p.c.rate_bytes_per_sec));
+    return o;
+}
+
+std::string str_or_empty(const char* s) { return s ? s : ""; }
+
+std::vector<uint8_t> copy_bytes(const void* data, size_t len) {
+    const auto* p = static_cast<const uint8_t*>(data);
+    return std::vector<uint8_t>(p, p + len);
+}
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Per-callback context. Each registration owns a TSFN plus a back-pointer used
-// only for cleanup bookkeeping. The trampoline (the C function we hand to
-// librats) receives the context as `user`.
-// ---------------------------------------------------------------------------
-
-struct CbContext {
+// One registered JS callback: the thread-safe function librats' threads call
+// through. Released only when the node is gone, since librats holds the pointer
+// to this as its `user` argument until then.
+struct Callback {
     Napi::ThreadSafeFunction tsfn;
-    bool acquired = false;
-
-    void init(Napi::Env env, const Napi::Function& fn, const char* name) {
-        release();
-        tsfn = Napi::ThreadSafeFunction::New(env, fn, name, 0, 1);
-        acquired = true;
-    }
-    void release() {
-        if (acquired) {
-            tsfn.Release();
-            acquired = false;
-        }
-    }
 };
 
 class RatsNode : public Napi::ObjectWrap<RatsNode> {
 public:
     static Napi::Object Init(Napi::Env env, Napi::Object exports);
-    RatsNode(const Napi::CallbackInfo& info);
-    ~RatsNode();
+    explicit RatsNode(const Napi::CallbackInfo& info);
+    ~RatsNode() override { Teardown(); }
 
 private:
     rats_t node_ = nullptr;
+    std::vector<std::unique_ptr<Callback>> callbacks_;
 
-    // Single-slot callbacks (peer connect/disconnect, file offer/progress/complete).
-    std::unique_ptr<CbContext> on_connected_;
-    std::unique_ptr<CbContext> on_disconnected_;
-    std::unique_ptr<CbContext> on_writable_;
-    std::unique_ptr<CbContext> on_path_;
-    std::unique_ptr<CbContext> on_file_offer_;
-    std::unique_ptr<CbContext> on_file_progress_;
-    std::unique_ptr<CbContext> on_file_complete_;
-
-    // Multi-slot callbacks keyed by channel / topic / json type. We keep them
-    // alive for the lifetime of the client; the trampolines look up nothing —
-    // each registration has its own CbContext handed to librats as `user`.
-    std::vector<std::unique_ptr<CbContext>> handlers_;
-
-    CbContext* new_handler() {
-        handlers_.push_back(std::make_unique<CbContext>());
-        return handlers_.back().get();
+    // A new callback slot for `fn`. Undone by drop_last() when librats refuses it.
+    Callback* add_callback(Napi::Env env, const Napi::Function& fn, const char* name) {
+        auto cb = std::make_unique<Callback>();
+        cb->tsfn = Napi::ThreadSafeFunction::New(env, fn, name, 0, 1);
+        callbacks_.push_back(std::move(cb));
+        return callbacks_.back().get();
+    }
+    void drop_last() {
+        callbacks_.back()->tsfn.Release();
+        callbacks_.pop_back();
+    }
+    // Register through librats; on refusal undo the slot and throw.
+    void registered(Napi::Env env, rats_error_t err) {
+        if (err != RATS_OK) {
+            drop_last();
+            throw_on_error(env, err);
+        }
+    }
+    bool require_node(const Napi::CallbackInfo& info) {
+        if (node_) return true;
+        throw_code(info.Env(), "DESTROYED");
+        return false;
     }
 
-    // Release TSFNs + the native node. Idempotent; used by ~RatsNode and destroy().
-    void Teardown();
+    // Destroy the node first — that joins the reactor threads, so nothing calls
+    // back afterwards — then let the thread-safe functions go. Idempotent.
+    void Teardown() {
+        if (node_) {
+            rats_destroy(node_);
+            node_ = nullptr;
+        }
+        for (auto& cb : callbacks_) cb->tsfn.Release();
+        callbacks_.clear();
+    }
 
-    // ---- lifecycle / core ----
+    // lifecycle and this node
     void Start(const Napi::CallbackInfo& info);
     void Stop(const Napi::CallbackInfo& info);
     void Destroy(const Napi::CallbackInfo& info);
-    Napi::Value GetListenPort(const Napi::CallbackInfo& info);
-    Napi::Value GetLocalId(const Napi::CallbackInfo& info);
-    Napi::Value GetProtocol(const Napi::CallbackInfo& info);
-    Napi::Value GetTransports(const Napi::CallbackInfo& info);
+    Napi::Value LocalId(const Napi::CallbackInfo& info);
+    Napi::Value Protocol(const Napi::CallbackInfo& info);
+    Napi::Value ListenPort(const Napi::CallbackInfo& info);
+    Napi::Value Transports(const Napi::CallbackInfo& info);
+    Napi::Value NatMapping(const Napi::CallbackInfo& info);
+    Napi::Value ObservedAddresses(const Napi::CallbackInfo& info);
 
-    // ---- connections ----
-    Napi::Value Connect(const Napi::CallbackInfo& info);
-    Napi::Value GetPeerCount(const Napi::CallbackInfo& info);
-    Napi::Value GetPeerIds(const Napi::CallbackInfo& info);
+    // peers
+    void Connect(const Napi::CallbackInfo& info);
+    Napi::Value Disconnect(const Napi::CallbackInfo& info);
+    Napi::Value PeerCount(const Napi::CallbackInfo& info);
+    Napi::Value PeerIds(const Napi::CallbackInfo& info);
+    Napi::Value PeerInfo(const Napi::CallbackInfo& info);
+    Napi::Value MaxPeers(const Napi::CallbackInfo& info);
     void SetMaxPeers(const Napi::CallbackInfo& info);
-    Napi::Value GetMaxPeers(const Napi::CallbackInfo& info);
-    Napi::Value GetPeerTransport(const Napi::CallbackInfo& info);
-    Napi::Value GetPeerTransports(const Napi::CallbackInfo& info);
 
-    // ---- raw channel messaging ----
-    Napi::Value Send(const Napi::CallbackInfo& info);
-    Napi::Value Broadcast(const Napi::CallbackInfo& info);
+    // messaging
+    void Send(const Napi::CallbackInfo& info);
+    void Broadcast(const Napi::CallbackInfo& info);
     Napi::Value PeerWritable(const Napi::CallbackInfo& info);
     Napi::Value PathStats(const Napi::CallbackInfo& info);
-    void On(const Napi::CallbackInfo& info);
 
-    // ---- peer events ----
+    // callbacks
     void OnPeerConnected(const Napi::CallbackInfo& info);
     void OnPeerDisconnected(const Napi::CallbackInfo& info);
+    void OnDialFailed(const Napi::CallbackInfo& info);
     void OnPeerWritable(const Napi::CallbackInfo& info);
     void OnPeerPath(const Napi::CallbackInfo& info);
+    void On(const Napi::CallbackInfo& info);
+    void OnPeerEvent(const Napi::CallbackInfo& info, const char* name,
+                     rats_error_t (*reg)(rats_t, rats_peer_cb, void*));
 
-    // ---- discovery / NAT ----
+    // discovery and NAT traversal
     void EnableDht(const Napi::CallbackInfo& info);
     void EnableMdns(const Napi::CallbackInfo& info);
+    void EnablePeerExchange(const Napi::CallbackInfo& info);
     void EnablePortMapping(const Napi::CallbackInfo& info);
     void EnableHolePunch(const Napi::CallbackInfo& info);
     Napi::Value PunchPeer(const Napi::CallbackInfo& info);
     void EnableRelay(const Napi::CallbackInfo& info);
     Napi::Value ConnectViaRelay(const Napi::CallbackInfo& info);
-    Napi::Value GetNatMapping(const Napi::CallbackInfo& info);
 
-    // ---- pub/sub ----
+    // pub/sub
     void EnablePubsub(const Napi::CallbackInfo& info);
     void Subscribe(const Napi::CallbackInfo& info);
     void Unsubscribe(const Napi::CallbackInfo& info);
-    Napi::Value Publish(const Napi::CallbackInfo& info);
+    void Publish(const Napi::CallbackInfo& info);
 
-    // ---- typed JSON ----
+    // JSON messaging
     void EnableJson(const Napi::CallbackInfo& info);
-    void OnJson(const Napi::CallbackInfo& info);
-    void OnceJson(const Napi::CallbackInfo& info);
+    void OnJson(const Napi::CallbackInfo& info) { JsonHandler(info, false); }
+    void OnceJson(const Napi::CallbackInfo& info) { JsonHandler(info, true); }
+    void JsonHandler(const Napi::CallbackInfo& info, bool once);
     void OffJson(const Napi::CallbackInfo& info);
-    Napi::Value SendJson(const Napi::CallbackInfo& info);
-    Napi::Value BroadcastJson(const Napi::CallbackInfo& info);
-    void OnJsonImpl(const Napi::CallbackInfo& info, bool once);
+    void SendJson(const Napi::CallbackInfo& info);
+    void BroadcastJson(const Napi::CallbackInfo& info);
 
-    // ---- file transfer ----
+    // file transfer
     void EnableFileTransfer(const Napi::CallbackInfo& info);
     void OnFileOffer(const Napi::CallbackInfo& info);
     void OnFileProgress(const Napi::CallbackInfo& info);
     void OnFileComplete(const Napi::CallbackInfo& info);
     Napi::Value SendFile(const Napi::CallbackInfo& info);
     Napi::Value SendDirectory(const Napi::CallbackInfo& info);
-    Napi::Value AcceptFile(const Napi::CallbackInfo& info);
-    Napi::Value RejectFile(const Napi::CallbackInfo& info);
+    void AcceptFile(const Napi::CallbackInfo& info);
+    void RejectFile(const Napi::CallbackInfo& info);
     Napi::Value CancelFile(const Napi::CallbackInfo& info);
     Napi::Value PauseFile(const Napi::CallbackInfo& info);
     Napi::Value ResumeFile(const Napi::CallbackInfo& info);
+    Napi::Value ControlFile(const Napi::CallbackInfo& info,
+                            rats_error_t (*op)(rats_t, const char*, uint64_t));
 
-    // ---- ping / reconnect ----
+    // ping and reconnection
     void EnablePing(const Napi::CallbackInfo& info);
-    Napi::Value GetPeerRttMs(const Napi::CallbackInfo& info);
+    Napi::Value PeerRttMs(const Napi::CallbackInfo& info);
     void EnableReconnect(const Napi::CallbackInfo& info);
-    Napi::Value AddReconnect(const Napi::CallbackInfo& info);
-    Napi::Value RemoveReconnect(const Napi::CallbackInfo& info);
+    void AddReconnect(const Napi::CallbackInfo& info);
+    void RemoveReconnect(const Napi::CallbackInfo& info);
 };
 
-// ---------------------------------------------------------------------------
-// Construction / lifecycle
-// ---------------------------------------------------------------------------
+// ─── lifecycle and this node ────────────────────────────────────────────────
 
-RatsNode::RatsNode(const Napi::CallbackInfo& info)
-    : Napi::ObjectWrap<RatsNode>(info) {
+RatsNode::RatsNode(const Napi::CallbackInfo& info) : Napi::ObjectWrap<RatsNode>(info) {
     Napi::Env env = info.Env();
-
-    // Two construction forms:
-    //   new RatsNode(port)         -> rats_create(port)
-    //   new RatsNode({ ...config }) -> rats_create_config(&cfg)
-    if (info.Length() >= 1 && info[0].IsObject() && !info[0].IsBuffer()) {
-        Napi::Object cfg = info[0].As<Napi::Object>();
-        rats_config_t c = rats_config_default();
-
-        // Hold string storage alive until rats_create_config() returns (the
-        // struct borrows the pointers only for the duration of the call).
-        std::string bind_addr, data_dir, protocol;
-
-        if (cfg.Has("listenPort"))
-            c.listen_port = static_cast<uint16_t>(cfg.Get("listenPort").As<Napi::Number>().Uint32Value());
-        if (cfg.Has("enableListen"))
-            c.enable_listen = cfg.Get("enableListen").As<Napi::Boolean>().Value() ? 1 : 0;
-        if (cfg.Has("bindAddress") && cfg.Get("bindAddress").IsString()) {
-            bind_addr = cfg.Get("bindAddress").As<Napi::String>().Utf8Value();
-            c.bind_address = bind_addr.c_str();
-        }
-        if (cfg.Has("security"))
-            c.security = static_cast<rats_security_t>(cfg.Get("security").As<Napi::Number>().Int32Value());
-        if (cfg.Has("dataDir") && cfg.Get("dataDir").IsString()) {
-            data_dir = cfg.Get("dataDir").As<Napi::String>().Utf8Value();
-            c.data_dir = data_dir.c_str();
-        }
-        if (cfg.Has("protocol") && cfg.Get("protocol").IsString()) {
-            protocol = cfg.Get("protocol").As<Napi::String>().Utf8Value();
-            c.protocol = protocol.c_str();
-        }
-        if (cfg.Has("maxPeers"))
-            c.max_peers = static_cast<size_t>(cfg.Get("maxPeers").As<Napi::Number>().Int64Value());
-
-        // Transports. Both are on by default and share one port; preferredTransport
-        // decides which a dial tries first (UDP), transportFallbackMs how long
-        // before the other is raced alongside it.
-        if (cfg.Has("enableTcp"))
-            c.enable_tcp = cfg.Get("enableTcp").As<Napi::Boolean>().Value() ? 1 : 0;
-        if (cfg.Has("enableUdp"))
-            c.enable_udp = cfg.Get("enableUdp").As<Napi::Boolean>().Value() ? 1 : 0;
-        if (cfg.Has("preferredTransport"))
-            c.preferred_transport = static_cast<rats_transport_t>(
-                cfg.Get("preferredTransport").As<Napi::Number>().Int32Value());
-        if (cfg.Has("transportFallbackMs"))
-            c.transport_fallback_ms =
-                cfg.Get("transportFallbackMs").As<Napi::Number>().Uint32Value();
-
-        // Bytes a peer may have queued before an app that keeps sending anyway has
-        // it dropped as a slow consumer. A quarter of it is where peerWritable()
-        // starts saying false, so lowering it makes backpressure felt sooner.
-        if (cfg.Has("sendQueueLimit"))
-            c.send_queue_limit =
-                static_cast<size_t>(cfg.Get("sendQueueLimit").As<Napi::Number>().Int64Value());
-
-        // Congestion controller of every UDP stream: BBR (default) or Reno.
-        if (cfg.Has("congestionControl"))
-            c.congestion_control = static_cast<rats_congestion_t>(
-                cfg.Get("congestionControl").As<Napi::Number>().Int32Value());
-
-        // How far one UDP stream's receive window may grow, and what all of them
-        // may hold out of order together. 0 keeps the library defaults.
-        if (cfg.Has("udpReceiveWindow"))
-            c.udp_receive_window =
-                static_cast<size_t>(cfg.Get("udpReceiveWindow").As<Napi::Number>().Int64Value());
-        if (cfg.Has("udpReceiveBudget"))
-            c.udp_receive_budget =
-                static_cast<size_t>(cfg.Get("udpReceiveBudget").As<Napi::Number>().Int64Value());
-
-        // How often each peer's path is sampled for pathStats() / onPeerPath().
-        // 0 samples only while an onPeerPath() callback is registered (every 100 ms).
-        if (cfg.Has("pathSampleMs"))
-            c.path_sample_ms = cfg.Get("pathSampleMs").As<Napi::Number>().Uint32Value();
-
-        node_ = rats_create_config(&c);
-    } else {
-        int port = 0;
-        if (info.Length() >= 1 && info[0].IsNumber()) {
-            port = info[0].As<Napi::Number>().Int32Value();
-            if (port < 0 || port > 65535) {
-                Napi::RangeError::New(env, "Port number must be between 0 and 65535")
-                    .ThrowAsJavaScriptException();
-                return;
-            }
-        } else if (info.Length() >= 1) {
-            Napi::TypeError::New(env, "Expected a port number or a config object")
-                .ThrowAsJavaScriptException();
+    rats_config_t c{};
+    ConfigStrings strings;
+    if (info.Length() >= 1 && !info[0].IsUndefined()) {
+        if (!info[0].IsObject() || info[0].IsArray()) {
+            throw_type(env, "Expected a config object");
             return;
         }
-        node_ = rats_create(static_cast<uint16_t>(port));
+        if (!to_config(env, info[0].As<Napi::Object>(), c, strings)) return;
     }
-
+    node_ = rats_create(&c);
     if (!node_) {
-        Napi::Error::New(env, "Failed to create RatsNode").ThrowAsJavaScriptException();
-        return;
-    }
-}
-
-RatsNode::~RatsNode() {
-    Teardown();
-}
-
-// Release all TSFNs first so no JS callback can be invoked during/after
-// destruction, then destroy the native node. Idempotent.
-void RatsNode::Teardown() {
-    if (on_connected_) on_connected_->release();
-    if (on_disconnected_) on_disconnected_->release();
-    if (on_writable_) on_writable_->release();
-    if (on_path_) on_path_->release();
-    if (on_file_offer_) on_file_offer_->release();
-    if (on_file_progress_) on_file_progress_->release();
-    if (on_file_complete_) on_file_complete_->release();
-    for (auto& h : handlers_) h->release();
-
-    if (node_) {
-        rats_destroy(node_);
-        node_ = nullptr;
+        throw_code(env, "INVALID_CONFIG",
+                   "no transport left to run, or a preferredTransport that is turned off");
     }
 }
 
 void RatsNode::Start(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_start(node_));
 }
 
-void RatsNode::Stop(const Napi::CallbackInfo& info) {
+void RatsNode::Stop(const Napi::CallbackInfo&) {
     if (node_) rats_stop(node_);
 }
 
-// Explicit release. After this the instance is inert; further calls are no-ops
-// or throw, and the GC has nothing left to free.
-void RatsNode::Destroy(const Napi::CallbackInfo& info) {
-    Teardown();
+void RatsNode::Destroy(const Napi::CallbackInfo&) { Teardown(); }
+
+Napi::Value RatsNode::LocalId(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    return Napi::String::New(info.Env(), rats_local_id(node_));
 }
 
-Napi::Value RatsNode::GetListenPort(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+Napi::Value RatsNode::Protocol(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    return Napi::String::New(info.Env(), rats_protocol(node_));
+}
+
+Napi::Value RatsNode::ListenPort(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
     return Napi::Number::New(info.Env(), rats_listen_port(node_));
 }
 
-Napi::Value RatsNode::GetLocalId(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+Napi::Value RatsNode::Transports(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    return transport_mask_to_js(info.Env(), rats_transports(node_));
+}
+
+Napi::Value RatsNode::NatMapping(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    return Napi::String::New(info.Env(), nat_name(rats_nat_mapping(node_)));
+}
+
+Napi::Value RatsNode::ObservedAddresses(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    size_t count = 0;
+    char** addresses = rats_observed_addresses(node_, &count);
+    return strings_to_js(info.Env(), addresses, count);
+}
+
+// ─── peers ──────────────────────────────────────────────────────────────────
+
+void RatsNode::Connect(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string host;
+    uint16_t port = 0;
+    if (!arg_string(info, 0, "host", host) || !arg_port(info, 1, port)) return;
+    throw_on_error(info.Env(), rats_connect(node_, host.c_str(), port));
+}
+
+Napi::Value RatsNode::Disconnect(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    char* id = rats_local_id(node_);
-    if (!id) return env.Null();
-    Napi::String result = Napi::String::New(env, id);
-    rats_string_free(id);
-    return result;
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    const rats_error_t err = rats_disconnect(node_, peer.c_str());
+    if (err == RATS_ERR_NO_SUCH_PEER) return Napi::Boolean::New(env, false);
+    if (throw_on_error(env, err)) return env.Undefined();
+    return Napi::Boolean::New(env, true);
 }
 
-Napi::Value RatsNode::GetProtocol(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    char* s = rats_protocol(node_);
-    if (!s) return env.Null();
-    Napi::String result = Napi::String::New(env, s);
-    rats_string_free(s);
-    return result;
-}
-
-// Transports actually running, as a RATS_TRANSPORT_MASK_* bitmask. May be
-// narrower than the config asked for; 0 before start() and after stop().
-Napi::Value RatsNode::GetTransports(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    return Napi::Number::New(info.Env(), rats_transports(node_));
-}
-
-// ---------------------------------------------------------------------------
-// Connections
-// ---------------------------------------------------------------------------
-
-Napi::Value RatsNode::Connect(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
-        Napi::TypeError::New(env, "Expected host (string) and port (number)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string host = info[0].As<Napi::String>().Utf8Value();
-    uint16_t port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
-    throw_on_error(env, rats_connect(node_, host.c_str(), port));
-    return env.Undefined();
-}
-
-Napi::Value RatsNode::GetPeerCount(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+Napi::Value RatsNode::PeerCount(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
     return Napi::Number::New(info.Env(), static_cast<double>(rats_peer_count(node_)));
 }
 
-Napi::Value RatsNode::GetPeerIds(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
+Napi::Value RatsNode::PeerIds(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
     size_t count = 0;
     char** ids = rats_peer_ids(node_, &count);
-    Napi::Array result = Napi::Array::New(env, count);
-    if (ids) {
-        for (size_t i = 0; i < count; i++) {
-            result[static_cast<uint32_t>(i)] = Napi::String::New(env, ids[i]);
-        }
-        rats_free_peer_ids(ids, count);
-    }
-    return result;
+    return strings_to_js(info.Env(), ids, count);
 }
 
-void RatsNode::SetMaxPeers(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+Napi::Value RatsNode::PeerInfo(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsNumber()) {
-        Napi::TypeError::New(env, "Expected maxPeers (number)").ThrowAsJavaScriptException();
-        return;
-    }
-    rats_set_max_peers(node_, static_cast<size_t>(info[0].As<Napi::Number>().Int64Value()));
-}
-
-Napi::Value RatsNode::GetMaxPeers(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    return Napi::Number::New(info.Env(), static_cast<double>(rats_max_peers(node_)));
-}
-
-// Which transport a connected peer's link runs on; null if not connected.
-Napi::Value RatsNode::GetPeerTransport(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    int t = rats_peer_transport(node_, peer.c_str());
-    if (t < 0) return env.Null();
-    return Napi::Number::New(env, t);
-}
-
-// Transports a connected peer advertised, as a bitmask; null if not connected.
-// 0 means the peer did not say (an older build) — "no information", not "none".
-Napi::Value RatsNode::GetPeerTransports(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    int t = rats_peer_transports(node_, peer.c_str());
-    if (t < 0) return env.Null();
-    return Napi::Number::New(env, t);
-}
-
-// ---------------------------------------------------------------------------
-// Raw channel messaging
-// ---------------------------------------------------------------------------
-
-// Coerce a JS string or Buffer argument into a contiguous byte vector.
-static bool to_bytes(Napi::Env env, const Napi::Value& v, std::vector<uint8_t>& out) {
-    if (v.IsBuffer()) {
-        Napi::Buffer<uint8_t> buf = v.As<Napi::Buffer<uint8_t>>();
-        out.assign(buf.Data(), buf.Data() + buf.Length());
-        return true;
-    }
-    if (v.IsString()) {
-        std::string s = v.As<Napi::String>().Utf8Value();
-        out.assign(s.begin(), s.end());
-        return true;
-    }
-    Napi::TypeError::New(env, "Expected data (string or Buffer)").ThrowAsJavaScriptException();
-    return false;
-}
-
-// The optional trailing lifetimeMs of send()/broadcast(): absent or undefined is
-// 0 (reliable); otherwise a non-negative integer number of milliseconds, which
-// makes the message live (the core caps it at 30000).
-static bool to_lifetime(Napi::Env env, const Napi::CallbackInfo& info, size_t i, uint32_t& out) {
-    out = 0;
-    if (info.Length() <= i || info[i].IsUndefined()) return true;
-    double v = info[i].IsNumber() ? info[i].As<Napi::Number>().DoubleValue() : -1;
-    if (!(v >= 0 && v <= 4294967295.0) || v != std::floor(v)) {
-        Napi::TypeError::New(env, "Expected lifetimeMs (non-negative integer)")
-            .ThrowAsJavaScriptException();
-        return false;
-    }
-    out = static_cast<uint32_t>(v);
-    return true;
-}
-
-Napi::Value RatsNode::Send(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string), channel (string), data")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    std::string channel = info[1].As<Napi::String>().Utf8Value();
-    std::vector<uint8_t> data;
-    if (!to_bytes(env, info[2], data)) return env.Undefined();
-    uint32_t lifetime_ms = 0;
-    if (!to_lifetime(env, info, 3, lifetime_ms)) return env.Undefined();
-    throw_on_error(env, rats_send(node_, peer.c_str(), channel.c_str(), data.data(), data.size(),
-                                  lifetime_ms));
-    return env.Undefined();
-}
-
-// send() only says the message was queued. This is how a JS caller learns it is
-// outrunning the link — before the peer is dropped for it.
-Napi::Value RatsNode::PeerWritable(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    return Napi::Boolean::New(env, rats_peer_writable(node_, peer.c_str()) != 0);
-}
-
-// One path sample as a plain JS object. uint64 counters become Numbers, exact to
-// 2^53 bytes / bits per second.
-static Napi::Object path_stats_to_js(Napi::Env env, const rats_path_stats_t& s) {
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    rats_peer_info_t p{};
+    const rats_error_t err = rats_peer_info(node_, peer.c_str(), &p);
+    if (err == RATS_ERR_NO_SUCH_PEER) return env.Null();
+    if (throw_on_error(env, err)) return env.Undefined();
     Napi::Object o = Napi::Object::New(env);
-    o.Set("bandwidthBps",   Napi::Number::New(env, static_cast<double>(s.bandwidth_bps)));
-    o.Set("appLimited",     Napi::Boolean::New(env, s.app_limited != 0));
-    o.Set("pacingBps",      Napi::Number::New(env, static_cast<double>(s.pacing_bps)));
-    o.Set("srttUs",         Napi::Number::New(env, s.srtt_us));
-    o.Set("minRttUs",       Napi::Number::New(env, s.min_rtt_us));
-    o.Set("queuedBytes",    Napi::Number::New(env, static_cast<double>(s.queued_bytes)));
-    o.Set("bytesInFlight",  Napi::Number::New(env, static_cast<double>(s.bytes_in_flight)));
-    o.Set("loss",           Napi::Number::New(env, s.loss));
-    o.Set("bytesDelivered", Napi::Number::New(env, static_cast<double>(s.bytes_delivered)));
-    o.Set("bytesLost",      Napi::Number::New(env, static_cast<double>(s.bytes_lost)));
-    o.Set("liveSent",       Napi::Number::New(env, static_cast<double>(s.live_sent)));
-    o.Set("liveExpired",    Napi::Number::New(env, static_cast<double>(s.live_expired)));
-    o.Set("liveRepairBytes", Napi::Number::New(env, static_cast<double>(s.live_repair_bytes)));
+    o.Set("transport",  Napi::String::New(env, transport_name(p.transport)));
+    o.Set("transports", transport_mask_to_js(env, p.transports));
+    o.Set("direction",  Napi::String::New(env, direction_name(p.direction)));
+    o.Set("address",    p.address[0] ? Napi::Value(Napi::String::New(env, p.address)) : env.Null());
     return o;
 }
 
-// What the transport knows about the path to a peer; null if it is not connected
-// or nothing has been sampled yet (sampling needs pathSampleMs or onPeerPath).
-Napi::Value RatsNode::PathStats(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+Napi::Value RatsNode::MaxPeers(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return info.Env().Undefined();
+    return Napi::Number::New(info.Env(), static_cast<double>(rats_max_peers(node_)));
+}
+
+void RatsNode::SetMaxPeers(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    double n = 0;
+    if (!arg_uint(info, 0, "maxPeers", 9007199254740991.0, n)) return;
+    rats_set_max_peers(node_, static_cast<size_t>(n));
+}
+
+// ─── messaging ──────────────────────────────────────────────────────────────
+
+void RatsNode::Send(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string peer, channel;
+    std::vector<uint8_t> data;
+    double lifetime = 0;
+    if (!arg_string(info, 0, "peerId", peer) || !arg_string(info, 1, "channel", channel) ||
+        !arg_bytes(info, 2, data) ||
+        !arg_uint(info, 3, "lifetimeMs", 4294967295.0, lifetime, /*required=*/false))
+        return;
+    throw_on_error(info.Env(), rats_send(node_, peer.c_str(), channel.c_str(), data.data(),
+                                         data.size(), static_cast<uint32_t>(lifetime)));
+}
+
+void RatsNode::Broadcast(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string channel;
+    std::vector<uint8_t> data;
+    double lifetime = 0;
+    if (!arg_string(info, 0, "channel", channel) || !arg_bytes(info, 1, data) ||
+        !arg_uint(info, 2, "lifetimeMs", 4294967295.0, lifetime, /*required=*/false))
+        return;
+    throw_on_error(info.Env(), rats_broadcast(node_, channel.c_str(), data.data(), data.size(),
+                                              static_cast<uint32_t>(lifetime)));
+}
+
+Napi::Value RatsNode::PeerWritable(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    return Napi::Boolean::New(env, rats_peer_writable(node_, peer.c_str()) != 0);
+}
+
+Napi::Value RatsNode::PathStats(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
     rats_path_stats_t s{};
-    rats_error_t err = rats_path_stats(node_, peer.c_str(), &s);
+    const rats_error_t err = rats_path_stats(node_, peer.c_str(), &s);
     if (err == RATS_ERR_NO_SUCH_PEER) return env.Null();
     if (throw_on_error(env, err)) return env.Undefined();
     return path_stats_to_js(env, s);
 }
 
-Napi::Value RatsNode::Broadcast(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected channel (string) and data")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string channel = info[0].As<Napi::String>().Utf8Value();
-    std::vector<uint8_t> data;
-    if (!to_bytes(env, info[1], data)) return env.Undefined();
-    uint32_t lifetime_ms = 0;
-    if (!to_lifetime(env, info, 2, lifetime_ms)) return env.Undefined();
-    throw_on_error(env, rats_broadcast(node_, channel.c_str(), data.data(), data.size(),
-                                       lifetime_ms));
-    return env.Undefined();
-}
+// ─── callbacks ──────────────────────────────────────────────────────────────
 
-// rats_message_cb(user, peer_id_hex, data, len) -> JS (peerId, Buffer)
-void RatsNode::On(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsFunction()) {
-        Napi::TypeError::New(env, "Expected channel (string) and callback (function)")
-            .ThrowAsJavaScriptException();
-        return;
-    }
-    std::string channel = info[0].As<Napi::String>().Utf8Value();
-    CbContext* ctx = new_handler();
-    ctx->init(env, info[1].As<Napi::Function>(), "on_message");
-
-    auto trampoline = [](void* user, const char* peer_id, const void* data, size_t len) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        std::vector<uint8_t> bytes(static_cast<const uint8_t*>(data),
-                                   static_cast<const uint8_t*>(data) + len);
-        c->tsfn.BlockingCall([peer, bytes](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer),
-                     Napi::Buffer<uint8_t>::Copy(env, bytes.data(), bytes.size())});
-        });
-    };
-    throw_on_error(env, rats_on(node_, channel.c_str(), trampoline, ctx));
-}
-
-// ---------------------------------------------------------------------------
-// Peer events
-// ---------------------------------------------------------------------------
-
-void RatsNode::OnPeerConnected(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_connected_ = std::make_unique<CbContext>();
-    on_connected_->init(env, info[0].As<Napi::Function>(), "on_peer_connected");
-    auto trampoline = [](void* user, const char* peer_id) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        c->tsfn.BlockingCall([peer](Napi::Env env, Napi::Function js) {
+void RatsNode::OnPeerEvent(const Napi::CallbackInfo& info, const char* name,
+                           rats_error_t (*reg)(rats_t, rats_peer_cb, void*)) {
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, name);
+    registered(info.Env(), reg(node_, [](void* user, const char* peer_id) {
+        std::string peer = str_or_empty(peer_id);
+        static_cast<Callback*>(user)->tsfn.BlockingCall([peer](Napi::Env env, Napi::Function js) {
             js.Call({Napi::String::New(env, peer)});
         });
-    };
-    throw_on_error(env, rats_on_peer_connected(node_, trampoline, on_connected_.get()));
+    }, cb));
 }
 
-void RatsNode::OnPeerDisconnected(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_disconnected_ = std::make_unique<CbContext>();
-    on_disconnected_->init(env, info[0].As<Napi::Function>(), "on_peer_disconnected");
-    // Second argument is why the peer went: "RATS_CLOSE_SLOW_CONSUMER" is the one
-    // an application can act on (it was sending faster than the link drained).
-    // Callbacks that only declare (peerId) are unaffected.
-    auto trampoline = [](void* user, const char* peer_id, rats_close_reason_t reason) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        std::string why  = rats_close_reason_str(reason);
-        c->tsfn.BlockingCall([peer, why](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer), Napi::String::New(env, why)});
-        });
-    };
-    throw_on_error(env, rats_on_peer_disconnected(node_, trampoline, on_disconnected_.get()));
+void RatsNode::OnPeerConnected(const Napi::CallbackInfo& info) {
+    OnPeerEvent(info, "onPeerConnected", rats_on_peer_connected);
 }
 
 void RatsNode::OnPeerWritable(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_writable_ = std::make_unique<CbContext>();
-    on_writable_->init(env, info[0].As<Napi::Function>(), "on_peer_writable");
-    auto trampoline = [](void* user, const char* peer_id) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        c->tsfn.BlockingCall([peer](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer)});
-        });
-    };
-    throw_on_error(env, rats_on_peer_writable(node_, trampoline, on_writable_.get()));
+    OnPeerEvent(info, "onPeerWritable", rats_on_peer_writable);
 }
 
-// rats_path_cb(user, peer_id_hex, stats) -> JS (peerId, stats). `stats` is valid
-// only for the C call, so it is copied before it crosses to the JS thread.
+void RatsNode::OnPeerDisconnected(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onPeerDisconnected");
+    registered(info.Env(), rats_on_peer_disconnected(node_,
+        [](void* user, const char* peer_id, rats_close_reason_t reason) {
+            std::string peer = str_or_empty(peer_id);
+            const char* why = close_reason_name(reason);
+            static_cast<Callback*>(user)->tsfn.BlockingCall([peer, why](Napi::Env env, Napi::Function js) {
+                js.Call({Napi::String::New(env, peer), Napi::String::New(env, why)});
+            });
+        }, cb));
+}
+
+void RatsNode::OnDialFailed(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onDialFailed");
+    registered(info.Env(), rats_on_dial_failed(node_, [](void* user, const char* address) {
+        std::string a = str_or_empty(address);
+        static_cast<Callback*>(user)->tsfn.BlockingCall([a](Napi::Env env, Napi::Function js) {
+            js.Call({Napi::String::New(env, a)});
+        });
+    }, cb));
+}
+
 void RatsNode::OnPeerPath(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_path_ = std::make_unique<CbContext>();
-    on_path_->init(env, info[0].As<Napi::Function>(), "on_peer_path");
-    auto trampoline = [](void* user, const char* peer_id, const rats_path_stats_t* stats) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        rats_path_stats_t s = stats ? *stats : rats_path_stats_t{};
-        c->tsfn.BlockingCall([peer, s](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer), path_stats_to_js(env, s)});
-        });
-    };
-    throw_on_error(env, rats_on_peer_path(node_, trampoline, on_path_.get()));
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onPeerPath");
+    registered(info.Env(), rats_on_peer_path(node_,
+        [](void* user, const char* peer_id, const rats_path_stats_t* stats) {
+            std::string peer = str_or_empty(peer_id);
+            const rats_path_stats_t s = stats ? *stats : rats_path_stats_t{};
+            static_cast<Callback*>(user)->tsfn.BlockingCall([peer, s](Napi::Env env, Napi::Function js) {
+                js.Call({Napi::String::New(env, peer), path_stats_to_js(env, s)});
+            });
+        }, cb));
 }
 
-// ---------------------------------------------------------------------------
-// Discovery / NAT
-// ---------------------------------------------------------------------------
+void RatsNode::On(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string channel;
+    Napi::Function fn;
+    if (!arg_string(info, 0, "channel", channel) || !arg_function(info, 1, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "on");
+    registered(info.Env(), rats_on(node_, channel.c_str(),
+        [](void* user, const char* peer_id, const void* data, size_t len) {
+            std::string peer = str_or_empty(peer_id);
+            auto bytes = copy_bytes(data, len);
+            static_cast<Callback*>(user)->tsfn.BlockingCall(
+                [peer, bytes = std::move(bytes)](Napi::Env env, Napi::Function js) {
+                    js.Call({Napi::String::New(env, peer),
+                             Napi::Buffer<uint8_t>::Copy(env, bytes.data(), bytes.size())});
+                });
+        }, cb));
+}
+
+// ─── discovery and NAT traversal ────────────────────────────────────────────
 
 void RatsNode::EnableDht(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    uint16_t dht_port = 0;
+    if (!require_node(info)) return;
+    uint16_t port = 0;
+    if (!arg_port(info, 0, port, /*required=*/false)) return;
     std::string key;
     const char* key_ptr = nullptr;
-    if (info.Length() >= 1 && info[0].IsNumber())
-        dht_port = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
-    if (info.Length() >= 2 && info[1].IsString()) {
-        key = info[1].As<Napi::String>().Utf8Value();
+    if (info.Length() >= 2 && !info[1].IsUndefined()) {
+        if (!arg_string(info, 1, "discoveryKey", key)) return;
         key_ptr = key.c_str();
     }
-    throw_on_error(env, rats_enable_dht(node_, dht_port, key_ptr));
+    throw_on_error(info.Env(), rats_enable_dht(node_, port, key_ptr));
 }
 
 void RatsNode::EnableMdns(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_enable_mdns(node_));
 }
 
+void RatsNode::EnablePeerExchange(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    throw_on_error(info.Env(), rats_enable_peer_exchange(node_));
+}
+
 void RatsNode::EnablePortMapping(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    int upnp = 1, natpmp = 1;
-    if (info.Length() >= 1 && info[0].IsBoolean()) upnp = info[0].As<Napi::Boolean>().Value() ? 1 : 0;
-    if (info.Length() >= 2 && info[1].IsBoolean()) natpmp = info[1].As<Napi::Boolean>().Value() ? 1 : 0;
-    throw_on_error(info.Env(), rats_enable_port_mapping(node_, upnp, natpmp));
+    if (!require_node(info)) return;
+    throw_on_error(info.Env(), rats_enable_port_mapping(node_, arg_bool(info, 0, true) ? 1 : 0,
+                                                        arg_bool(info, 1, true) ? 1 : 0));
 }
 
-// Hole punching. serveAsRelay (default true) also carries other peers'
-// rendezvous — a mesh in which nobody relays cannot punch at all.
 void RatsNode::EnableHolePunch(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    int relay = 1;
-    if (info.Length() >= 1 && info[0].IsBoolean()) relay = info[0].As<Napi::Boolean>().Value() ? 1 : 0;
-    throw_on_error(info.Env(), rats_enable_hole_punch(node_, relay));
+    if (!require_node(info)) return;
+    throw_on_error(info.Env(), rats_enable_hole_punch(node_, arg_bool(info, 0, true) ? 1 : 0));
 }
 
-// Start a punch to a peer. Non-blocking: success arrives as onPeerConnected.
+// true: an attempt started; false: declined (nothing to do or to try with).
+static Napi::Value attempt_result(Napi::Env env, rats_error_t err) {
+    if (err == RATS_ERR_DECLINED) return Napi::Boolean::New(env, false);
+    if (throw_on_error(env, err)) return env.Undefined();
+    return Napi::Boolean::New(env, true);
+}
+
 Napi::Value RatsNode::PunchPeer(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_punch_peer(node_, peer.c_str()));
-    return env.Undefined();
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    return attempt_result(env, rats_punch_peer(node_, peer.c_str()));
 }
 
-// Relaying. serveAsRelay (default false) also carries OTHER peers' connections,
-// which spends real bandwidth — so it is opted into rather than assumed.
 void RatsNode::EnableRelay(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    int serve = 0;
-    if (info.Length() >= 1 && info[0].IsBoolean()) serve = info[0].As<Napi::Boolean>().Value() ? 1 : 0;
-    throw_on_error(info.Env(), rats_enable_relay(node_, serve));
+    if (!require_node(info)) return;
+    throw_on_error(info.Env(), rats_enable_relay(node_, arg_bool(info, 0, false) ? 1 : 0));
 }
 
-// Reach a peer through a relay. Non-blocking: success arrives as onPeerConnected.
 Napi::Value RatsNode::ConnectViaRelay(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_connect_via_relay(node_, peer.c_str()));
-    return env.Undefined();
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    return attempt_result(env, rats_connect_via_relay(node_, peer.c_str()));
 }
 
-// What the mesh has shown about this node's own NAT (a RATS_NAT_* value).
-Napi::Value RatsNode::GetNatMapping(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    return Napi::Number::New(info.Env(), rats_nat_mapping(node_));
-}
-
-// ---------------------------------------------------------------------------
-// Pub/sub
-// ---------------------------------------------------------------------------
+// ─── pub/sub ────────────────────────────────────────────────────────────────
 
 void RatsNode::EnablePubsub(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_enable_pubsub(node_));
 }
 
-// rats_topic_cb(user, peer_id_hex, topic, data, len) -> JS (peerId, topic, Buffer)
 void RatsNode::Subscribe(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsFunction()) {
-        Napi::TypeError::New(env, "Expected topic (string) and callback (function)")
-            .ThrowAsJavaScriptException();
-        return;
-    }
-    std::string topic = info[0].As<Napi::String>().Utf8Value();
-    CbContext* ctx = new_handler();
-    ctx->init(env, info[1].As<Napi::Function>(), "on_topic");
-    auto trampoline = [](void* user, const char* peer_id, const char* topic,
-                         const void* data, size_t len) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        std::string t = topic ? topic : "";
-        std::vector<uint8_t> bytes(static_cast<const uint8_t*>(data),
-                                   static_cast<const uint8_t*>(data) + len);
-        c->tsfn.BlockingCall([peer, t, bytes](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer),
-                     Napi::String::New(env, t),
-                     Napi::Buffer<uint8_t>::Copy(env, bytes.data(), bytes.size())});
-        });
-    };
-    throw_on_error(env, rats_subscribe(node_, topic.c_str(), trampoline, ctx));
+    if (!require_node(info)) return;
+    std::string topic;
+    Napi::Function fn;
+    if (!arg_string(info, 0, "topic", topic) || !arg_function(info, 1, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "subscribe");
+    registered(info.Env(), rats_subscribe(node_, topic.c_str(),
+        [](void* user, const char* peer_id, const char* t, const void* data, size_t len) {
+            std::string peer = str_or_empty(peer_id);
+            std::string topic = str_or_empty(t);
+            auto bytes = copy_bytes(data, len);
+            static_cast<Callback*>(user)->tsfn.BlockingCall(
+                [peer, topic, bytes = std::move(bytes)](Napi::Env env, Napi::Function js) {
+                    js.Call({Napi::String::New(env, peer), Napi::String::New(env, topic),
+                             Napi::Buffer<uint8_t>::Copy(env, bytes.data(), bytes.size())});
+                });
+        }, cb));
 }
 
 void RatsNode::Unsubscribe(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected topic (string)").ThrowAsJavaScriptException();
-        return;
-    }
-    std::string topic = info[0].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_unsubscribe(node_, topic.c_str()));
+    if (!require_node(info)) return;
+    std::string topic;
+    if (!arg_string(info, 0, "topic", topic)) return;
+    throw_on_error(info.Env(), rats_unsubscribe(node_, topic.c_str()));
 }
 
-Napi::Value RatsNode::Publish(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected topic (string) and data")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string topic = info[0].As<Napi::String>().Utf8Value();
+void RatsNode::Publish(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string topic;
     std::vector<uint8_t> data;
-    if (!to_bytes(env, info[1], data)) return env.Undefined();
-    throw_on_error(env, rats_publish(node_, topic.c_str(), data.data(), data.size()));
-    return env.Undefined();
+    if (!arg_string(info, 0, "topic", topic) || !arg_bytes(info, 1, data)) return;
+    throw_on_error(info.Env(), rats_publish(node_, topic.c_str(), data.data(), data.size()));
 }
 
-// ---------------------------------------------------------------------------
-// Typed JSON
-// ---------------------------------------------------------------------------
+// ─── JSON messaging (JSON text here; index.js converts to and from values) ──
 
 void RatsNode::EnableJson(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_enable_json(node_));
 }
 
-void RatsNode::OnJsonImpl(const Napi::CallbackInfo& info, bool once) {
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsFunction()) {
-        Napi::TypeError::New(env, "Expected type (string) and callback (function)")
-            .ThrowAsJavaScriptException();
-        return;
-    }
-    std::string type = info[0].As<Napi::String>().Utf8Value();
-    CbContext* ctx = new_handler();
-    ctx->init(env, info[1].As<Napi::Function>(), "on_json");
-    auto trampoline = [](void* user, const char* peer_id, const char* json) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        std::string j = json ? json : "";
-        c->tsfn.BlockingCall([peer, j](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer), Napi::String::New(env, j)});
+void RatsNode::JsonHandler(const Napi::CallbackInfo& info, bool once) {
+    if (!require_node(info)) return;
+    std::string type;
+    Napi::Function fn;
+    if (!arg_string(info, 0, "type", type) || !arg_function(info, 1, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, once ? "onceJson" : "onJson");
+    const rats_json_cb trampoline = [](void* user, const char* peer_id, const char* json) {
+        std::string peer = str_or_empty(peer_id);
+        std::string text = str_or_empty(json);
+        static_cast<Callback*>(user)->tsfn.BlockingCall([peer, text](Napi::Env env, Napi::Function js) {
+            js.Call({Napi::String::New(env, peer), Napi::String::New(env, text)});
         });
     };
-    if (once)
-        throw_on_error(env, rats_once_json(node_, type.c_str(), trampoline, ctx));
-    else
-        throw_on_error(env, rats_on_json(node_, type.c_str(), trampoline, ctx));
+    registered(info.Env(), once ? rats_once_json(node_, type.c_str(), trampoline, cb)
+                                : rats_on_json(node_, type.c_str(), trampoline, cb));
 }
-
-void RatsNode::OnJson(const Napi::CallbackInfo& info) { OnJsonImpl(info, false); }
-void RatsNode::OnceJson(const Napi::CallbackInfo& info) { OnJsonImpl(info, true); }
 
 void RatsNode::OffJson(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected type (string)").ThrowAsJavaScriptException();
+    if (!require_node(info)) return;
+    std::string type;
+    if (!arg_string(info, 0, "type", type)) return;
+    throw_on_error(info.Env(), rats_off_json(node_, type.c_str()));
+}
+
+void RatsNode::SendJson(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string peer, type, json;
+    if (!arg_string(info, 0, "peerId", peer) || !arg_string(info, 1, "type", type) ||
+        !arg_string(info, 2, "json", json))
         return;
-    }
-    std::string type = info[0].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_off_json(node_, type.c_str()));
+    throw_on_error(info.Env(), rats_send_json(node_, peer.c_str(), type.c_str(), json.c_str()));
 }
 
-Napi::Value RatsNode::SendJson(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string), type (string), json (string)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    std::string type = info[1].As<Napi::String>().Utf8Value();
-    std::string json = info[2].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_send_json(node_, peer.c_str(), type.c_str(), json.c_str()));
-    return env.Undefined();
+void RatsNode::BroadcastJson(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string type, json;
+    if (!arg_string(info, 0, "type", type) || !arg_string(info, 1, "json", json)) return;
+    throw_on_error(info.Env(), rats_broadcast_json(node_, type.c_str(), json.c_str()));
 }
 
-Napi::Value RatsNode::BroadcastJson(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
-        Napi::TypeError::New(env, "Expected type (string) and json (string)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string type = info[0].As<Napi::String>().Utf8Value();
-    std::string json = info[1].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_broadcast_json(node_, type.c_str(), json.c_str()));
-    return env.Undefined();
-}
-
-// ---------------------------------------------------------------------------
-// File transfer
-// ---------------------------------------------------------------------------
+// ─── file transfer ──────────────────────────────────────────────────────────
 
 void RatsNode::EnableFileTransfer(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    std::string tmp;
-    const char* tmp_ptr = nullptr;
-    if (info.Length() >= 1 && info[0].IsString()) {
-        tmp = info[0].As<Napi::String>().Utf8Value();
-        tmp_ptr = tmp.c_str();
+    if (!require_node(info)) return;
+    std::string dir;
+    const char* dir_ptr = nullptr;
+    if (info.Length() >= 1 && !info[0].IsUndefined()) {
+        if (!arg_string(info, 0, "tempDir", dir)) return;
+        dir_ptr = dir.c_str();
     }
-    throw_on_error(env, rats_enable_file_transfer(node_, tmp_ptr));
+    throw_on_error(info.Env(), rats_enable_file_transfer(node_, dir_ptr));
 }
 
-// rats_file_offer_cb(user, peer_id, transfer_id, name, size, is_directory)
 void RatsNode::OnFileOffer(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_file_offer_ = std::make_unique<CbContext>();
-    on_file_offer_->init(env, info[0].As<Napi::Function>(), "on_file_offer");
-    auto trampoline = [](void* user, const char* peer_id, uint64_t transfer_id,
-                         const char* name, uint64_t size, int is_directory) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        std::string n = name ? name : "";
-        bool isdir = is_directory != 0;
-        c->tsfn.BlockingCall([peer, transfer_id, n, size, isdir](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer),
-                     Napi::Number::New(env, static_cast<double>(transfer_id)),
-                     Napi::String::New(env, n),
-                     Napi::Number::New(env, static_cast<double>(size)),
-                     Napi::Boolean::New(env, isdir)});
-        });
-    };
-    throw_on_error(env, rats_on_file_offer(node_, trampoline, on_file_offer_.get()));
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onFileOffer");
+    registered(info.Env(), rats_on_file_offer(node_,
+        [](void* user, const char* peer_id, uint64_t transfer_id, const char* name, uint64_t size,
+           int is_directory) {
+            std::string peer = str_or_empty(peer_id);
+            std::string n = str_or_empty(name);
+            const bool dir = is_directory != 0;
+            static_cast<Callback*>(user)->tsfn.BlockingCall(
+                [peer, transfer_id, n, size, dir](Napi::Env env, Napi::Function js) {
+                    js.Call({Napi::String::New(env, peer),
+                             Napi::Number::New(env, static_cast<double>(transfer_id)),
+                             Napi::String::New(env, n),
+                             Napi::Number::New(env, static_cast<double>(size)),
+                             Napi::Boolean::New(env, dir)});
+                });
+        }, cb));
 }
 
-// rats_file_progress_cb(user, transfer_id, peer_id, bytes_transferred, total_bytes, status)
 void RatsNode::OnFileProgress(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_file_progress_ = std::make_unique<CbContext>();
-    on_file_progress_->init(env, info[0].As<Napi::Function>(), "on_file_progress");
-    auto trampoline = [](void* user, uint64_t transfer_id, const char* peer_id,
-                         uint64_t bytes_transferred, uint64_t total_bytes, int status) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string peer = peer_id ? peer_id : "";
-        c->tsfn.BlockingCall([transfer_id, peer, bytes_transferred, total_bytes, status]
-                             (Napi::Env env, Napi::Function js) {
-            js.Call({Napi::Number::New(env, static_cast<double>(transfer_id)),
-                     Napi::String::New(env, peer),
-                     Napi::Number::New(env, static_cast<double>(bytes_transferred)),
-                     Napi::Number::New(env, static_cast<double>(total_bytes)),
-                     Napi::Number::New(env, status)});
-        });
-    };
-    throw_on_error(env, rats_on_file_progress(node_, trampoline, on_file_progress_.get()));
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onFileProgress");
+    registered(info.Env(), rats_on_file_progress(node_,
+        [](void* user, const rats_file_progress_t* progress) {
+            if (!progress) return;
+            FileProgress p{*progress, str_or_empty(progress->peer_id)};
+            p.c.peer_id = nullptr;   // valid only for this call; the copy is in p.peer
+            static_cast<Callback*>(user)->tsfn.BlockingCall([p](Napi::Env env, Napi::Function js) {
+                js.Call({file_progress_to_js(env, p)});
+            });
+        }, cb));
 }
 
-// rats_file_complete_cb(user, transfer_id, peer_id_hex, success, path)
 void RatsNode::OnFileComplete(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
-    Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsFunction()) {
-        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
-        return;
-    }
-    on_file_complete_ = std::make_unique<CbContext>();
-    on_file_complete_->init(env, info[0].As<Napi::Function>(), "on_file_complete");
-    auto trampoline = [](void* user, uint64_t transfer_id, const char* peer_id_hex, int success,
-                         const char* path) {
-        auto* c = static_cast<CbContext*>(user);
-        std::string p = path ? path : "";
-        std::string peer = peer_id_hex ? peer_id_hex : "";
-        bool ok = success != 0;
-        c->tsfn.BlockingCall([transfer_id, peer, ok, p](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::Number::New(env, static_cast<double>(transfer_id)),
-                     Napi::String::New(env, peer),
-                     Napi::Boolean::New(env, ok),
-                     Napi::String::New(env, p)});
-        });
-    };
-    throw_on_error(env, rats_on_file_complete(node_, trampoline, on_file_complete_.get()));
+    if (!require_node(info)) return;
+    Napi::Function fn;
+    if (!arg_function(info, 0, fn)) return;
+    Callback* cb = add_callback(info.Env(), fn, "onFileComplete");
+    registered(info.Env(), rats_on_file_complete(node_,
+        [](void* user, const char* peer_id, uint64_t transfer_id, int success, const char* path) {
+            std::string peer = str_or_empty(peer_id);
+            std::string p = str_or_empty(path);
+            const bool ok = success != 0;
+            static_cast<Callback*>(user)->tsfn.BlockingCall(
+                [peer, transfer_id, ok, p](Napi::Env env, Napi::Function js) {
+                    js.Call({Napi::String::New(env, peer),
+                             Napi::Number::New(env, static_cast<double>(transfer_id)),
+                             Napi::Boolean::New(env, ok),
+                             Napi::String::New(env, p)});
+                });
+        }, cb));
 }
 
 Napi::Value RatsNode::SendFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string) and path (string)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    std::string path = info[1].As<Napi::String>().Utf8Value();
-    uint64_t id = rats_send_file(node_, peer.c_str(), path.c_str());
+    if (!require_node(info)) return env.Undefined();
+    std::string peer, path;
+    if (!arg_string(info, 0, "peerId", peer) || !arg_string(info, 1, "path", path)) return env.Undefined();
+    uint64_t id = 0;
+    if (throw_on_error(env, rats_send_file(node_, peer.c_str(), path.c_str(), &id))) return env.Undefined();
     return Napi::Number::New(env, static_cast<double>(id));
 }
 
 Napi::Value RatsNode::SendDirectory(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string) and dirPath (string)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    std::string path = info[1].As<Napi::String>().Utf8Value();
-    uint64_t id = rats_send_directory(node_, peer.c_str(), path.c_str());
+    if (!require_node(info)) return env.Undefined();
+    std::string peer, path;
+    if (!arg_string(info, 0, "peerId", peer) || !arg_string(info, 1, "path", path)) return env.Undefined();
+    uint64_t id = 0;
+    if (throw_on_error(env, rats_send_directory(node_, peer.c_str(), path.c_str(), &id))) return env.Undefined();
     return Napi::Number::New(env, static_cast<double>(id));
 }
 
-// Shared decoder for the (peerId, transferId[, dest]) control calls.
-static bool parse_xfer_args(const Napi::CallbackInfo& info, std::string& peer,
-                            uint64_t& transfer_id) {
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
-        Napi::TypeError::New(env, "Expected peerId (string) and transferId (number)")
-            .ThrowAsJavaScriptException();
+static bool arg_transfer(const Napi::CallbackInfo& info, std::string& peer, uint64_t& id) {
+    double v = 0;
+    if (!arg_string(info, 0, "peerId", peer) ||
+        !arg_uint(info, 1, "transferId", 9007199254740991.0, v))
         return false;
-    }
-    peer = info[0].As<Napi::String>().Utf8Value();
-    transfer_id = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+    id = static_cast<uint64_t>(v);
     return true;
 }
 
-Napi::Value RatsNode::AcceptFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    std::string peer; uint64_t id;
-    if (!parse_xfer_args(info, peer, id)) return env.Undefined();
-    if (info.Length() < 3 || !info[2].IsString()) {
-        Napi::TypeError::New(env, "Expected destPath (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string dest = info[2].As<Napi::String>().Utf8Value();
-    throw_on_error(env, rats_accept_file(node_, peer.c_str(), id, dest.c_str()));
-    return env.Undefined();
+void RatsNode::AcceptFile(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string peer, dest;
+    uint64_t id = 0;
+    if (!arg_transfer(info, peer, id) || !arg_string(info, 2, "destPath", dest)) return;
+    throw_on_error(info.Env(), rats_accept_file(node_, peer.c_str(), id, dest.c_str()));
 }
 
-Napi::Value RatsNode::RejectFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    std::string peer; uint64_t id;
-    if (!parse_xfer_args(info, peer, id)) return env.Undefined();
-    throw_on_error(env, rats_reject_file(node_, peer.c_str(), id));
-    return env.Undefined();
+void RatsNode::RejectFile(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string peer;
+    uint64_t id = 0;
+    if (!arg_transfer(info, peer, id)) return;
+    throw_on_error(info.Env(), rats_reject_file(node_, peer.c_str(), id));
 }
 
-Napi::Value RatsNode::CancelFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+// true: applied; false: no such transfer.
+Napi::Value RatsNode::ControlFile(const Napi::CallbackInfo& info,
+                                  rats_error_t (*op)(rats_t, const char*, uint64_t)) {
     Napi::Env env = info.Env();
-    std::string peer; uint64_t id;
-    if (!parse_xfer_args(info, peer, id)) return env.Undefined();
-    throw_on_error(env, rats_cancel_file(node_, peer.c_str(), id));
-    return env.Undefined();
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    uint64_t id = 0;
+    if (!arg_transfer(info, peer, id)) return env.Undefined();
+    const rats_error_t err = op(node_, peer.c_str(), id);
+    if (err == RATS_ERR_NOT_FOUND) return Napi::Boolean::New(env, false);
+    if (throw_on_error(env, err)) return env.Undefined();
+    return Napi::Boolean::New(env, true);
 }
 
-Napi::Value RatsNode::PauseFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    std::string peer; uint64_t id;
-    if (!parse_xfer_args(info, peer, id)) return env.Undefined();
-    throw_on_error(env, rats_pause_file(node_, peer.c_str(), id));
-    return env.Undefined();
-}
+Napi::Value RatsNode::CancelFile(const Napi::CallbackInfo& info) { return ControlFile(info, rats_cancel_file); }
+Napi::Value RatsNode::PauseFile(const Napi::CallbackInfo& info) { return ControlFile(info, rats_pause_file); }
+Napi::Value RatsNode::ResumeFile(const Napi::CallbackInfo& info) { return ControlFile(info, rats_resume_file); }
 
-Napi::Value RatsNode::ResumeFile(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    std::string peer; uint64_t id;
-    if (!parse_xfer_args(info, peer, id)) return env.Undefined();
-    throw_on_error(env, rats_resume_file(node_, peer.c_str(), id));
-    return env.Undefined();
-}
-
-// ---------------------------------------------------------------------------
-// Ping / reconnect
-// ---------------------------------------------------------------------------
+// ─── ping and reconnection ──────────────────────────────────────────────────
 
 void RatsNode::EnablePing(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_enable_ping(node_));
 }
 
-Napi::Value RatsNode::GetPeerRttMs(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
+Napi::Value RatsNode::PeerRttMs(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string peer = info[0].As<Napi::String>().Utf8Value();
-    int64_t rtt = rats_peer_rtt_ms(node_, peer.c_str());
+    if (!require_node(info)) return env.Undefined();
+    std::string peer;
+    if (!arg_string(info, 0, "peerId", peer)) return env.Undefined();
+    const int64_t rtt = rats_peer_rtt_ms(node_, peer.c_str());
+    if (rtt < 0) return env.Null();
     return Napi::Number::New(env, static_cast<double>(rtt));
 }
 
 void RatsNode::EnableReconnect(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE();
+    if (!require_node(info)) return;
     throw_on_error(info.Env(), rats_enable_reconnect(node_));
 }
 
-Napi::Value RatsNode::AddReconnect(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
-        Napi::TypeError::New(env, "Expected host (string) and port (number)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string host = info[0].As<Napi::String>().Utf8Value();
-    uint16_t port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
-    throw_on_error(env, rats_add_reconnect(node_, host.c_str(), port));
-    return env.Undefined();
+void RatsNode::AddReconnect(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string host;
+    uint16_t port = 0;
+    if (!arg_string(info, 0, "host", host) || !arg_port(info, 1, port)) return;
+    throw_on_error(info.Env(), rats_add_reconnect(node_, host.c_str(), port));
 }
 
-Napi::Value RatsNode::RemoveReconnect(const Napi::CallbackInfo& info) {
-    RATS_REQUIRE_NODE(info.Env().Undefined());
-    Napi::Env env = info.Env();
-    if (info.Length() < 2 || !info[0].IsString() || !info[1].IsNumber()) {
-        Napi::TypeError::New(env, "Expected host (string) and port (number)")
-            .ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    std::string host = info[0].As<Napi::String>().Utf8Value();
-    uint16_t port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
-    throw_on_error(env, rats_remove_reconnect(node_, host.c_str(), port));
-    return env.Undefined();
+void RatsNode::RemoveReconnect(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    std::string host;
+    uint16_t port = 0;
+    if (!arg_string(info, 0, "host", host) || !arg_port(info, 1, port)) return;
+    throw_on_error(info.Env(), rats_remove_reconnect(node_, host.c_str(), port));
 }
 
-// ---------------------------------------------------------------------------
-// Class registration
-// ---------------------------------------------------------------------------
+// ─── registration ───────────────────────────────────────────────────────────
 
 Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
     Napi::Function func = DefineClass(env, "RatsNode", {
-        // lifecycle / core
         InstanceMethod("start", &RatsNode::Start),
         InstanceMethod("stop", &RatsNode::Stop),
         InstanceMethod("destroy", &RatsNode::Destroy),
-        InstanceMethod("listenPort", &RatsNode::GetListenPort),
-        InstanceMethod("localId", &RatsNode::GetLocalId),
-        InstanceMethod("protocol", &RatsNode::GetProtocol),
-        InstanceMethod("transports", &RatsNode::GetTransports),
-        // connections
+        InstanceMethod("localId", &RatsNode::LocalId),
+        InstanceMethod("protocol", &RatsNode::Protocol),
+        InstanceMethod("listenPort", &RatsNode::ListenPort),
+        InstanceMethod("transports", &RatsNode::Transports),
+        InstanceMethod("natMapping", &RatsNode::NatMapping),
+        InstanceMethod("observedAddresses", &RatsNode::ObservedAddresses),
+
         InstanceMethod("connect", &RatsNode::Connect),
-        InstanceMethod("peerCount", &RatsNode::GetPeerCount),
-        InstanceMethod("peerIds", &RatsNode::GetPeerIds),
+        InstanceMethod("disconnect", &RatsNode::Disconnect),
+        InstanceMethod("peerCount", &RatsNode::PeerCount),
+        InstanceMethod("peerIds", &RatsNode::PeerIds),
+        InstanceMethod("peerInfo", &RatsNode::PeerInfo),
+        InstanceMethod("maxPeers", &RatsNode::MaxPeers),
         InstanceMethod("setMaxPeers", &RatsNode::SetMaxPeers),
-        InstanceMethod("maxPeers", &RatsNode::GetMaxPeers),
-        InstanceMethod("peerTransport", &RatsNode::GetPeerTransport),
-        InstanceMethod("peerTransports", &RatsNode::GetPeerTransports),
-        // raw channel messaging
+
         InstanceMethod("send", &RatsNode::Send),
         InstanceMethod("broadcast", &RatsNode::Broadcast),
         InstanceMethod("peerWritable", &RatsNode::PeerWritable),
         InstanceMethod("pathStats", &RatsNode::PathStats),
-        InstanceMethod("on", &RatsNode::On),
-        // peer events
+
         InstanceMethod("onPeerConnected", &RatsNode::OnPeerConnected),
         InstanceMethod("onPeerDisconnected", &RatsNode::OnPeerDisconnected),
+        InstanceMethod("onDialFailed", &RatsNode::OnDialFailed),
         InstanceMethod("onPeerWritable", &RatsNode::OnPeerWritable),
         InstanceMethod("onPeerPath", &RatsNode::OnPeerPath),
-        // discovery / NAT
+        InstanceMethod("on", &RatsNode::On),
+
         InstanceMethod("enableDht", &RatsNode::EnableDht),
         InstanceMethod("enableMdns", &RatsNode::EnableMdns),
+        InstanceMethod("enablePeerExchange", &RatsNode::EnablePeerExchange),
         InstanceMethod("enablePortMapping", &RatsNode::EnablePortMapping),
         InstanceMethod("enableHolePunch", &RatsNode::EnableHolePunch),
         InstanceMethod("punchPeer", &RatsNode::PunchPeer),
         InstanceMethod("enableRelay", &RatsNode::EnableRelay),
         InstanceMethod("connectViaRelay", &RatsNode::ConnectViaRelay),
-        InstanceMethod("natMapping", &RatsNode::GetNatMapping),
-        // pub/sub
+
         InstanceMethod("enablePubsub", &RatsNode::EnablePubsub),
         InstanceMethod("subscribe", &RatsNode::Subscribe),
         InstanceMethod("unsubscribe", &RatsNode::Unsubscribe),
         InstanceMethod("publish", &RatsNode::Publish),
-        // typed JSON
+
         InstanceMethod("enableJson", &RatsNode::EnableJson),
         InstanceMethod("onJson", &RatsNode::OnJson),
         InstanceMethod("onceJson", &RatsNode::OnceJson),
         InstanceMethod("offJson", &RatsNode::OffJson),
         InstanceMethod("sendJson", &RatsNode::SendJson),
         InstanceMethod("broadcastJson", &RatsNode::BroadcastJson),
-        // file transfer
+
         InstanceMethod("enableFileTransfer", &RatsNode::EnableFileTransfer),
         InstanceMethod("onFileOffer", &RatsNode::OnFileOffer),
         InstanceMethod("onFileProgress", &RatsNode::OnFileProgress),
@@ -1198,125 +1155,63 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("cancelFile", &RatsNode::CancelFile),
         InstanceMethod("pauseFile", &RatsNode::PauseFile),
         InstanceMethod("resumeFile", &RatsNode::ResumeFile),
-        // ping / reconnect
+
         InstanceMethod("enablePing", &RatsNode::EnablePing),
-        InstanceMethod("peerRttMs", &RatsNode::GetPeerRttMs),
+        InstanceMethod("peerRttMs", &RatsNode::PeerRttMs),
         InstanceMethod("enableReconnect", &RatsNode::EnableReconnect),
         InstanceMethod("addReconnect", &RatsNode::AddReconnect),
         InstanceMethod("removeReconnect", &RatsNode::RemoveReconnect),
     });
-
     exports.Set("RatsNode", func);
     return exports;
 }
 
-// ---------------------------------------------------------------------------
-// Module-level functions (process-global; no node required)
-// ---------------------------------------------------------------------------
+// ─── process-wide ───────────────────────────────────────────────────────────
 
-Napi::Value GetVersionString(const Napi::CallbackInfo& info) {
-    return Napi::String::New(info.Env(), rats_version_string());
-}
-
-Napi::Value GetVersion(const Napi::CallbackInfo& info) {
+static Napi::Value Version(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     int major = 0, minor = 0, patch = 0, build = 0;
     rats_version(&major, &minor, &patch, &build);
-    Napi::Object version = Napi::Object::New(env);
-    version.Set("major", Napi::Number::New(env, major));
-    version.Set("minor", Napi::Number::New(env, minor));
-    version.Set("patch", Napi::Number::New(env, patch));
-    version.Set("build", Napi::Number::New(env, build));
-    return version;
+    Napi::Object v = Napi::Object::New(env);
+    v.Set("string",      Napi::String::New(env, rats_version_string()));
+    v.Set("major",       Napi::Number::New(env, major));
+    v.Set("minor",       Napi::Number::New(env, minor));
+    v.Set("patch",       Napi::Number::New(env, patch));
+    v.Set("build",       Napi::Number::New(env, build));
+    v.Set("gitDescribe", Napi::String::New(env, rats_git_describe()));
+    v.Set("abi",         Napi::Number::New(env, rats_abi()));
+    return v;
 }
 
-Napi::Value GetGitDescribe(const Napi::CallbackInfo& info) {
-    return Napi::String::New(info.Env(), rats_git_describe());
-}
-
-Napi::Value GetAbi(const Napi::CallbackInfo& info) {
-    return Napi::Number::New(info.Env(), rats_abi());
-}
-
-Napi::Value SetLogLevel(const Napi::CallbackInfo& info) {
+static Napi::Value SetLogLevel(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    if (info.Length() < 1 || !info[0].IsNumber()) {
-        Napi::TypeError::New(env, "Expected log level (number)").ThrowAsJavaScriptException();
-        return env.Undefined();
-    }
-    rats_set_log_level(static_cast<rats_log_level_t>(info[0].As<Napi::Number>().Int32Value()));
+    const std::string level = info.Length() >= 1 && info[0].IsString()
+                                  ? info[0].As<Napi::String>().Utf8Value() : "";
+    if (level == "debug")      rats_set_log_level(RATS_LOG_DEBUG);
+    else if (level == "info")  rats_set_log_level(RATS_LOG_INFO);
+    else if (level == "warn")  rats_set_log_level(RATS_LOG_WARN);
+    else if (level == "error") rats_set_log_level(RATS_LOG_ERROR);
+    else throw_type(env, "Expected log level 'debug', 'info', 'warn' or 'error'");
     return env.Undefined();
 }
 
-Napi::Value SetLogFile(const Napi::CallbackInfo& info) {
-    Napi::Env env = info.Env();
+static Napi::Value SetLogFile(const Napi::CallbackInfo& info) {
     if (info.Length() >= 1 && info[0].IsString()) {
-        std::string path = info[0].As<Napi::String>().Utf8Value();
+        const std::string path = info[0].As<Napi::String>().Utf8Value();
         rats_set_log_file(path.c_str());
     } else {
-        rats_set_log_file(nullptr); // NULL/empty disables file logging
+        rats_set_log_file(nullptr);
     }
-    return env.Undefined();
+    return info.Env().Undefined();
 }
 
-// Constants exposed to JS (security + log levels + error codes).
-Napi::Object InitConstants(Napi::Env env) {
-    Napi::Object constants = Napi::Object::New(env);
-
-    Napi::Object security = Napi::Object::New(env);
-    security.Set("NOISE", Napi::Number::New(env, RATS_SECURITY_NOISE));
-    security.Set("PLAINTEXT", Napi::Number::New(env, RATS_SECURITY_PLAINTEXT));
-    constants.Set("SECURITY", security);
-
-    Napi::Object transport = Napi::Object::New(env);
-    transport.Set("TCP", Napi::Number::New(env, RATS_TRANSPORT_TCP));
-    transport.Set("UDP", Napi::Number::New(env, RATS_TRANSPORT_UDP));
-    constants.Set("TRANSPORT", transport);
-
-    Napi::Object transportMask = Napi::Object::New(env);
-    transportMask.Set("TCP", Napi::Number::New(env, RATS_TRANSPORT_MASK_TCP));
-    transportMask.Set("UDP", Napi::Number::New(env, RATS_TRANSPORT_MASK_UDP));
-    constants.Set("TRANSPORT_MASK", transportMask);
-
-    Napi::Object nat = Napi::Object::New(env);
-    nat.Set("UNKNOWN", Napi::Number::New(env, RATS_NAT_UNKNOWN));
-    nat.Set("OPEN", Napi::Number::New(env, RATS_NAT_OPEN));
-    nat.Set("ENDPOINT_INDEPENDENT", Napi::Number::New(env, RATS_NAT_ENDPOINT_INDEPENDENT));
-    nat.Set("ENDPOINT_DEPENDENT", Napi::Number::New(env, RATS_NAT_ENDPOINT_DEPENDENT));
-    constants.Set("NAT_MAPPING", nat);
-
-    Napi::Object logLevels = Napi::Object::New(env);
-    logLevels.Set("DEBUG", Napi::Number::New(env, RATS_LOG_DEBUG));
-    logLevels.Set("INFO", Napi::Number::New(env, RATS_LOG_INFO));
-    logLevels.Set("WARN", Napi::Number::New(env, RATS_LOG_WARN));
-    logLevels.Set("ERROR", Napi::Number::New(env, RATS_LOG_ERROR));
-    constants.Set("LOG_LEVELS", logLevels);
-
-    Napi::Object errors = Napi::Object::New(env);
-    errors.Set("OK", Napi::Number::New(env, RATS_OK));
-    errors.Set("INVALID_ARG", Napi::Number::New(env, RATS_ERR_INVALID_ARG));
-    errors.Set("NOT_STARTED", Napi::Number::New(env, RATS_ERR_NOT_STARTED));
-    errors.Set("ALREADY_STARTED", Napi::Number::New(env, RATS_ERR_ALREADY_STARTED));
-    errors.Set("NOT_ENABLED", Napi::Number::New(env, RATS_ERR_NOT_ENABLED));
-    errors.Set("NO_SUCH_PEER", Napi::Number::New(env, RATS_ERR_NO_SUCH_PEER));
-    errors.Set("BIND", Napi::Number::New(env, RATS_ERR_BIND));
-    errors.Set("INTERNAL", Napi::Number::New(env, RATS_ERR_INTERNAL));
-    constants.Set("ERRORS", errors);
-
-    return constants;
-}
-
-Napi::Object Init(Napi::Env env, Napi::Object exports) {
+static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     RatsNode::Init(env, exports);
-
-    exports.Set("getVersionString", Napi::Function::New(env, GetVersionString));
-    exports.Set("getVersion", Napi::Function::New(env, GetVersion));
-    exports.Set("getGitDescribe", Napi::Function::New(env, GetGitDescribe));
-    exports.Set("getAbi", Napi::Function::New(env, GetAbi));
+    exports.Set("version", Napi::Function::New(env, Version));
     exports.Set("setLogLevel", Napi::Function::New(env, SetLogLevel));
     exports.Set("setLogFile", Napi::Function::New(env, SetLogFile));
-    exports.Set("constants", InitConstants(env));
-
+    exports.Set("LIVE_MAX_LIFETIME_MS", Napi::Number::New(env, RATS_LIVE_MAX_LIFETIME_MS));
+    exports.Set("LIVE_MAX_PAYLOAD", Napi::Number::New(env, RATS_LIVE_MAX_PAYLOAD));
     return exports;
 }
 

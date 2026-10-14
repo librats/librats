@@ -5,20 +5,18 @@ import java.util.EnumSet;
 /**
  * Which wire a peer connection runs on ({@code rats_transport_t}).
  *
- * <p>TCP and UDP carry the identical protocol and the identical encrypted
- * handshake; they differ only in how the ordered, reliable byte stream underneath
- * is obtained. UDP is the default first choice for a dial: one socket means one
- * NAT mapping for every peer, and the source port a peer observes is the port it
- * can dial back — which is what makes hole punching possible at all. RELAY is that
- * same stream one hop further away, carried inside another peer's connection; it
- * is never dialed, so it has no bit in a transports bitmask.</p>
+ * <p>UDP and TCP carry the same protocol under the same encrypted handshake. UDP
+ * is what a dial tries first by default: every peer shares one socket and so one
+ * NAT mapping, which is also what makes hole punching possible. {@link #RELAY} is
+ * a connection carried through another peer; it is only ever reported, never
+ * chosen, so it has no bit in a transports mask.</p>
  */
 public enum Transport {
+    /** The library's own transport on the one shared UDP socket. */
+    UDP(0, 0x2),
     /** One kernel socket per peer. */
-    TCP(0, 0x1),
-    /** Reliable stream over the one shared UDP socket. */
-    UDP(1, 0x2),
-    /** Carried through a third node; see {@code RatsNode.enableRelay}. */
+    TCP(1, 0x1),
+    /** Carried through another peer's connection; see {@link RatsNode#enableRelay(boolean)}. */
     RELAY(2, 0x0);
 
     private final int value;
@@ -34,15 +32,12 @@ public enum Transport {
         return value;
     }
 
-    /** @return this transport's bit in a {@code RATS_TRANSPORT_MASK_*} bitmask. */
+    /** @return this transport's {@code RATS_TRANSPORT_MASK_*} bit; 0 for {@link #RELAY}. */
     public int mask() {
         return mask;
     }
 
-    /**
-     * @param value a numeric {@code rats_transport_t} value
-     * @return the matching constant, or null if the value is unknown
-     */
+    /** @return the constant for a {@code rats_transport_t} value, or null if unknown. */
     public static Transport fromValue(int value) {
         for (Transport t : values()) {
             if (t.value == value) return t;
@@ -50,17 +45,19 @@ public enum Transport {
         return null;
     }
 
-    /**
-     * Decodes a {@code RATS_TRANSPORT_MASK_*} bitmask.
-     *
-     * @param mask the bitmask
-     * @return the transports it names; empty for 0
-     */
+    /** @return the transports named by a {@code RATS_TRANSPORT_MASK_*} bitmask; empty for 0. */
     public static EnumSet<Transport> fromMask(int mask) {
         EnumSet<Transport> set = EnumSet.noneOf(Transport.class);
         for (Transport t : values()) {
             if ((mask & t.mask) != 0) set.add(t);
         }
         return set;
+    }
+
+    /** @return the bitmask of a set of transports ({@link #RELAY} contributes nothing). */
+    public static int toMask(Iterable<Transport> transports) {
+        int mask = 0;
+        for (Transport t : transports) mask |= t.mask;
+        return mask;
     }
 }

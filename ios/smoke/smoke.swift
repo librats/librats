@@ -55,12 +55,14 @@ func check(_ err: rats_error_t, _ what: String) {
 }
 
 // --- nodes -----------------------------------------------------------------
-// Port 0 is ephemeral, so the test never collides with whatever else is running.
-guard let serverNode = rats_create(0) else { fail("rats_create(server) returned null") }
-// enable_listen = 0 — a dial-only client, the normal shape for a mobile peer.
-guard let clientNode = rats_create_ex(0, 0, nil, RATS_SECURITY_NOISE) else {
-    fail("rats_create_ex(client) returned null")
-}
+// A NULL config is all defaults: listening on an ephemeral port, so the test
+// never collides with whatever else is running.
+guard let serverNode = rats_create(nil) else { fail("rats_create(server) returned null") }
+// Every zero in rats_config_t is a default, so Swift's zero initialiser is a
+// complete config. A dial-only client is the normal shape for a mobile peer.
+var clientConfig = rats_config_t()
+clientConfig.dial_only = 1
+guard let clientNode = rats_create(&clientConfig) else { fail("rats_create(client) returned null") }
 
 let server = Harness(node: serverNode)
 let client = Harness(node: clientNode)
@@ -91,12 +93,8 @@ check(rats_start(clientNode), "rats_start(client)")
 let port = rats_listen_port(serverNode)
 guard port != 0 else { fail("server bound no port") }
 
-// Strings the library returns are heap-allocated and owned by the caller.
-let serverId: String = {
-    guard let id = rats_local_id(serverNode) else { fail("rats_local_id returned null") }
-    defer { rats_string_free(id) }
-    return String(cString: id)
-}()
+// The id is the node's own string, valid until rats_destroy; copy it into Swift.
+let serverId = String(cString: rats_local_id(serverNode))
 
 print("server \(serverId.prefix(16))… listening on \(port)")
 print("transports: server=\(rats_transports(serverNode)) client=\(rats_transports(clientNode))")
@@ -106,7 +104,11 @@ check(rats_connect(clientNode, "127.0.0.1", port), "rats_connect")
 guard client.connected.wait(timeout: .now() + 15) == .success else {
     fail("no handshake within 15s (transports=\(rats_transports(clientNode)))")
 }
-print("handshake complete")
+var info = rats_peer_info_t()
+check(rats_peer_info(clientNode, serverId, &info), "rats_peer_info")
+let wire = info.transport == RATS_TRANSPORT_UDP ? "udp"
+         : info.transport == RATS_TRANSPORT_TCP ? "tcp" : "relay"
+print("handshake complete over \(wire)")
 
 let message = "hello from swift on ios"
 check(rats_send(clientNode, serverId, "chat", Array(message.utf8), message.utf8.count, 0),
@@ -120,9 +122,7 @@ guard client.received == message else {
 }
 print("echo verified: \"\(client.received!)\"")
 
-rats_stop(clientNode)
-rats_stop(serverNode)
-rats_destroy(clientNode)
+rats_destroy(clientNode)   // destroy stops a running node
 rats_destroy(serverNode)
 
 print("PASS")

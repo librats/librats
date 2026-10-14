@@ -1,18 +1,18 @@
 package com.librats;
 
 /**
- * Notified when a transfer terminates, successfully or not.
+ * Told when a transfer ends, successfully or not.
  *
  * <p>Register with {@link RatsNode#onFileComplete(FileCompleteCallback)} before
- * {@link RatsNode#start()}; requires {@link RatsNode#enableFileTransfer(String)}.
- * Fires on an internal reactor thread.</p>
+ * {@link RatsNode#start()}. Runs on a reactor thread.</p>
  */
 @FunctionalInterface
 public interface FileCompleteCallback {
     /**
-     * @param transferId transfer identifier
-     * @param success    true if the transfer completed successfully
-     * @param path       final path of the transferred file/directory (may be null)
+     * @param peerId     the other side's peer id
+     * @param transferId the transfer id
+     * @param success    whether it completed
+     * @param path       where the file or directory ended up on this device
      */
-    void onFileComplete(long transferId, String peerId, boolean success, String path);
+    void onFileComplete(String peerId, long transferId, boolean success, String path);
 }

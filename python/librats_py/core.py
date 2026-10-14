@@ -1,42 +1,67 @@
 """
-High-level :class:`RatsNode` over the librats C ABI (``src/librats/bindings/rats.h``).
+:class:`RatsNode` — one librats node, over the C ABI (``src/librats/bindings/rats.h``).
 
-A :class:`RatsNode` wraps a single ``rats_t`` node. On its own it is secure
-transport plus raw messaging on named channels; discovery, pub/sub, JSON
-messaging, file transfer, NAT traversal, ping and reconnection are opt-in
-subsystems. The lifecycle mirrors the C contract:
+On its own a node is secure transport plus raw messaging on named channels;
+discovery, NAT traversal, pub/sub, JSON messaging, file transfer, ping and
+reconnection are subsystems enabled before :meth:`RatsNode.start`.
 
-* Register callbacks and enable subsystems **before** :meth:`start`.
-  Enabling a subsystem after start raises :class:`RatsAlreadyStartedError`;
-  calling a subsystem op before its enable raises :class:`RatsNotEnabledError`.
-* Callbacks fire on an internal reactor thread — do not block in them. The
-  wrappers here swallow Python exceptions so they never propagate into C.
-* All ``CFUNCTYPE`` callback objects are retained on the instance for the
-  node's lifetime so they are not garbage-collected while C holds a pointer.
+Callbacks run on a librats reactor thread. Each one is wrapped so that an
+exception raised in it is printed to stderr instead of unwinding into C, and
+every ``CFUNCTYPE`` object is kept for the node's lifetime: the C side may hold
+the pointer until the node is destroyed.
 """
 
 import json
-import threading
+import sys
 import weakref
-from typing import Any, Dict, List, Optional
+from ctypes import byref, c_int, c_size_t, c_uint64, string_at
+from typing import Any, Callable, List, Optional
 
-from ctypes import byref, c_size_t, c_int, string_at
-
-from .ctypes_wrapper import get_librats, take_string, RatsConfig, RatsPathStats
-from .enums import (RatsError as ErrorCode, Security, Transport, Congestion, NatMapping,
-                    LogLevel, VersionInfo, PathStats)
-from .exceptions import RatsError, check_error
+from .ctypes_wrapper import (
+    RatsBtConfig, RatsConfig, RatsFileProgress, RatsPathStats, RatsPeerInfo, get_librats,
+)
+from .enums import (
+    BtEncryption, CloseReason, Congestion, Direction, FileProgress, FileTransferStatus,
+    LogLevel, NatMapping, PathStats, PeerInfo, RatsError as ErrorCode, Security, Transport,
+    TransportMask, VersionInfo,
+)
+from .exceptions import RatsError, RatsInvalidArgError, check_error
 from .callbacks import (
-    PeerCallback, PeerDisconnectCallback, PathCallback, MessageCallback, TopicCallback,
-    JsonCallback, FileOfferCallback, FileProgressCallback, FileCompleteCallback,
-    PeerCallbackType, PeerDisconnectCallbackType, PathCallbackType,
-    MessageCallbackType, TopicCallbackType, JsonCallbackType,
-    FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
+    DialFailedCallback, DialFailedCallbackType, DisconnectCallback, DisconnectCallbackType,
+    FileCompleteCallback, FileCompleteCallbackType, FileOfferCallback, FileOfferCallbackType,
+    FileProgressCallback, FileProgressCallbackType, JsonCallback, JsonCallbackType,
+    MessageCallback, MessageCallbackType, PathCallback, PathCallbackType, PeerCallback,
+    PeerCallbackType, TopicCallback, TopicCallbackType,
 )
 
 
+def _b(s: Optional[str]) -> Optional[bytes]:
+    return s.encode('utf-8') if s is not None else None
+
+
+def _s(b: Optional[bytes]) -> str:
+    return b.decode('utf-8', errors='replace') if b else ""
+
+
+def _bytes(ptr, length: int) -> bytes:
+    return string_at(ptr, length) if ptr and length else b""
+
+
+def _report(exc: BaseException, where: str) -> None:
+    print(f"[librats_py] exception in {where} callback: {exc!r}", file=sys.stderr)
+
+
+def _guard(where: str, fn: Callable) -> Callable:
+    """Wrap a trampoline so a Python exception never unwinds into C."""
+    def call(*args):
+        try:
+            fn(*args)
+        except BaseException as exc:  # noqa: B902 — nothing may cross into C
+            _report(exc, where)
+    return call
+
+
 def _path_stats(c: RatsPathStats) -> PathStats:
-    """Copy a ``rats_path_stats_t`` out into a :class:`PathStats`."""
     return PathStats(
         bandwidth_bps=c.bandwidth_bps, app_limited=bool(c.app_limited),
         pacing_bps=c.pacing_bps, srtt_us=c.srtt_us, min_rtt_us=c.min_rtt_us,
@@ -46,125 +71,121 @@ def _path_stats(c: RatsPathStats) -> PathStats:
         live_repair_bytes=c.live_repair_bytes)
 
 
-def _b(s: Optional[str]) -> Optional[bytes]:
-    """Encode an optional ``str`` to UTF-8 bytes (``None`` stays ``None``)."""
-    return s.encode('utf-8') if s is not None else None
+def _string_list(lib, fn, handle) -> List[str]:
+    count = c_size_t()
+    arr = fn(handle, byref(count))
+    if not arr:
+        return []
+    try:
+        return [_s(arr[i]) for i in range(count.value)]
+    finally:
+        lib.rats_strings_free(arr, count.value)
 
 
 class RatsNode:
-    """Pythonic wrapper around a librats node (``rats_t``).
+    """A librats node.
 
-    Use it as a context manager to guarantee the node is stopped::
+    Every keyword maps to a ``rats_config_t`` field; leaving one out keeps the
+    library default. Use it as a context manager to have it destroyed on exit::
 
-        with RatsNode(8080) as node:
+        with RatsNode(8080, protocol="myapp/1.0") as node:
+            node.on("chat", lambda peer, data: print(peer, data))
             node.start()
-            ...
     """
 
     def __init__(
         self,
         listen_port: int = 0,
         *,
-        enable_listen: bool = True,
-        bind_address: Optional[str] = None,
-        security: Security = Security.NOISE,
-        data_dir: Optional[str] = None,
         protocol: Optional[str] = None,
+        data_dir: Optional[str] = None,
+        security: Security = Security.NOISE,
+        bind_address: Optional[str] = None,
+        dial_only: bool = False,
         max_peers: int = 0,
-        enable_tcp: bool = True,
-        enable_udp: bool = True,
+        transports: TransportMask = TransportMask.NONE,
         preferred_transport: Transport = Transport.UDP,
-        transport_fallback_ms: int = 1200,
+        transport_fallback_ms: int = 0,
         send_queue_limit: int = 0,
+        path_sample_ms: int = 0,
         congestion_control: Congestion = Congestion.BBR,
         udp_receive_window: int = 0,
         udp_receive_budget: int = 0,
-        path_sample_ms: int = 0,
+        udp_offload: bool = True,
+        reactor_threads: int = 0,
+        network_monitor: bool = True,
     ):
-        """Create a node.
+        """Create a node; no socket is opened until :meth:`start`.
 
         Args:
-            listen_port: Inbound port, used by both transports (0 = ephemeral).
-            enable_listen: ``False`` makes a dial-only node (no listener).
-            bind_address: Bind address; ``None`` → ``"::"`` dual-stack wildcard.
-            security: :class:`~librats_py.enums.Security` mode (default Noise).
-            data_dir: Persistent state dir; ``None``/"" → ephemeral identity.
-            protocol: Handshake app id, e.g. ``"myapp/1.0"``; ``None`` →
-                ``"librats/1.0"``. Peers whose protocol differs cannot connect.
-            max_peers: Established-peer cap (0 = unlimited).
-            enable_tcp: Accept and dial over TCP.
-            enable_udp: Accept and dial over the datagram transport.
-            preferred_transport: Which one a dial tries first. UDP by default —
-                one socket and one NAT mapping for every peer, and a source port
-                a peer can dial back.
+            listen_port: Port both transports listen on; 0 = ephemeral.
+            protocol: App id bound into the handshake, e.g. ``"myapp/1.0"``;
+                peers with a different one cannot connect. Default ``"librats/1.0"``.
+            data_dir: Directory for persistent state (identity, DHT routing
+                table, reconnect list). Without it the identity is new every run.
+            security: :class:`Security`; Noise by default.
+            bind_address: Interface to listen on; default ``"::"``, dual-stack.
+            dial_only: No listener: outbound connections only.
+            max_peers: Cap on established peers, enforced on inbound; 0 = none.
+            transports: :class:`TransportMask` of transports to run; NONE = both.
+            preferred_transport: Tried first by a dial; UDP by default.
             transport_fallback_ms: How long the preferred transport dials alone
-                before the other is raced alongside it; 0 disables the fallback.
-            send_queue_limit: Bytes a peer's send queue may hold before an
-                application that keeps sending anyway has that peer dropped with
-                ``RATS_CLOSE_SLOW_CONSUMER``; 0 = the library default (8 MiB). A
-                quarter of it is where :meth:`peer_writable` starts saying False,
-                so lowering it makes backpressure felt sooner. It is not a
-                maximum message size — one message of any size is always queued.
-            congestion_control: :class:`~librats_py.enums.Congestion` of every
-                UDP stream. BBR (default) holds its rate on lossy links and keeps
-                the bottleneck queue short; Reno backs off on every loss.
-            udp_receive_window: Bytes one UDP stream will buffer for its peer, at
-                most — the ceiling its receive window grows to while the peer is
-                held back by it; 0 = the library default (16 MiB).
-            udp_receive_budget: Bytes all UDP streams together may hold out of
-                order; 0 = the library default (64 MiB).
+                before the other is raced; 0 = 1200, :data:`FALLBACK_NEVER` = never.
+            send_queue_limit: Bytes a peer's queue may hold before a sender that
+                keeps going has it dropped (``CloseReason.SLOW_CONSUMER``);
+                :meth:`peer_writable` turns False at a quarter of it. Not a
+                message size limit. 0 = 8 MiB.
             path_sample_ms: How often each peer's path is sampled for
-                :meth:`path_stats` and :meth:`on_peer_path`; 0 = only while an
-                :meth:`on_peer_path` callback is registered, then every 100 ms.
-        """
-        self._lib = get_librats()
+                :meth:`path_stats`; 0 = only while an :meth:`on_peer_path`
+                callback is registered, every 100 ms.
+            congestion_control: :class:`Congestion` of every UDP connection.
+            udp_receive_window: Ceiling one UDP connection's flow-control window
+                grows to (it starts at 1 MiB); 0 = 16 MiB.
+            udp_receive_budget: Bytes all UDP connections together may hold out of
+                order; 0 = 64 MiB.
+            udp_offload: Use the kernel's UDP segmentation offload where present.
+            reactor_threads: I/O threads; 0 = 1.
+            network_monitor: Watch the host for interface and address changes.
 
-        cfg: RatsConfig = self._lib.config_default()
-        cfg.listen_port = listen_port
-        cfg.enable_listen = 1 if enable_listen else 0
+        Raises:
+            RatsInvalidArgError: the config is impossible (no transport, or
+                TCP preferred while it is turned off).
+        """
+        self._lib = get_librats().lib
+        self._handle = None
+        self._running = False
+        # Every CFUNCTYPE handed to C, kept until the node is destroyed.
+        self._thunks: List[Any] = []
+
+        cfg = RatsConfig()
+        cfg.protocol = _b(protocol)
+        cfg.data_dir = _b(data_dir)
         cfg.security = int(security)
+        cfg.listen_port = listen_port
+        cfg.bind_address = _b(bind_address)
+        cfg.dial_only = int(dial_only)
         cfg.max_peers = max_peers
-        cfg.enable_tcp = 1 if enable_tcp else 0
-        cfg.enable_udp = 1 if enable_udp else 0
+        cfg.transports = int(transports)
         cfg.preferred_transport = int(preferred_transport)
         cfg.transport_fallback_ms = transport_fallback_ms
         cfg.send_queue_limit = send_queue_limit
+        cfg.path_sample_ms = path_sample_ms
         cfg.congestion_control = int(congestion_control)
         cfg.udp_receive_window = udp_receive_window
         cfg.udp_receive_budget = udp_receive_budget
-        cfg.path_sample_ms = path_sample_ms
-        # Keep bytes alive for the duration of the create call.
-        self._cfg_keepalive = [
-            _b(bind_address), _b(data_dir), _b(protocol),
-        ]
-        if bind_address is not None:
-            cfg.bind_address = self._cfg_keepalive[0]
-        if data_dir is not None:
-            cfg.data_dir = self._cfg_keepalive[1]
-        if protocol is not None:
-            cfg.protocol = self._cfg_keepalive[2]
+        cfg.disable_udp_offload = int(not udp_offload)
+        cfg.reactor_threads = reactor_threads
+        cfg.disable_network_monitor = int(not network_monitor)
 
-        self._handle = self._lib.lib.rats_create_config(byref(cfg))
-        if not self._handle:
-            raise RatsError("Failed to create RatsNode node")
+        handle = self._lib.rats_create(byref(cfg))
+        if not handle:
+            raise RatsInvalidArgError(
+                "rats_create refused the config: no transport, a contradictory "
+                "transport choice, an out-of-range value, or an unreadable data_dir")
+        self._handle = handle
+        self._finalizer = weakref.finalize(self, self._lib.rats_destroy, handle)
 
-        self._running = False
-        self._lock = threading.Lock()
-
-        # Retain every CFUNCTYPE object so the GC cannot collect it while the
-        # native side still holds the pointer. Keys are stable per-slot.
-        self._c_callbacks: Dict[str, Any] = {}
-
-        self._finalizer = weakref.finalize(
-            self, self._cleanup, self._handle, self._lib)
-
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _cleanup(handle, lib):
-        if handle:
-            lib.lib.rats_destroy(handle)
+    # ------------------------------------------------------------------ lifecycle
 
     def __enter__(self):
         return self
@@ -175,657 +196,521 @@ class RatsNode:
 
     @property
     def _h(self):
-        """The native handle, refusing to hand out one that has been released.
-
-        The C ABI does not null-check its handle, so a call after destroy() would
-        be a segfault rather than an exception. Every method goes through here.
-        """
+        # The C ABI does not check its handle: a call after destroy() would crash.
         if self._handle is None:
-            raise RatsError("node has been destroyed", ErrorCode.INVALID_ARG)
+            raise RatsError("the node has been destroyed", ErrorCode.INVALID_ARG)
         return self._handle
 
     def start(self) -> None:
-        """Start the node. Raises on bind failure or if already started."""
-        check_error(self._lib.lib.rats_start(self._h), "Starting node")
+        """Open the sockets and start every enabled subsystem.
+
+        Raises :class:`RatsBindError` if the listen port is taken.
+        """
+        check_error(self._lib.rats_start(self._h), "start")
         self._running = True
 
     def stop(self) -> None:
-        """Stop the node and close all connections (idempotent)."""
-        if self._handle and self._running:
-            self._lib.lib.rats_stop(self._handle)
-            self._running = False
+        """Close every connection and stop. Idempotent."""
+        if self._handle is not None:
+            self._lib.rats_stop(self._handle)
+        self._running = False
 
-    def is_running(self) -> bool:
-        """Return whether :meth:`start` has been called and not stopped."""
+    @property
+    def running(self) -> bool:
         return self._running
 
     def destroy(self) -> None:
-        """Release the native node now rather than at GC time. Idempotent.
+        """Stop and free the native node now rather than at garbage collection.
 
-        The instance is inert afterwards; the C ABI does not null-check its
-        handle, so every method refuses to run without one.
+        Idempotent; every other method raises afterwards.
         """
-        self.stop()
-        self._finalizer()
-        self._handle = None
+        if self._handle is not None:
+            self._finalizer()
+            self._handle = None
+        self._running = False
 
-    # ------------------------------------------------------------------ #
-    # Identity / info
-    # ------------------------------------------------------------------ #
-    @property
-    def listen_port(self) -> int:
-        """The actual port the node is listening on."""
-        return self._lib.lib.rats_listen_port(self._h)
-
-    @property
-    def transports(self) -> int:
-        """Transports actually running, as a :class:`TransportMask` bitmask.
-
-        May be narrower than requested: a UDP socket that could not be bound
-        leaves the node TCP-only rather than failing to start.
-        """
-        return self._lib.lib.rats_transports(self._h)
-
-    def peer_transport(self, peer_id: str) -> Optional[Transport]:
-        """Which transport a connected peer's link runs on, or ``None``."""
-        result = self._lib.lib.rats_peer_transport(self._h, _b(peer_id))
-        return None if result < 0 else Transport(result)
-
-    def peer_transports(self, peer_id: str) -> Optional[int]:
-        """Transports a peer advertised, as a bitmask; ``None`` if not connected.
-
-        0 means the peer did not say (an older build) — "no information", not
-        "no transports".
-        """
-        result = self._lib.lib.rats_peer_transports(self._h, _b(peer_id))
-        return None if result < 0 else result
+    # ------------------------------------------------------------------ this node
 
     @property
     def local_id(self) -> str:
-        """Our self-certifying peer id (64-char lowercase hex)."""
-        return take_string(self._lib, self._lib.lib.rats_local_id(self._h))
+        """Our peer id, 64 lowercase hex characters."""
+        return _s(self._lib.rats_local_id(self._h))
 
     @property
     def protocol(self) -> str:
-        """Application protocol id bound into the handshake (e.g. ``"librats/1.0"``)."""
-        return take_string(self._lib, self._lib.lib.rats_protocol(self._h))
-
-    # ------------------------------------------------------------------ #
-    # Connections / peers
-    # ------------------------------------------------------------------ #
-    def connect(self, host: str, port: int) -> None:
-        """Dial a peer at ``host:port`` (best-effort; queued)."""
-        check_error(
-            self._lib.lib.rats_connect(self._h, _b(host), port),
-            f"Connecting to {host}:{port}")
+        """The protocol bound into the handshake."""
+        return _s(self._lib.rats_protocol(self._h))
 
     @property
-    def peer_count(self) -> int:
-        """Number of currently-connected peers."""
-        return self._lib.lib.rats_peer_count(self._h)
+    def listen_port(self) -> int:
+        """The bound listen port (the real one when 0 was asked for); 0 before start."""
+        return self._lib.rats_listen_port(self._h)
 
     @property
-    def max_peers(self) -> int:
-        """Established-peer cap (0 = unlimited). Settable before or after start."""
-        return self._lib.lib.rats_max_peers(self._h)
+    def transports(self) -> TransportMask:
+        """Transports actually running; NONE when not running.
 
-    @max_peers.setter
-    def max_peers(self, value: int) -> None:
-        self._lib.lib.rats_set_max_peers(self._h, value)
-
-    @property
-    def peer_ids(self) -> List[str]:
-        """Hex ids of currently-connected peers."""
-        count = c_size_t()
-        arr = self._lib.lib.rats_peer_ids(self._h, byref(count))
-        if not arr or count.value == 0:
-            return []
-        try:
-            result = []
-            for i in range(count.value):
-                ptr = arr[i]
-                if ptr:
-                    result.append(string_at(ptr).decode('utf-8', errors='replace'))
-            return result
-        finally:
-            self._lib.lib.rats_free_peer_ids(arr, count.value)
-
-    # ------------------------------------------------------------------ #
-    # Raw channel messaging
-    # ------------------------------------------------------------------ #
-    def send(self, peer_id: str, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
-        """Send raw ``data`` on a named ``channel`` to one peer.
-
-        Returning normally means the message was queued, never that it arrived.
-        If you send in bulk, check :meth:`peer_writable` afterwards — that is the
-        only way to learn you are outrunning the link before the peer is dropped
-        for it.
-
-        ``lifetime_ms`` 0 sends reliably. Anything else makes it a *live*
-        message, worth delivering only within that many milliseconds (30000 at
-        most, 1 MiB of payload at most): repaired while it can still arrive in
-        time, dropped whole once it cannot, and ordered with nothing — for video
-        and audio frames, which are no use late. The receiver's handler is the
-        same either way.
+        Can be narrower than asked for: a UDP socket that cannot be bound leaves
+        the node TCP-only rather than failing to start.
         """
-        check_error(
-            self._lib.lib.rats_send(self._h, _b(peer_id), _b(channel),
-                                    data, len(data), lifetime_ms),
-            f"Sending on channel {channel} to {peer_id}")
-
-    def peer_writable(self, peer_id: str) -> bool:
-        """Whether this peer's send queue still has room (False if not connected).
-
-        False means stop: the message you just sent was queued like any other and
-        nothing was dropped, but keep piling on and the peer is dropped with
-        ``RATS_CLOSE_SLOW_CONSUMER``. Wait for :meth:`on_peer_writable`, or poll
-        this. Not a size limit — one message of any size is always queued.
-        """
-        return bool(self._lib.lib.rats_peer_writable(self._h, _b(peer_id)))
-
-    def path_stats(self, peer_id: str) -> Optional[PathStats]:
-        """The latest path sample for a peer (see :class:`PathStats`), or ``None``.
-
-        ``None`` when the peer is not connected or nothing has been sampled yet:
-        sampling runs only with ``path_sample_ms`` set or an :meth:`on_peer_path`
-        callback registered. Over TCP the path's figures are the kernel's, Linux
-        only; elsewhere they stay 0 and only ``queued_bytes`` and the live
-        counters are filled.
-        """
-        out = RatsPathStats()
-        err = self._lib.lib.rats_path_stats(self._h, _b(peer_id), byref(out))
-        if err == ErrorCode.NO_SUCH_PEER:
-            return None
-        check_error(err, f"Reading path stats of {peer_id}")
-        return _path_stats(out)
-
-    def broadcast(self, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
-        """Broadcast raw ``data`` on a named ``channel`` to all peers.
-
-        ``lifetime_ms`` as for :meth:`send`.
-        """
-        check_error(
-            self._lib.lib.rats_broadcast(self._h, _b(channel), data, len(data), lifetime_ms),
-            f"Broadcasting on channel {channel}")
-
-    def on(self, channel: str, callback: MessageCallback) -> None:
-        """Register a handler for raw messages on ``channel``.
-
-        ``callback(peer_id: str, data: bytes)``. Register before :meth:`start`.
-        """
-        def trampoline(user, peer_id_ptr, data_ptr, length):
-            try:
-                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-                data = string_at(data_ptr, length) if (data_ptr and length) else b""
-                callback(peer_id, data)
-            except Exception as exc:  # never propagate into C
-                _report(exc, "message callback")
-        c_cb = MessageCallbackType(trampoline)
-        self._c_callbacks[f"on:{channel}"] = c_cb
-        check_error(
-            self._lib.lib.rats_on(self._h, _b(channel), c_cb, None),
-            f"Registering channel handler {channel}")
-
-    # ------------------------------------------------------------------ #
-    # Peer connect / disconnect events
-    # ------------------------------------------------------------------ #
-    def on_peer_connected(self, callback: PeerCallback) -> None:
-        """Register a ``callback(peer_id: str)`` for new peer connections."""
-        self._register_peer_cb("connected", "rats_on_peer_connected", callback)
-
-    def on_peer_disconnected(self, callback: PeerDisconnectCallback) -> None:
-        """Register a ``callback(peer_id: str, reason: str)`` for disconnections.
-
-        ``reason`` is a name like ``"RATS_CLOSE_PEER_CLOSED"``. Branch on it: a
-        peer that left is one to redial, while ``"RATS_CLOSE_SLOW_CONSUMER"``
-        means *you* were sending faster than the link drained, and redialing that
-        one only repeats the overload.
-        """
-        def trampoline(user, peer_id_ptr, reason):
-            try:
-                why = self._lib.lib.rats_close_reason_str(reason)
-                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "",
-                         why.decode('utf-8') if why else "")
-            except Exception as exc:
-                _report(exc, "peer disconnected callback")
-        c_cb = PeerDisconnectCallbackType(trampoline)
-        self._c_callbacks["peer:disconnected"] = c_cb
-        check_error(
-            self._lib.lib.rats_on_peer_disconnected(self._h, c_cb, None),
-            "Registering peer disconnected handler")
-
-    def on_peer_writable(self, callback: PeerCallback) -> None:
-        """Register a ``callback(peer_id: str)`` for "this peer has room again".
-
-        The other half of :meth:`peer_writable` returning False; an application
-        that never checks that never needs this.
-        """
-        self._register_peer_cb("writable", "rats_on_peer_writable", callback)
-
-    def on_peer_path(self, callback: PathCallback) -> None:
-        """Register a ``callback(peer_id: str, stats: PathStats)`` for path samples.
-
-        Every connected peer is sampled each ``path_sample_ms`` (100 ms if 0);
-        registering turns sampling on. Runs on a reactor thread once per peer per
-        interval, so keep it cheap. Register before :meth:`start`.
-        """
-        def trampoline(user, peer_id_ptr, stats_ptr):
-            try:
-                stats = _path_stats(RatsPathStats.from_address(stats_ptr))
-                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "", stats)
-            except Exception as exc:
-                _report(exc, "peer path callback")
-        c_cb = PathCallbackType(trampoline)
-        self._c_callbacks["peer:path"] = c_cb
-        check_error(
-            self._lib.lib.rats_on_peer_path(self._h, c_cb, None),
-            "Registering peer path handler")
-
-    def _register_peer_cb(self, slot: str, c_func_name: str, callback: PeerCallback):
-        def trampoline(user, peer_id_ptr):
-            try:
-                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "")
-            except Exception as exc:
-                _report(exc, f"peer {slot} callback")
-        c_cb = PeerCallbackType(trampoline)
-        self._c_callbacks[f"peer:{slot}"] = c_cb
-        check_error(
-            getattr(self._lib.lib, c_func_name)(self._h, c_cb, None),
-            f"Registering peer {slot} handler")
-
-    # ------------------------------------------------------------------ #
-    # Discovery / port mapping subsystems (enable before start)
-    # ------------------------------------------------------------------ #
-    def enable_dht(self, dht_port: int = 0, discovery_key: Optional[str] = None) -> None:
-        """Enable DHT discovery. ``dht_port`` 0 = ephemeral."""
-        check_error(
-            self._lib.lib.rats_enable_dht(self._h, dht_port, _b(discovery_key)),
-            "Enabling DHT")
-
-    def enable_mdns(self) -> None:
-        """Enable local-network mDNS discovery."""
-        check_error(self._lib.lib.rats_enable_mdns(self._h), "Enabling mDNS")
-
-    def enable_port_mapping(self, enable_upnp: bool = True,
-                            enable_natpmp: bool = True) -> None:
-        """Enable automatic NAT port forwarding (UPnP IGD + NAT-PMP)."""
-        check_error(
-            self._lib.lib.rats_enable_port_mapping(
-                self._h, 1 if enable_upnp else 0, 1 if enable_natpmp else 0),
-            "Enabling port mapping")
-
-    # ------------------------------------------------------------------ #
-    # NAT traversal (hole punching)
-    # ------------------------------------------------------------------ #
-    def enable_hole_punch(self, serve_as_relay: bool = True) -> None:
-        """Enable UDP hole punching. Call before start().
-
-        Reaches a peer that no port forwarding made reachable, by arranging with
-        a peer both sides already have that the two dial each other at the same
-        moment. Both punching nodes must have it enabled, and so must the node
-        that carries the rendezvous between them.
-
-        Args:
-            serve_as_relay: Also carry other peers' rendezvous — a few dozen
-                forwarded bytes per punch, only ever to peers this node already
-                holds. A mesh in which nobody relays cannot punch at all.
-        """
-        check_error(
-            self._lib.lib.rats_enable_hole_punch(self._h,
-                                                 1 if serve_as_relay else 0),
-            "Enabling hole punching")
-
-    def punch_peer(self, peer_id: str) -> None:
-        """Try to reach ``peer_id`` by punching. Non-blocking.
-
-        Success arrives as an ordinary peer-connected callback. Raises
-        :class:`RatsNoSuchPeerError` when there is nothing to do or nothing to
-        try with — the peer is already connected, a punch to it is already
-        running, or this node does not yet know an external endpoint of its own
-        to advertise (it needs at least one datagram peer first).
-        """
-        check_error(
-            self._lib.lib.rats_punch_peer(self._h, _b(peer_id)),
-            f"Punching to {peer_id}")
-
-    # ------------------------------------------------------------------ #
-    # NAT traversal (relaying)
-    # ------------------------------------------------------------------ #
-    def enable_relay(self, serve_as_relay: bool = False) -> None:
-        """Enable relaying. Call before start().
-
-        Reaches a peer that neither port forwarding nor hole punching could make
-        reachable, by routing the connection through a node both ends are already
-        connected to. The peer that comes out is ordinary in every way — the same
-        end-to-end encryption, the same channels — except that
-        :meth:`peer_transport` reports it as :attr:`Transport.RELAY`.
-
-        Args:
-            serve_as_relay: Also carry OTHER peers' connections. Unlike a
-                hole-punch rendezvous this spends real bandwidth on somebody
-                else's traffic, so it is off by default; a mesh in which nobody
-                serves cannot relay at all.
-        """
-        check_error(
-            self._lib.lib.rats_enable_relay(self._h, 1 if serve_as_relay else 0),
-            "Enabling relaying")
-
-    def connect_via_relay(self, peer_id: str) -> None:
-        """Try to reach ``peer_id`` through a relay. Non-blocking.
-
-        Success arrives as an ordinary peer-connected callback. Raises
-        :class:`RatsNoSuchPeerError` when there is nothing to do or nothing to
-        try with — already connected, an attempt already running, in cooldown,
-        or no peer that could carry the connection.
-
-        Usually unnecessary: with hole punching enabled too, a punch that cannot
-        work hands the target over by itself.
-        """
-        check_error(
-            self._lib.lib.rats_connect_via_relay(self._h, _b(peer_id)),
-            f"Relaying to {peer_id}")
+        return TransportMask(self._lib.rats_transports(self._h))
 
     @property
     def nat_mapping(self) -> NatMapping:
-        """What the mesh has shown about this node's own NAT.
+        """What the mesh has shown about this node's NAT, from where UDP peers
+        report seeing its socket."""
+        return NatMapping(self._lib.rats_nat_mapping(self._h))
 
-        :attr:`NatMapping.ENDPOINT_DEPENDENT` means punching cannot work from
-        here; :attr:`NatMapping.UNKNOWN` means not enough peers have reported an
-        observation yet.
+    @property
+    def observed_addresses(self) -> List[str]:
+        """Our own addresses as peers report seeing us (``"ip:port"``)."""
+        return _string_list(self._lib, self._lib.rats_observed_addresses, self._h)
+
+    # ---------------------------------------------------------------------- peers
+
+    def connect(self, host: str, port: int) -> None:
+        """Dial ``host:port`` (a literal or a hostname). Needs a started node.
+
+        Non-blocking: success arrives at :meth:`on_peer_connected`, failure at
+        :meth:`on_dial_failed`.
         """
-        return NatMapping(self._lib.lib.rats_nat_mapping(self._h))
+        check_error(self._lib.rats_connect(self._h, _b(host), port), f"connect to {host}:{port}")
 
+    def disconnect(self, peer_id: str) -> None:
+        """Close the connection to a peer. Raises :class:`RatsNoSuchPeerError`."""
+        check_error(self._lib.rats_disconnect(self._h, _b(peer_id)), f"disconnect {peer_id}")
 
-    # ------------------------------------------------------------------ #
-    # Pub/sub (GossipSub)
-    # ------------------------------------------------------------------ #
+    @property
+    def peer_count(self) -> int:
+        return self._lib.rats_peer_count(self._h)
+
+    @property
+    def peer_ids(self) -> List[str]:
+        """Ids of the connected peers."""
+        return _string_list(self._lib, self._lib.rats_peer_ids, self._h)
+
+    def peer_info(self, peer_id: str) -> Optional[PeerInfo]:
+        """What the node knows about a connected peer, or ``None`` if it is not."""
+        out = RatsPeerInfo()
+        err = self._lib.rats_peer_info(self._h, _b(peer_id), byref(out))
+        if err == ErrorCode.NO_SUCH_PEER:
+            return None
+        check_error(err, f"peer_info {peer_id}")
+        return PeerInfo(transport=Transport(out.transport),
+                        transports=TransportMask(out.transports),
+                        direction=Direction(out.direction),
+                        address=_s(out.address))
+
+    @property
+    def max_peers(self) -> int:
+        """Cap on established peers (0 = unlimited). Can be changed while running."""
+        return self._lib.rats_max_peers(self._h)
+
+    @max_peers.setter
+    def max_peers(self, value: int) -> None:
+        self._lib.rats_set_max_peers(self._h, value)
+
+    # ------------------------------------------------------------------ messaging
+
+    def send(self, peer_id: str, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
+        """Queue ``data`` for one peer on a named channel.
+
+        Returning means queued, not arrived. ``lifetime_ms`` 0 is reliable and in
+        order with everything else this node sends on its channels. Non-zero
+        makes it a live message, worth delivering only within that many ms
+        (:data:`LIVE_MAX_LIFETIME_MS` at most, :data:`LIVE_MAX_PAYLOAD` bytes at
+        most): repaired while it can still arrive in time, dropped whole once it
+        cannot, never delivered partly or twice, and ordered with nothing. The
+        receiver's :meth:`on` handler is the same either way.
+
+        If you send in bulk, ask :meth:`peer_writable` after each send.
+        Raises :class:`RatsNoSuchPeerError` if the peer is not connected.
+        """
+        data = bytes(data)
+        check_error(self._lib.rats_send(self._h, _b(peer_id), _b(channel), data, len(data),
+                                        lifetime_ms),
+                    f"send on '{channel}' to {peer_id}")
+
+    def broadcast(self, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
+        """:meth:`send` to every connected peer."""
+        data = bytes(data)
+        check_error(self._lib.rats_broadcast(self._h, _b(channel), data, len(data), lifetime_ms),
+                    f"broadcast on '{channel}'")
+
+    def peer_writable(self, peer_id: str) -> bool:
+        """Whether the peer's send queue has room (False also when not connected).
+
+        False means stop: what you sent was queued, but keep adding and the peer
+        is dropped with ``CloseReason.SLOW_CONSUMER``. Resume on
+        :meth:`on_peer_writable`, or poll this. Bytes just handed to :meth:`send`
+        are counted, so asking right after a send is exact.
+        """
+        return bool(self._lib.rats_peer_writable(self._h, _b(peer_id)))
+
+    def path_stats(self, peer_id: str) -> Optional[PathStats]:
+        """The latest path sample for a peer, or ``None`` if it is not connected or
+        nothing was sampled yet (sampling needs ``path_sample_ms`` or an
+        :meth:`on_peer_path` callback)."""
+        out = RatsPathStats()
+        err = self._lib.rats_path_stats(self._h, _b(peer_id), byref(out))
+        if err == ErrorCode.NO_SUCH_PEER:
+            return None
+        check_error(err, f"path_stats {peer_id}")
+        return _path_stats(out)
+
+    # ------------------------------------------------- callbacks (before start)
+
+    def _keep(self, thunk):
+        self._thunks.append(thunk)
+        return thunk
+
+    def on_peer_connected(self, callback: PeerCallback) -> None:
+        """``callback(peer_id)`` when a peer connects."""
+        thunk = self._keep(PeerCallbackType(_guard(
+            "peer connected", lambda _u, pid: callback(_s(pid)))))
+        check_error(self._lib.rats_on_peer_connected(self._h, thunk, None), "on_peer_connected")
+
+    def on_peer_disconnected(self, callback: DisconnectCallback) -> None:
+        """``callback(peer_id, reason: CloseReason)`` when a peer goes.
+
+        Branch on the reason: a peer that left is one to redial, while
+        ``SLOW_CONSUMER`` means this node sent faster than the link drained, and
+        redialing only repeats it.
+        """
+        thunk = self._keep(DisconnectCallbackType(_guard(
+            "peer disconnected", lambda _u, pid, why: callback(_s(pid), CloseReason(why)))))
+        check_error(self._lib.rats_on_peer_disconnected(self._h, thunk, None),
+                    "on_peer_disconnected")
+
+    def on_dial_failed(self, callback: DialFailedCallback) -> None:
+        """``callback(address)`` when a dial to a numeric address failed over every
+        transport tried — one made by :meth:`connect` or by a discovery
+        subsystem. A dial by hostname is not reported."""
+        thunk = self._keep(DialFailedCallbackType(_guard(
+            "dial failed", lambda _u, addr: callback(_s(addr)))))
+        check_error(self._lib.rats_on_dial_failed(self._h, thunk, None), "on_dial_failed")
+
+    def on_peer_writable(self, callback: PeerCallback) -> None:
+        """``callback(peer_id)`` when a peer whose queue had filled has room again."""
+        thunk = self._keep(PeerCallbackType(_guard(
+            "peer writable", lambda _u, pid: callback(_s(pid)))))
+        check_error(self._lib.rats_on_peer_writable(self._h, thunk, None), "on_peer_writable")
+
+    def on_peer_path(self, callback: PathCallback) -> None:
+        """``callback(peer_id, stats: PathStats)`` for every connected peer, every
+        ``path_sample_ms`` (100 ms if 0). Registering turns sampling on; it runs
+        once per peer per interval, so keep it cheap."""
+        thunk = self._keep(PathCallbackType(_guard(
+            "peer path", lambda _u, pid, st: callback(
+                _s(pid), _path_stats(RatsPathStats.from_address(st))))))
+        check_error(self._lib.rats_on_peer_path(self._h, thunk, None), "on_peer_path")
+
+    def on(self, channel: str, callback: MessageCallback) -> None:
+        """``callback(peer_id, data: bytes)`` for messages on a named channel."""
+        thunk = self._keep(MessageCallbackType(_guard(
+            f"'{channel}' message", lambda _u, pid, data, n: callback(_s(pid), _bytes(data, n)))))
+        check_error(self._lib.rats_on(self._h, _b(channel), thunk, None), f"on('{channel}')")
+
+    # --------------------------------------------------- discovery (before start)
+
+    def enable_dht(self, dht_port: int = 0, discovery_key: Optional[str] = None) -> None:
+        """Mainline DHT: announce and search a key, dialing the peers found.
+
+        ``discovery_key`` defaults to the node's protocol, so only nodes that
+        could handshake find each other.
+        """
+        check_error(self._lib.rats_enable_dht(self._h, dht_port, _b(discovery_key)), "enable_dht")
+
+    def enable_mdns(self) -> None:
+        """mDNS discovery on the local network."""
+        check_error(self._lib.rats_enable_mdns(self._h), "enable_mdns")
+
+    def enable_peer_exchange(self) -> None:
+        """Connected peers trade the addresses of peers they hold, so one contact
+        is enough to find the rest of the mesh."""
+        check_error(self._lib.rats_enable_peer_exchange(self._h), "enable_peer_exchange")
+
+    # ----------------------------------------------- NAT traversal (before start)
+
+    def enable_port_mapping(self, upnp: bool = True, natpmp: bool = True) -> None:
+        """Ask the router to forward the listen port (UPnP IGD and/or NAT-PMP)."""
+        check_error(self._lib.rats_enable_port_mapping(self._h, int(upnp), int(natpmp)),
+                    "enable_port_mapping")
+
+    def enable_hole_punch(self, serve_rendezvous: bool = True) -> None:
+        """UDP hole punching through a peer both sides share. Every node involved
+        needs it; ``serve_rendezvous`` also passes other peers' rendezvous along
+        (a few dozen bytes per punch) — a mesh where nobody does cannot punch."""
+        check_error(self._lib.rats_enable_hole_punch(self._h, int(serve_rendezvous)),
+                    "enable_hole_punch")
+
+    def punch_peer(self, peer_id: str) -> None:
+        """Start punching to a peer; success arrives at :meth:`on_peer_connected`.
+
+        Raises :class:`RatsDeclinedError` when already connected, already
+        punching, or no external endpoint of our own is known yet (that takes at
+        least one UDP peer).
+        """
+        check_error(self._lib.rats_punch_peer(self._h, _b(peer_id)), f"punch {peer_id}")
+
+    def enable_relay(self, serve: bool = False) -> None:
+        """Reach a peer nothing else can, through a node both ends are connected to.
+
+        Encryption stays end to end; :meth:`peer_info` reports ``Transport.RELAY``.
+        ``serve`` also carries OTHER peers' connections, which costs this node
+        their bandwidth. With hole punching enabled too, a punch that cannot work
+        falls back to a relay by itself, and a relayed peer is upgraded to a
+        direct connection when a later punch succeeds.
+        """
+        check_error(self._lib.rats_enable_relay(self._h, int(serve)), "enable_relay")
+
+    def connect_via_relay(self, peer_id: str) -> None:
+        """Start a relayed connection; success arrives at :meth:`on_peer_connected`.
+
+        Raises :class:`RatsDeclinedError` when already connected, already trying
+        or cooling down, or no connected peer could carry it.
+        """
+        check_error(self._lib.rats_connect_via_relay(self._h, _b(peer_id)),
+                    f"connect_via_relay {peer_id}")
+
+    # -------------------------------------------------------------------- pub/sub
+
     def enable_pubsub(self) -> None:
-        """Enable the pub/sub (GossipSub) subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_pubsub(self._h), "Enabling pubsub")
+        """GossipSub topics. Enable before start."""
+        check_error(self._lib.rats_enable_pubsub(self._h), "enable_pubsub")
 
     def subscribe(self, topic: str, callback: TopicCallback) -> None:
-        """Subscribe to ``topic``; ``callback(peer_id, topic, data: bytes)``."""
-        def trampoline(user, peer_id_ptr, topic_ptr, data_ptr, length):
-            try:
-                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-                top = topic_ptr.decode('utf-8') if topic_ptr else ""
-                data = string_at(data_ptr, length) if (data_ptr and length) else b""
-                callback(peer_id, top, data)
-            except Exception as exc:
-                _report(exc, "topic callback")
-        c_cb = TopicCallbackType(trampoline)
-        self._c_callbacks[f"sub:{topic}"] = c_cb
-        check_error(
-            self._lib.lib.rats_subscribe(self._h, _b(topic), c_cb, None),
-            f"Subscribing to {topic}")
+        """``callback(peer_id, topic, data: bytes)``. One handler per topic: a second
+        subscribe replaces the first."""
+        thunk = self._keep(TopicCallbackType(_guard(
+            f"topic '{topic}'",
+            lambda _u, pid, t, data, n: callback(_s(pid), _s(t), _bytes(data, n)))))
+        check_error(self._lib.rats_subscribe(self._h, _b(topic), thunk, None),
+                    f"subscribe '{topic}'")
 
     def unsubscribe(self, topic: str) -> None:
-        """Unsubscribe from ``topic``."""
-        check_error(
-            self._lib.lib.rats_unsubscribe(self._h, _b(topic)),
-            f"Unsubscribing from {topic}")
-        self._c_callbacks.pop(f"sub:{topic}", None)
+        check_error(self._lib.rats_unsubscribe(self._h, _b(topic)), f"unsubscribe '{topic}'")
 
     def publish(self, topic: str, data: bytes) -> None:
-        """Publish raw ``data`` to ``topic``."""
-        check_error(
-            self._lib.lib.rats_publish(self._h, _b(topic), data, len(data)),
-            f"Publishing to {topic}")
+        """Publish to every subscriber of the topic."""
+        data = bytes(data)
+        check_error(self._lib.rats_publish(self._h, _b(topic), data, len(data)),
+                    f"publish '{topic}'")
 
-    # ------------------------------------------------------------------ #
-    # Typed JSON messaging
-    # ------------------------------------------------------------------ #
+    # -------------------------------------------------------------- JSON messages
+
     def enable_json(self) -> None:
-        """Enable the typed JSON messaging subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_json(self._h), "Enabling JSON")
+        """Typed messages carrying a JSON document. Enable before start."""
+        check_error(self._lib.rats_enable_json(self._h), "enable_json")
+
+    def _json_thunk(self, type_name: str, callback: JsonCallback):
+        return self._keep(JsonCallbackType(_guard(
+            f"JSON '{type_name}'", lambda _u, pid, text: callback(_s(pid), json.loads(text)))))
 
     def on_json(self, type_name: str, callback: JsonCallback) -> None:
-        """Register a handler for JSON messages of ``type_name``.
-
-        ``callback(peer_id: str, payload)`` where ``payload`` is parsed JSON.
-        Additive: multiple handlers may coexist for a type.
-        """
-        self._register_json_cb("rats_on_json", type_name, callback, once=False)
+        """``callback(peer_id, value)`` for messages of ``type_name``, ``value``
+        parsed from JSON. Adds a handler; may be called while running."""
+        check_error(self._lib.rats_on_json(self._h, _b(type_name),
+                                           self._json_thunk(type_name, callback), None),
+                    f"on_json '{type_name}'")
 
     def once_json(self, type_name: str, callback: JsonCallback) -> None:
-        """Like :meth:`on_json` but the handler fires at most once."""
-        self._register_json_cb("rats_once_json", type_name, callback, once=True)
+        """Like :meth:`on_json`; the handler is removed after its first message."""
+        check_error(self._lib.rats_once_json(self._h, _b(type_name),
+                                             self._json_thunk(type_name, callback), None),
+                    f"once_json '{type_name}'")
 
     def off_json(self, type_name: str) -> None:
-        """Remove JSON handlers for ``type_name``."""
-        check_error(
-            self._lib.lib.rats_off_json(self._h, _b(type_name)),
-            f"Removing JSON handler {type_name}")
-        # Drop any retained trampolines for this type.
-        for key in [k for k in self._c_callbacks
-                    if k.startswith(f"json:{type_name}:")]:
-            self._c_callbacks.pop(key, None)
+        """Remove every handler of ``type_name``."""
+        check_error(self._lib.rats_off_json(self._h, _b(type_name)), f"off_json '{type_name}'")
 
-    def _register_json_cb(self, c_func_name, type_name, callback, once):
-        def trampoline(user, peer_id_ptr, json_ptr):
-            try:
-                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-                payload = None
-                if json_ptr:
-                    text = json_ptr.decode('utf-8')
-                    payload = json.loads(text) if text else None
-                callback(peer_id, payload)
-            except Exception as exc:
-                _report(exc, "json callback")
-        c_cb = JsonCallbackType(trampoline)
-        # Additive registration: use a unique key so multiple handlers survive.
-        key = f"json:{type_name}:{id(callback)}"
-        self._c_callbacks[key] = c_cb
-        check_error(
-            getattr(self._lib.lib, c_func_name)(self._h, _b(type_name), c_cb, None),
-            f"Registering JSON handler {type_name}")
+    def send_json(self, peer_id: str, type_name: str, value: Any) -> None:
+        """Send ``value``, encoded with :func:`json.dumps`, to one peer."""
+        check_error(self._lib.rats_send_json(self._h, _b(peer_id), _b(type_name),
+                                             _b(json.dumps(value))),
+                    f"send_json '{type_name}' to {peer_id}")
 
-    def send_json(self, peer_id: str, type_name: str, payload: Any) -> None:
-        """Send a typed JSON message to one peer. ``payload`` is JSON-encoded."""
-        text = payload if isinstance(payload, str) else json.dumps(payload)
-        check_error(
-            self._lib.lib.rats_send_json(self._h, _b(peer_id),
-                                         _b(type_name), _b(text)),
-            f"Sending JSON {type_name} to {peer_id}")
+    def broadcast_json(self, type_name: str, value: Any) -> None:
+        """:meth:`send_json` to every connected peer."""
+        check_error(self._lib.rats_broadcast_json(self._h, _b(type_name), _b(json.dumps(value))),
+                    f"broadcast_json '{type_name}'")
 
-    def broadcast_json(self, type_name: str, payload: Any) -> None:
-        """Broadcast a typed JSON message to all peers."""
-        text = payload if isinstance(payload, str) else json.dumps(payload)
-        check_error(
-            self._lib.lib.rats_broadcast_json(self._h, _b(type_name), _b(text)),
-            f"Broadcasting JSON {type_name}")
+    # -------------------------------------------------------------- file transfer
 
-    # ------------------------------------------------------------------ #
-    # File transfer
-    # ------------------------------------------------------------------ #
     def enable_file_transfer(self, temp_dir: Optional[str] = None) -> None:
-        """Enable the file-transfer subsystem. ``temp_dir`` holds partials."""
-        check_error(
-            self._lib.lib.rats_enable_file_transfer(self._h, _b(temp_dir)),
-            "Enabling file transfer")
+        """Push-style file transfer. ``temp_dir`` holds partial downloads (default
+        the working directory). Enable and set its callbacks before start."""
+        check_error(self._lib.rats_enable_file_transfer(self._h, _b(temp_dir)),
+                    "enable_file_transfer")
 
     def on_file_offer(self, callback: FileOfferCallback) -> None:
-        """Register an incoming-offer handler.
-
-        ``callback(peer_id, transfer_id, name, size, is_directory)``. Respond
-        with :meth:`accept_file` or :meth:`reject_file`.
-        """
-        def trampoline(user, peer_id_ptr, transfer_id, name_ptr, size, is_dir):
-            try:
-                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-                name = name_ptr.decode('utf-8') if name_ptr else ""
-                callback(peer_id, int(transfer_id), name, int(size), bool(is_dir))
-            except Exception as exc:
-                _report(exc, "file offer callback")
-        c_cb = FileOfferCallbackType(trampoline)
-        self._c_callbacks["file:offer"] = c_cb
-        check_error(
-            self._lib.lib.rats_on_file_offer(self._h, c_cb, None),
-            "Registering file offer handler")
+        """``callback(peer_id, transfer_id, name, size, is_directory)`` for each
+        incoming offer; answer with :meth:`accept_file` or :meth:`reject_file`.
+        One handler: a second call replaces the first."""
+        thunk = self._keep(FileOfferCallbackType(_guard(
+            "file offer", lambda _u, pid, tid, name, size, is_dir: callback(
+                _s(pid), int(tid), _s(name), int(size), bool(is_dir)))))
+        check_error(self._lib.rats_on_file_offer(self._h, thunk, None), "on_file_offer")
 
     def on_file_progress(self, callback: FileProgressCallback) -> None:
-        """Register a progress handler.
-
-        ``callback(transfer_id, peer_id, bytes_transferred, total_bytes, status)``
-        where ``status`` is a :class:`~librats_py.enums.FileTransferStatus`.
-        """
-        def trampoline(user, transfer_id, peer_id_ptr, done, total, status):
-            try:
-                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-                callback(int(transfer_id), peer_id, int(done), int(total), int(status))
-            except Exception as exc:
-                _report(exc, "file progress callback")
-        c_cb = FileProgressCallbackType(trampoline)
-        self._c_callbacks["file:progress"] = c_cb
-        check_error(
-            self._lib.lib.rats_on_file_progress(self._h, c_cb, None),
-            "Registering file progress handler")
+        """``callback(progress: FileProgress)`` as transfers move, both directions."""
+        def trampoline(_u, ptr):
+            c = RatsFileProgress.from_address(ptr)
+            callback(FileProgress(
+                transfer_id=c.transfer_id, peer_id=_s(c.peer_id),
+                direction=Direction(c.direction), status=FileTransferStatus(c.status),
+                bytes_transferred=c.bytes_transferred, total_bytes=c.total_bytes,
+                files_completed=c.files_completed, total_files=c.total_files,
+                rate_bytes_per_sec=c.rate_bytes_per_sec))
+        thunk = self._keep(FileProgressCallbackType(_guard("file progress", trampoline)))
+        check_error(self._lib.rats_on_file_progress(self._h, thunk, None), "on_file_progress")
 
     def on_file_complete(self, callback: FileCompleteCallback) -> None:
-        """Register a handler ``callback(transfer_id, peer_id, success, path)``.
-
-        The peer is part of a transfer's identity: incoming ids are allocated by
-        the sender, so two peers can have a transfer of the same id in flight.
-        """
-        def trampoline(user, transfer_id, peer_ptr, success, path_ptr):
-            try:
-                path = path_ptr.decode('utf-8') if path_ptr else ""
-                peer_id = peer_ptr.decode('utf-8') if peer_ptr else ""
-                callback(int(transfer_id), peer_id, bool(success), path)
-            except Exception as exc:
-                _report(exc, "file complete callback")
-        c_cb = FileCompleteCallbackType(trampoline)
-        self._c_callbacks["file:complete"] = c_cb
-        check_error(
-            self._lib.lib.rats_on_file_complete(self._h, c_cb, None),
-            "Registering file complete handler")
+        """``callback(peer_id, transfer_id, success, path)`` when a transfer ends."""
+        thunk = self._keep(FileCompleteCallbackType(_guard(
+            "file complete", lambda _u, pid, tid, ok, path: callback(
+                _s(pid), int(tid), bool(ok), _s(path)))))
+        check_error(self._lib.rats_on_file_complete(self._h, thunk, None), "on_file_complete")
 
     def send_file(self, peer_id: str, path: str) -> int:
-        """Offer a file to ``peer_id``. Returns the transfer id (0 on failure)."""
-        transfer_id = self._lib.lib.rats_send_file(self._h, _b(peer_id), _b(path))
-        if transfer_id == 0:
-            raise RatsError(f"Failed to send file {path} to {peer_id}",
-                            ErrorCode.NO_SUCH_PEER)
-        return int(transfer_id)
+        """Offer a file to a connected peer; returns the transfer id.
 
-    def send_directory(self, peer_id: str, dir_path: str) -> int:
-        """Offer a directory tree to ``peer_id``. Returns the transfer id."""
-        transfer_id = self._lib.lib.rats_send_directory(
-            self._h, _b(peer_id), _b(dir_path))
-        if transfer_id == 0:
-            raise RatsError(f"Failed to send directory {dir_path} to {peer_id}",
-                            ErrorCode.NO_SUCH_PEER)
-        return int(transfer_id)
+        Raises RatsNoSuchPeerError if the peer is not connected and
+        RatsNotFoundError if the file cannot be read.
+        """
+        tid = c_uint64(0)
+        check_error(self._lib.rats_send_file(self._h, _b(peer_id), _b(path), byref(tid)),
+                    "send_file")
+        return tid.value
+
+    def send_directory(self, peer_id: str, path: str) -> int:
+        """Offer a directory tree; returns and raises as send_file()."""
+        tid = c_uint64(0)
+        check_error(self._lib.rats_send_directory(self._h, _b(peer_id), _b(path), byref(tid)),
+                    "send_directory")
+        return tid.value
 
     def accept_file(self, peer_id: str, transfer_id: int, dest_path: str) -> None:
-        """Accept an offered transfer, writing to ``dest_path``."""
-        check_error(
-            self._lib.lib.rats_accept_file(self._h, _b(peer_id),
-                                           transfer_id, _b(dest_path)),
-            f"Accepting transfer {transfer_id}")
+        """Accept an offer: ``dest_path`` is the file to write for a file, the
+        directory to fill for a directory."""
+        check_error(self._lib.rats_accept_file(self._h, _b(peer_id), transfer_id, _b(dest_path)),
+                    f"accept_file {transfer_id}")
 
     def reject_file(self, peer_id: str, transfer_id: int) -> None:
-        """Reject an offered transfer."""
-        check_error(
-            self._lib.lib.rats_reject_file(self._h, _b(peer_id), transfer_id),
-            f"Rejecting transfer {transfer_id}")
+        check_error(self._lib.rats_reject_file(self._h, _b(peer_id), transfer_id),
+                    f"reject_file {transfer_id}")
 
     def cancel_file(self, peer_id: str, transfer_id: int) -> None:
-        """Cancel a live transfer (either side)."""
-        check_error(
-            self._lib.lib.rats_cancel_file(self._h, _b(peer_id), transfer_id),
-            f"Cancelling transfer {transfer_id}")
+        """Cancel a transfer from either side. Raises :class:`RatsNotFoundError`."""
+        check_error(self._lib.rats_cancel_file(self._h, _b(peer_id), transfer_id),
+                    f"cancel_file {transfer_id}")
 
     def pause_file(self, peer_id: str, transfer_id: int) -> None:
-        """Pause a live transfer."""
-        check_error(
-            self._lib.lib.rats_pause_file(self._h, _b(peer_id), transfer_id),
-            f"Pausing transfer {transfer_id}")
+        check_error(self._lib.rats_pause_file(self._h, _b(peer_id), transfer_id),
+                    f"pause_file {transfer_id}")
 
     def resume_file(self, peer_id: str, transfer_id: int) -> None:
-        """Resume a paused transfer."""
-        check_error(
-            self._lib.lib.rats_resume_file(self._h, _b(peer_id), transfer_id),
-            f"Resuming transfer {transfer_id}")
+        check_error(self._lib.rats_resume_file(self._h, _b(peer_id), transfer_id),
+                    f"resume_file {transfer_id}")
 
-    # ------------------------------------------------------------------ #
-    # Liveness (ping/RTT)
-    # ------------------------------------------------------------------ #
+    # ----------------------------------------------------------- ping, reconnect
+
     def enable_ping(self) -> None:
-        """Enable periodic ping/pong RTT probing. Call before start()."""
-        check_error(self._lib.lib.rats_enable_ping(self._h), "Enabling ping")
+        """Round-trip probing of every peer. Enable before start."""
+        check_error(self._lib.rats_enable_ping(self._h), "enable_ping")
 
-    def peer_rtt_ms(self, peer_id: str) -> int:
-        """Last measured RTT to a peer in ms, or -1 if unknown."""
-        return int(self._lib.lib.rats_peer_rtt_ms(self._h, _b(peer_id)))
+    def peer_rtt_ms(self, peer_id: str) -> Optional[int]:
+        """Last measured round trip to a peer in ms; ``None`` if unknown."""
+        rtt = self._lib.rats_peer_rtt_ms(self._h, _b(peer_id))
+        return None if rtt < 0 else rtt
 
-    # ------------------------------------------------------------------ #
-    # Automatic reconnection
-    # ------------------------------------------------------------------ #
     def enable_reconnect(self) -> None:
-        """Enable the reconnection subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_reconnect(self._h),
-                    "Enabling reconnect")
+        """Redial dropped peers with backoff; with ``data_dir`` the list survives
+        restarts. Enable before start."""
+        check_error(self._lib.rats_enable_reconnect(self._h), "enable_reconnect")
 
     def add_reconnect(self, host: str, port: int) -> None:
-        """Keep ``host:port`` connected (re-dialed on drop)."""
-        check_error(
-            self._lib.lib.rats_add_reconnect(self._h, _b(host), port),
-            f"Adding reconnect target {host}:{port}")
+        """Keep an address connected. May be called while running."""
+        check_error(self._lib.rats_add_reconnect(self._h, _b(host), port),
+                    f"add_reconnect {host}:{port}")
 
     def remove_reconnect(self, host: str, port: int) -> None:
-        """Stop reconnecting to ``host:port``."""
-        check_error(
-            self._lib.lib.rats_remove_reconnect(self._h, _b(host), port),
-            f"Removing reconnect target {host}:{port}")
+        """Stop keeping an address connected and forget it."""
+        check_error(self._lib.rats_remove_reconnect(self._h, _b(host), port),
+                    f"remove_reconnect {host}:{port}")
+
+    # ----------------------------------------------------------------- BitTorrent
+
+    def enable_bittorrent(
+        self,
+        listen_port: int = 0,
+        download_path: Optional[str] = None,
+        *,
+        outgoing_encryption: BtEncryption = BtEncryption.ENABLED,
+        incoming_encryption: BtEncryption = BtEncryption.ENABLED,
+        outgoing_utp: bool = True,
+        incoming_utp: bool = True,
+    ) -> None:
+        """A BitTorrent client beside the node. Only in libraries built with
+        ``RATS_SEARCH_FEATURES`` (else :class:`RatsNotEnabledError`). It runs its
+        own sockets; enable the DHT first and it shares the node's."""
+        cfg = RatsBtConfig()
+        cfg.listen_port = listen_port
+        cfg.download_path = _b(download_path)
+        cfg.outgoing_encryption = int(outgoing_encryption)
+        cfg.incoming_encryption = int(incoming_encryption)
+        cfg.disable_outgoing_utp = int(not outgoing_utp)
+        cfg.disable_incoming_utp = int(not incoming_utp)
+        check_error(self._lib.rats_enable_bittorrent(self._h, byref(cfg)), "enable_bittorrent")
+
+    def bt_add_magnet(self, magnet_uri: str, save_path: Optional[str] = None) -> None:
+        """Start a download from a magnet link. Needs a started node."""
+        check_error(self._lib.rats_bt_add_magnet(self._h, _b(magnet_uri), _b(save_path)),
+                    "bt_add_magnet")
+
+    def bt_add_torrent_file(self, torrent_path: str, save_path: Optional[str] = None) -> None:
+        """Start a download from a .torrent file. Needs a started node."""
+        check_error(self._lib.rats_bt_add_torrent_file(self._h, _b(torrent_path), _b(save_path)),
+                    f"bt_add_torrent_file {torrent_path!r}")
+
+    def bt_remove_torrent(self, info_hash_hex: str) -> None:
+        """Remove a torrent by its 40-char hex info-hash; downloaded files stay."""
+        check_error(self._lib.rats_bt_remove_torrent(self._h, _b(info_hash_hex)),
+                    f"bt_remove_torrent {info_hash_hex}")
 
 
-# ---------------------------------------------------------------------- #
-# Process-global helpers. These need no node, so they are plain functions
-# rather than static methods hanging off RatsNode.
-# ---------------------------------------------------------------------- #
+# --------------------------------------------------------------- process-wide
+
 def set_log_level(level: LogLevel) -> None:
-    """Set the process-global log verbosity."""
     get_librats().lib.rats_set_log_level(int(level))
 
 
 def set_log_file(path: Optional[str]) -> None:
-    """Mirror logs to ``path`` (``None``/"" disables file logging)."""
+    """Also write logs to ``path``; ``None`` or ``""`` stops file logging."""
     get_librats().lib.rats_set_log_file(_b(path))
 
 
 def version() -> str:
-    """Library version string, e.g. ``"1.2.3"``."""
-    ptr = get_librats().lib.rats_version_string()
-    return ptr.decode('utf-8') if ptr else ""
+    """Library version, e.g. ``"1.2.3"``."""
+    return _s(get_librats().lib.rats_version_string())
 
 
 def version_info() -> VersionInfo:
-    """Library version components."""
-    lib = get_librats()
-    major, minor, patch, build = c_int(), c_int(), c_int(), c_int()
-    lib.lib.rats_version(byref(major), byref(minor), byref(patch), byref(build))
-    return VersionInfo(major.value, minor.value, patch.value, build.value)
+    parts = [c_int() for _ in range(4)]
+    get_librats().lib.rats_version(*(byref(p) for p in parts))
+    return VersionInfo(*(p.value for p in parts))
 
 
 def git_describe() -> str:
-    """Git describe of the build, e.g. ``"v1.2.3-4-gabcdef"``."""
-    ptr = get_librats().lib.rats_git_describe()
-    return ptr.decode('utf-8') if ptr else ""
+    """``git describe`` of the build, e.g. ``"v1.2.3-4-gabcdef"``."""
+    return _s(get_librats().lib.rats_git_describe())
 
 
 def abi() -> int:
-    """Packed ABI id ``(major << 16) | (minor << 8) | patch``."""
+    """``(major << 16) | (minor << 8) | patch``."""
     return get_librats().lib.rats_abi()
 
 
-def error_str(error_code: int) -> str:
-    """Static human-readable name for a ``rats_error_t`` code."""
-    ptr = get_librats().lib.rats_error_str(int(error_code))
-    return ptr.decode('utf-8') if ptr else ""
-
-
-def _report(exc: Exception, where: str) -> None:
-    """Log an exception raised inside a reactor-thread callback (never reraise)."""
-    import sys
-    print(f"[librats_py] error in {where}: {exc!r}", file=sys.stderr)
+def error_str(code: int) -> str:
+    """Name of a ``rats_error_t`` code, e.g. ``"RATS_ERR_DECLINED"``."""
+    return _s(get_librats().lib.rats_error_str(int(code)))

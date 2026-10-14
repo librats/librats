@@ -6,7 +6,7 @@
  * (peerId, transferId) pair names the transfer on both sides. Progress and
  * completion arrive on onFileProgress()/onFileComplete().
  *
- * The subsystem and all three callbacks are registered BEFORE start().
+ * The subsystem and all three callbacks are registered before start().
  *
  *   node file_transfer.js [listenPort] [connectHost] [connectPort]
  */
@@ -22,7 +22,7 @@ const downloadDir = path.join(__dirname, 'transfers', 'downloads');
 const tempDir = path.join(__dirname, 'transfers', 'temp');
 fs.mkdirSync(downloadDir, { recursive: true });
 
-const node = new RatsNode(portArg ? Number(portArg) : 8080);
+const node = new RatsNode({ listenPort: portArg ? Number(portArg) : 8080 });
 
 node.onPeerConnected((peerId) => console.log(`+ peer ${peerId}`));
 node.onPeerDisconnected((peerId, reason) => console.log(`- peer ${peerId} (${reason})`));
@@ -40,12 +40,14 @@ node.onFileOffer((peerId, transferId, name, size, isDirectory) => {
   node.acceptFile(peerId, transferId, dest);
 });
 
-node.onFileProgress((transferId, peerId, done, total, status) => {
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  console.log(`[${transferId}] ${pct}% (${done}/${total}) status=${status}`);
+node.onFileProgress((p) => {
+  const pct = p.totalBytes > 0 ? Math.round((p.bytesTransferred / p.totalBytes) * 100) : 0;
+  const kib = Math.round(p.rateBytesPerSec / 1024);
+  console.log(`[${p.transferId}] ${p.direction} ${p.status} ${pct}% ` +
+              `(${p.bytesTransferred}/${p.totalBytes}, ${kib} KiB/s)`);
 });
 
-node.onFileComplete((transferId, peerId, success, filePath) => {
+node.onFileComplete((peerId, transferId, success, filePath) => {
   console.log(success ? `[${transferId}] done: ${filePath}` : `[${transferId}] failed`);
 });
 
@@ -96,8 +98,10 @@ rl.on('line', (line) => {
       case 'pause':
       case 'resume':
       case 'cancel':
-        need(rest, 2, `${command} <peerId> <transferId>`) &&
-          node[`${command}File`](rest[0], Number(rest[1]));
+        if (need(rest, 2, `${command} <peerId> <transferId>`) &&
+            !node[`${command}File`](rest[0], Number(rest[1]))) {
+          console.log(`no transfer ${rest[1]} with that peer`);
+        }
         break;
       case 'peers':
         console.log(node.peerIds.join('\n') || '(none)');
@@ -115,10 +119,7 @@ rl.on('line', (line) => {
   rl.prompt();
 });
 
-rl.on('close', () => {
-  node.stop();
-  process.exit(0);
-});
+rl.on('close', () => node.destroy());
 
 function need(args, count, usage) {
   if (args.length >= count) return true;
@@ -131,7 +132,10 @@ function offer(method, peerId, target) {
     console.log(`not found: ${target}`);
     return;
   }
-  // 0 means the offer was refused outright — subsystem off, or unknown peer.
-  const transferId = node[method](peerId, target);
-  console.log(transferId ? `offering "${target}" as [${transferId}]` : 'offer refused');
+  try {
+    const transferId = node[method](peerId, target);
+    console.log(`offering "${target}" as [${transferId}]`);
+  } catch (err) {
+    console.log(`offer refused: ${err.code}`);   // NO_SUCH_PEER, NOT_FOUND, …
+  }
 }

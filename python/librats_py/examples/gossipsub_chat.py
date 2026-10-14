@@ -23,7 +23,7 @@ class GossipSubChat:
         # Enable + subscribe BEFORE start().
         self.node.on_peer_connected(lambda pid: self._print(f"+ {pid[:16]}… joined"))
         self.node.on_peer_disconnected(
-            lambda pid, why: self._print(f"- {pid[:16]}… left ({why})"))
+            lambda pid, why: self._print(f"- {pid[:16]}… left ({why.name})"))
         self.node.enable_pubsub()
         self.node.subscribe(topic, self.on_topic_message)
 
@@ -32,12 +32,19 @@ class GossipSubChat:
         print(f"[{self.topic}]> ", end="", flush=True)
 
     def on_topic_message(self, peer_id, topic, data):
+        if peer_id == self.node.local_id:
+            return   # publish() also delivers to our own subscription
         try:
             msg = json.loads(data.decode('utf-8'))
-            if msg.get('type') == 'chat':
-                self._print(f"{msg.get('username', '?')}: {msg.get('content', '')}")
+            who = msg.get('username', '?')
+            kind = msg.get('type')
+            if kind == 'chat':
+                self._print(f"{who}: {msg.get('content', '')}")
                 return
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            if kind in ('join', 'leave'):
+                self._print(f"* {who} {'joined' if kind == 'join' else 'left'}")
+                return
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             pass
         self._print(f"{peer_id[:16]}…: {data!r}")
 

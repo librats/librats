@@ -1,27 +1,149 @@
 import type { HybridObject } from 'react-native-nitro-modules'
 
+// ─── enumerations ───────────────────────────────────────────────────────────
+
+/** A wire a dial can use. Both carry the same protocol under the same encrypted handshake. */
+export type Transport = 'udp' | 'tcp'
+
+/** What a connected peer's link runs on: a wire, or carried through a relay. */
+export type PeerTransport = 'udp' | 'tcp' | 'relay'
+
+export type Security = 'noise' | 'plaintext'
+
+/** Congestion controller of every UDP connection; TCP is the kernel's. */
+export type CongestionControl = 'bbr' | 'reno'
+
+/** Who dialed: 'outbound' means this node did. */
+export type PeerDirection = 'outbound' | 'inbound'
+
 /**
- * Node configuration. Mirrors the subset of `librats::NodeConfig` this slice
- * exposes; every field is optional and falls back to the library default.
+ * What the mesh has shown about this node's NAT, from where UDP peers report
+ * seeing it. 'endpoint_dependent' (symmetric NAT) means hole punching cannot
+ * work from here.
+ */
+export type NatMapping =
+  | 'unknown'
+  | 'open'
+  | 'endpoint_independent'
+  | 'endpoint_dependent'
+
+/**
+ * Why a peer connection ended. 'slow_consumer' is the one the app causes: it
+ * kept sending while the peer's queue was past its limit (see `peerWritable()`),
+ * and redialing without slowing down repeats it. 'local' is this node's own
+ * `disconnect()`; 'duplicate_connection' and 'dial_superseded' are a second
+ * connection to the same peer being folded into the first.
+ */
+export type CloseReason =
+  | 'local'
+  | 'peer_closed'
+  | 'peer_reset'
+  | 'connect_failed'
+  | 'handshake_failed'
+  | 'protocol_error'
+  | 'slow_consumer'
+  | 'shutdown'
+  | 'duplicate_connection'
+  | 'peer_limit'
+  | 'idle_timeout'
+  | 'dial_superseded'
+
+// ─── configuration ──────────────────────────────────────────────────────────
+
+/**
+ * Node configuration, mirroring `librats::NodeConfig`. Every field is optional
+ * and falls back to the library default.
  */
 export interface RatsConfig {
-  /** Port to listen on. 0 (the default) picks an ephemeral port. */
+  /** Port both transports listen on. 0 (the default) picks an ephemeral one. */
   listenPort?: number
+  /**
+   * Interface to listen on. Default "::", every interface over IPv6 and IPv4.
+   * "0.0.0.0" is IPv4 only; a literal address binds that interface alone.
+   */
+  bindAddress?: string
+  /** true makes a node that only dials out and accepts no inbound connections. */
+  dialOnly?: boolean
   /**
    * Application protocol id, bound into the Noise handshake. Two nodes whose
    * protocol differs cannot connect, so every platform of the same app must use
-   * the identical string. Defaults to librats' own "librats/1.0".
+   * the identical string. Defaults to "librats/1.0".
    */
   protocol?: string
   /**
    * Directory for persistent state. When set, the node's keypair — and so its
-   * peer id — survives restarts. Pass an app-writable path: on iOS that must be
-   * inside the sandbox (Documents or Application Support), and on Android the
-   * app's filesDir. Empty (the default) means a fresh identity each run.
+   * peer id — survives restarts, and the DHT and reconnection subsystems keep
+   * their state there too. Pass an app-writable path: on iOS that must be inside
+   * the sandbox (Documents or Application Support), on Android the app's
+   * filesDir. Unset means a new identity every run.
    */
   dataDir?: string
-  /** false makes a dial-only node that accepts no inbound connections. */
-  enableListen?: boolean
+  /** Default 'noise'. 'plaintext' sends everything in the clear. */
+  security?: Security
+  /** Cap on established peers, enforced on inbound. 0 (the default) is unlimited. */
+  maxPeers?: number
+
+  /** Transports to run. Default both; an empty list is refused. */
+  transports?: Transport[]
+  /**
+   * Which transport a dial tries first. Default 'udp' — one socket and one NAT
+   * mapping for every peer, which is also what makes hole punching possible.
+   */
+  preferredTransport?: Transport
+  /**
+   * How long the preferred transport dials alone before the other is raced
+   * alongside it. Default 1200; 0 never races.
+   */
+  transportFallbackMs?: number
+
+  /**
+   * Bytes a peer's send queue may hold before a sender that keeps going has the
+   * peer dropped with 'slow_consumer'. `peerWritable()` turns false at a quarter
+   * of it. Not a message size limit. Default 8 MiB.
+   */
+  sendQueueLimit?: number
+  /**
+   * How often each peer's path is sampled for `pathStats()`. Default 0: only
+   * while an `onPeerPath` listener is registered, and then every 100 ms.
+   */
+  pathSampleMs?: number
+
+  /** Default 'bbr', which holds its rate through loss that is not congestion. */
+  congestionControl?: CongestionControl
+  /**
+   * Ceiling one UDP connection's flow-control window grows to (it starts at
+   * 1 MiB); throughput is bounded by window / round trip. Default 16 MiB.
+   */
+  udpReceiveWindow?: number
+  /** Bytes all UDP connections together may hold out of order. Default 64 MiB. */
+  udpReceiveBudget?: number
+  /** Kernel segmentation offload for UDP where the OS has it. Default true. */
+  udpOffload?: boolean
+
+  /** I/O threads. Default 1, which is plenty for a phone. */
+  reactorThreads?: number
+  /**
+   * Watch the device for interface and address changes (Wi-Fi to cellular and
+   * back) so subsystems can react. Default true; costs one mostly idle thread.
+   */
+  networkMonitor?: boolean
+}
+
+/** DHT discovery options. */
+export interface DhtConfig {
+  /** UDP port of the DHT. 0 (the default) picks an ephemeral one. */
+  port?: number
+  /**
+   * Namespace announced and searched on the mainline DHT. Defaults to the
+   * node's `protocol`, so only nodes that could handshake find each other.
+   */
+  discoveryKey?: string
+}
+
+/** Port mapping backends; both default to true and run in parallel. */
+export interface PortMappingConfig {
+  upnp?: boolean
+  natpmp?: boolean
 }
 
 /**
@@ -44,6 +166,76 @@ export interface FileTransferConfig {
   transferTimeoutSecs?: number
   /** Whole-file SHA-256 check end to end. Default true; turning it off is unwise. */
   verifyIntegrity?: boolean
+}
+
+/**
+ * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
+ * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
+ */
+export interface PubSubConfig {
+  /** D — desired mesh degree per topic. Default 6. */
+  meshTarget?: number
+  /** D_low — graft more peers below this. Default 4. */
+  meshLow?: number
+  /** D_high — prune peers above this. Default 12. */
+  meshHigh?: number
+  /** Peers used to publish to a topic this node is not subscribed to. Default 6. */
+  fanoutSize?: number
+  /** D_lazy — peers sent IHAVE per heartbeat per topic. Default 6. */
+  gossipFactor?: number
+  /** Mesh maintenance and gossip cadence. Default 1000. */
+  heartbeatIntervalMs?: number
+  /** How many message ids are remembered for deduplication. Default 8192. */
+  seenLimit?: number
+}
+
+// ─── values handed to and from the node ─────────────────────────────────────
+
+/** A connected peer, as this node sees it. */
+export interface PeerInfo {
+  transport: PeerTransport
+  /** Transports the peer says it accepts; empty if it did not say. */
+  transports: Transport[]
+  direction: PeerDirection
+  /** Where the peer can be dialed, "ip:port" or "[ip]:port"; empty until known. */
+  addresses: string[]
+}
+
+/**
+ * What the transport knows about the path to one peer, for a sender that sizes
+ * its output to the path (a live encoder). Rates are bits per second. A new
+ * message waits behind `queuedBytes`; `queuedBytes * 8 / bandwidthBps` is that
+ * wait in seconds. Over TCP the path figures are the kernel's and exist on
+ * Linux (so Android) only; on iOS TCP, and over a relay, only `queuedBytes` and
+ * the live counters are filled.
+ */
+export interface PathStats {
+  /** The congestion controller's estimate; 0 until there is one. */
+  bandwidthBps: number
+  /** The sender was not filling the path, so `bandwidthBps` is a floor. */
+  appLimited: boolean
+  /** Current release rate; 0 when unpaced. */
+  pacingBps: number
+  /** Smoothed round trip, microseconds. */
+  srttUs: number
+  /** Lowest round trip seen — the path without queues, microseconds. */
+  minRttUs: number
+  /** Accepted for the peer, not yet sent. */
+  queuedBytes: number
+  /** Sent, not yet acknowledged. */
+  bytesInFlight: number
+  /** Share of bytes lost over the last sample interval, 0..1. */
+  loss: number
+  /** Acknowledged since the connection opened. */
+  bytesDelivered: number
+  /** Declared lost since the connection opened. */
+  bytesLost: number
+  /** Live messages (`lifetimeMs` > 0) sent since the connection opened. */
+  liveSent: number
+  /** Of those, dropped because their lifetime ran out. */
+  liveExpired: number
+  /** Forward-error-correction bytes sent with live messages on a lossy path. */
+  liveRepairBytes: number
 }
 
 /** One file inside a transfer. A single-file transfer has exactly one. */
@@ -113,165 +305,258 @@ export interface TransferStats {
   failed: number
 }
 
-/**
- * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
- * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
- */
-export interface PubSubConfig {
-  /** D — desired mesh degree per topic. Default 6. */
-  meshTarget?: number
-  /** D_low — graft more peers below this. Default 4. */
-  meshLow?: number
-  /** D_high — prune peers above this. Default 12. */
-  meshHigh?: number
-  /** Peers used to publish to a topic this node is not subscribed to. Default 6. */
-  fanoutSize?: number
-  /** D_lazy — peers sent IHAVE per heartbeat per topic. Default 6. */
-  gossipFactor?: number
-  /** Mesh maintenance and gossip cadence. Default 1000. */
-  heartbeatIntervalMs?: number
-  /** How many message ids are remembered for deduplication. Default 8192. */
-  seenLimit?: number
-}
+// ─── the node ───────────────────────────────────────────────────────────────
 
 /**
  * A librats peer-to-peer node.
  *
- * Create one with `NitroModules.createHybridObject<RatsNode>('RatsNode')`, or use
- * the `createNode()` helper from the package root.
+ * Create one with the `createNode()` helper from the package root (or
+ * `NitroModules.createHybridObject<RatsNode>('RatsNode')` plus `configure()`).
  *
- * Lifecycle: `configure()` (optional) → register listeners → `start()`. Listeners
- * must be registered before `start()`, matching the underlying library: the node
- * dispatches on reactor threads and does not synchronise handler registration
- * against a running node.
+ * Order: `configure()` → `enable*()` the subsystems you want → register
+ * listeners → `start()`. Enabling a subsystem and registering an event listener
+ * after `start()` throws: the library reads those tables from its reactor
+ * threads without a lock. The exceptions, safe on a running node, are
+ * `subscribe()` / `unsubscribe()` and the JSON `onJson()` / `onceJson()` /
+ * `offJson()`.
  *
- * Every listener is an async Nitro callback, so it is safe for the library to
- * invoke from its own reactor threads — Nitro schedules the JS call onto the JS
- * thread. Listeners must not assume they run synchronously with the native event.
+ * Every listener is an async Nitro callback: the library calls it on a reactor
+ * thread and Nitro runs it on the JS thread, later. Do not assume it runs
+ * synchronously with the native event.
  */
 export interface RatsNode
   extends HybridObject<{ ios: 'c++'; android: 'c++' }> {
-  // --- lifecycle ---
+  // ─── lifecycle ───
 
   /**
-   * Apply configuration. Must be called before `start()`; throws afterwards.
-   * Optional — a node with default configuration is created on first use.
+   * Apply configuration. Must come first — before `start()`, any `enable*()`
+   * and any listener — and throws otherwise, because the library fixes its
+   * configuration when the node is constructed. Optional: without it the node
+   * is built with the defaults on first use.
    */
   configure(config: RatsConfig): void
 
-  /** Bind and begin accepting/dialing. False if the listen port could not be bound. */
+  /** Open the sockets and start every enabled subsystem. False if the listen port could not be bound. */
   start(): boolean
 
-  /** Stop the node. Safe to call when not running; the node can be started again. */
+  /** Stop the node and close every connection. Safe to call when not running. */
   stop(): void
 
   readonly isRunning: boolean
+
+  // ─── this node ───
 
   /** The bound port, meaningful once started (0 before). */
   readonly listenPort: number
 
   /**
-   * This node's self-certifying peer id as 64-char hex — it *is* the public key,
-   * which is why no PKI is involved in authenticating peers.
+   * This node's self-certifying peer id as 64-char hex — it *is* the public
+   * key, which is why no PKI is involved in authenticating peers.
    */
   readonly localId: string
 
-  // --- connections ---
+  /** The protocol bound into the handshake. */
+  readonly protocol: string
 
   /**
-   * Dial a peer. Non-blocking: it returns immediately and the outcome arrives
-   * through `onPeerConnected`.
+   * Transports actually running. Can be narrower than configured: a UDP socket
+   * that cannot be bound leaves the node TCP-only rather than failing. Empty
+   * when not running.
+   */
+  readonly transports: Transport[]
+
+  /** See `NatMapping`. Starts 'unknown' and settles as UDP peers report in. */
+  readonly natMapping: NatMapping
+
+  /** This node's own addresses as peers report seeing it ("ip:port"). */
+  observedAddresses(): string[]
+
+  // ─── peers ───
+
+  /**
+   * Dial host:port (a literal or a hostname). Non-blocking: success arrives as
+   * `onPeerConnected`, failure as `onDialFailed`.
    */
   connect(host: string, port: number): void
 
+  /** Close the connection to a peer. False if it is not connected. */
+  disconnect(peerId: string): boolean
+
   readonly peerCount: number
 
-  /** Peer ids of currently connected peers, as hex. */
+  /** Ids of the connected peers, as hex. */
   peerIds(): string[]
 
-  // --- messaging ---
+  /** What the node knows about a connected peer; undefined if not connected. */
+  peerInfo(peerId: string): PeerInfo | undefined
+
+  /** Cap on established peers (0 = unlimited). Can be changed while running. */
+  maxPeers: number
+
+  // ─── messaging ───
 
   /**
    * Send raw bytes to one peer on a named channel. The buffer is copied before
-   * the call returns, so the caller may reuse or discard it immediately.
+   * the call returns.
    *
-   * False means either that the peer is not connected, or that its queue is out
-   * of room — in the second case the message was still queued, and false is a
-   * request to pause (see `peerWritable()` below).
+   * Without `lifetimeMs` (or with 0) the message is reliable: it arrives, in
+   * order with everything else this node sends on its channels. With a lifetime
+   * it is a live message, worth delivering only within that many ms (30000 at
+   * most): repaired while it can still arrive in time, dropped whole once it
+   * cannot, never delivered partly or twice, and ordered with nothing — number
+   * them if order matters. Made for audio and video frames; at most 1 MiB. The
+   * receiver needs nothing special.
+   *
+   * False means the peer is not connected or its queue is out of room — in the
+   * second case the message was still queued, and false asks you to pause (see
+   * `peerWritable()`).
    */
-  send(peerId: string, channel: string, data: ArrayBuffer): boolean
-
-  /** Send raw bytes to every connected peer on a named channel. */
-  broadcast(channel: string, data: ArrayBuffer): void
+  send(peerId: string, channel: string, data: ArrayBuffer, lifetimeMs?: number): boolean
 
   /**
-   * Whether this peer's send queue still has room. False also for a peer that is
-   * not connected.
-   *
-   * `send()` returning true only means the message was queued, never that it
-   * arrived — so if you send in bulk, this is how you learn you are outrunning
-   * the link. False means stop: the message you just sent was queued like any
-   * other and nothing was dropped, but keep going and the peer is dropped with
-   * reason `SlowConsumer`. Wait for `onPeerWritable`, or poll this.
-   *
-   * It is not a size limit — one message of any size is always queued.
+   * `send()` to every connected peer. False when any of them is out of room —
+   * a fan-out is paced by its slowest recipient.
+   */
+  broadcast(channel: string, data: ArrayBuffer, lifetimeMs?: number): boolean
+
+  /**
+   * Whether this peer's send queue still has room; false also for a peer that
+   * is not connected. False means stop: what you sent was queued and nothing
+   * was dropped, but keep going and the peer is dropped with 'slow_consumer'.
+   * Wait for `onPeerWritable`, or poll this. Not a size limit — one message of
+   * any size is always queued.
    */
   peerWritable(peerId: string): boolean
 
   /**
-   * Handle messages arriving on a channel. One listener per channel; registering
-   * a second for the same channel replaces the first.
-   *
-   * **Must be called before `start()`** and throws otherwise. librats stores
-   * channel handlers in an unsynchronized map that reactor threads read on every
-   * inbound frame, so registering on a running node is a data race, not a
-   * late-but-harmless registration.
-   *
-   * The ArrayBuffer handed to the listener owns its memory and stays valid for as
-   * long as the listener holds it.
+   * The latest path sample for a peer; undefined if it is not connected or
+   * nothing was sampled yet (sampling needs `pathSampleMs` or an `onPeerPath`
+   * listener).
+   */
+  pathStats(peerId: string): PathStats | undefined
+
+  /**
+   * Messages arriving on a channel. One listener per channel; a second one for
+   * the same channel replaces the first. The ArrayBuffer owns its memory.
    */
   onMessage(
     channel: string,
     listener: (peerId: string, data: ArrayBuffer) => void
   ): void
 
-  // --- peer events ---
+  // ─── peer events ───
+  //
+  // Listeners accumulate: each call adds one and none can be removed, so
+  // register once at setup, not from an effect that can re-run.
 
-  /**
-   * **Must be called before `start()`** and throws otherwise -- these append to
-   * a plain vector that reactor threads iterate on every peer event.
-   *
-   * Listeners accumulate: each call adds one, and there is no way to remove it.
-   * Register once, at setup, rather than from an effect that can re-run.
-   */
   onPeerConnected(listener: (peerId: string) => void): void
 
-  /**
-   * `reason` is why the peer went — "RATS_CLOSE_PEER_CLOSED", "RATS_CLOSE_SLOW_CONSUMER"
-   * and so on. It is worth branching on: a peer that left is one to redial, while
-   * `RATS_CLOSE_SLOW_CONSUMER` means *you* were sending faster than the link
-   * drained, and redialing that one just repeats the overload.
-   */
-  onPeerDisconnected(listener: (peerId: string, reason: string) => void): void
+  onPeerDisconnected(listener: (peerId: string, reason: CloseReason) => void): void
 
   /**
-   * A peer whose send queue had filled past its mark has drained back under it —
-   * the other half of `peerWritable()` returning false. An app that never checks
-   * that never needs this.
+   * A dial to a numeric address failed over every transport tried — one made
+   * by `connect()` or by a discovery subsystem. A dial by hostname is not
+   * reported.
+   */
+  onDialFailed(listener: (address: string) => void): void
+
+  /**
+   * A peer whose queue had filled has drained back under its mark — the other
+   * half of `peerWritable()` returning false.
    */
   onPeerWritable(listener: (peerId: string) => void): void
 
-  // --- file transfer ---
-  //
-  // Opt-in, like every librats capability: call `enableFileTransfer()` before
-  // `start()` or the methods below throw. Files are streamed natively by path —
-  // no bytes cross the JS bridge, so a multi-gigabyte transfer costs the JS
-  // thread nothing beyond the progress events.
+  /**
+   * A path sample of every connected peer, every `pathSampleMs` (100 ms if 0).
+   * Registering one turns sampling on. Each sample crosses to the JS thread, so
+   * prefer `pathStats()` when you only need the figures now and then.
+   */
+  onPeerPath(listener: (peerId: string, stats: PathStats) => void): void
+
+  // ─── discovery (enable before start) ───
+
+  /** Find peers on the mainline DHT, announcing and searching `discoveryKey`. */
+  enableDht(config?: DhtConfig): void
 
   /**
-   * Attach the file-transfer subsystem. Must be called before `start()`, and
-   * before any of the methods or listeners below.
+   * Find peers on the local network over mDNS. On iOS 14+ raw multicast needs
+   * the com.apple.developer.networking.multicast entitlement.
    */
+  enableMdns(): void
+
+  /**
+   * Peer exchange: connected peers trade the addresses of peers they hold, so
+   * one contact is enough to find the rest of the mesh.
+   */
+  enablePeerExchange(): void
+
+  // ─── NAT traversal (enable before start) ───
+
+  /** Ask the router to forward the listen port (UPnP IGD and/or NAT-PMP). */
+  enablePortMapping(config?: PortMappingConfig): void
+
+  /**
+   * UDP hole punching: reach a peer behind a NAT by having a peer both sides
+   * share arrange for the two to dial each other at once. Every node involved
+   * needs it enabled. `serveRendezvous` (default true) also passes other peers'
+   * rendezvous along — a few dozen bytes per punch; a mesh where nobody does
+   * this cannot punch.
+   */
+  enableHolePunch(serveRendezvous?: boolean): void
+
+  /**
+   * Start punching to a peer. Success arrives as `onPeerConnected`. False when
+   * there is nothing to do or nothing to try with: already connected, already
+   * punching, or no external endpoint of this node's own known yet.
+   */
+  punchPeer(peerId: string): boolean
+
+  /**
+   * Relaying: reach a peer nothing else can, through a node both ends are
+   * connected to. Encryption stays end to end; `peerInfo()` reports 'relay'.
+   * `serve` (default false) also carries other peers' connections, at the cost
+   * of their bandwidth — rarely what a phone wants. With hole punching enabled
+   * too, a failed punch falls back to a relay by itself.
+   */
+  enableRelay(serve?: boolean): void
+
+  /**
+   * Start a relayed connection to a peer. Success arrives as `onPeerConnected`.
+   * False when already connected, already trying or cooling down, or no
+   * connected peer can carry it.
+   */
+  connectViaRelay(peerId: string): boolean
+
+  // ─── JSON messaging ───
+  //
+  // Typed messages carrying a JSON document. JSON crosses this boundary as text:
+  // `JSON.stringify` what you send and `JSON.parse` what you receive.
+
+  /** Enable before `start()`. */
+  enableJson(): void
+
+  /** Add a listener for messages of `type`. Safe on a running node. */
+  onJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Like `onJson`; the listener is removed after its first message. */
+  onceJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Remove every listener of `type`. */
+  offJson(type: string): void
+
+  /** Throws if `json` is not valid JSON. False if the peer is not connected. */
+  sendJson(peerId: string, type: string, json: string): boolean
+
+  /** Throws if `json` is not valid JSON. */
+  broadcastJson(type: string, json: string): void
+
+  // ─── file transfer ───
+  //
+  // Files are streamed natively by path — no bytes cross the JS bridge, so a
+  // multi-gigabyte transfer costs the JS thread nothing beyond the progress
+  // events.
+
+  /** Enable before `start()`, and before any of the methods below. */
   enableFileTransfer(config: FileTransferConfig): void
 
   /**
@@ -293,31 +578,27 @@ export interface RatsNode
   /** Decline an offered transfer. */
   rejectFile(peerId: string, transferId: number): void
 
-  /** Control a live transfer from either side. False if no such transfer. */
+  /** Control a running transfer from either side. False if no such transfer. */
   pauseTransfer(peerId: string, transferId: number): boolean
   resumeTransfer(peerId: string, transferId: number): boolean
   cancelTransfer(peerId: string, transferId: number): boolean
 
   transferStats(): TransferStats
 
-  /**
-   * An incoming transfer needs a decision. Answer with accept or reject.
-   *
-   * **Must be called before `start()`** and throws otherwise, like every other
-   * `on*` registration here.
-   */
+  /** An incoming transfer needs a decision. One listener; a second replaces it. */
   onFileOffer(listener: (offer: FileOffer) => void): void
 
   /**
-   * Progress for transfers in both directions. Fires on the library's own
-   * cadence (roughly per progress interval), not per chunk.
+   * Progress for transfers in both directions, on the library's own cadence
+   * rather than per chunk. One listener; a second replaces it.
    */
   onFileProgress(listener: (progress: FileProgress) => void): void
 
   /**
    * A transfer finished. `path` is the final destination on the receiving side
-   * and the source path on the sending side. Check `success`: a failed integrity
-   * check or a disk error also arrives here.
+   * and the source path on the sending side. Check `success`: a failed
+   * integrity check or a disk error also arrives here. One listener; a second
+   * replaces it.
    */
   onFileComplete(
     listener: (
@@ -328,26 +609,21 @@ export interface RatsNode
     ) => void
   ): void
 
-  // --- pub/sub (GossipSub) ---
+  // ─── pub/sub (GossipSub) ───
   //
-  // Opt-in like file transfer: call `enablePubSub()` before `start()`.
-  //
-  // This is real GossipSub rather than floodsub — each subscribed topic keeps a
-  // bounded mesh, published messages are pushed along it, and a lazy IHAVE/IWANT
-  // layer recovers anything missed. Practically that means delivery is
-  // best-effort and unordered, and a message may reach you once even though
-  // several peers hold it.
+  // Each subscribed topic keeps a bounded mesh, published messages are pushed
+  // along it, and a lazy IHAVE/IWANT layer recovers anything missed. Delivery is
+  // best-effort and unordered.
 
-  /** Attach the pub/sub subsystem. Must be called before `start()`. */
+  /** Enable before `start()`. */
   enablePubSub(config?: PubSubConfig): void
 
   /**
-   * Subscribe to a topic. One listener per topic; subscribing again to the same
-   * topic replaces the previous listener.
+   * Subscribe to a topic. One listener per topic; subscribing again replaces
+   * it. Safe on a running node.
    *
-   * `topic` names a global namespace shared by every node on your `protocol`, so
-   * prefix it if collisions matter. The ArrayBuffer handed to the listener owns
-   * its memory and stays valid for as long as the listener holds it.
+   * `topic` names a namespace shared by every node on your `protocol`, so
+   * prefix it if collisions matter. The ArrayBuffer owns its memory.
    */
   subscribe(
     topic: string,
@@ -357,13 +633,11 @@ export interface RatsNode
   unsubscribe(topic: string): void
 
   /**
-   * Publish to a topic. Goes along the mesh when this node is subscribed,
-   * otherwise through a short-lived fanout set.
+   * Publish to a topic: along the mesh when this node is subscribed, otherwise
+   * through a short-lived fanout set.
    *
-   * A subscribed publisher **also hears itself**: the local listener fires for
-   * this message with `peerId` set to this node's own `localId`. Compare against
-   * `localId` if you need to tell your own messages apart from a peer's. A node
-   * that is not subscribed has no listener and so sees nothing.
+   * A subscribed publisher **also hears itself**: its listener fires with
+   * `peerId` set to this node's own `localId`.
    */
   publish(topic: string, data: ArrayBuffer): void
 
@@ -372,6 +646,30 @@ export interface RatsNode
 
   /** Peers that have announced interest in a topic. */
   topicPeers(topic: string): string[]
-  /** This node's current mesh for a topic — the subset it exchanges full messages with. */
+  /** This node's current mesh for a topic — the peers it exchanges full messages with. */
   meshPeers(topic: string): string[]
+
+  // ─── ping and reconnection (enable before start) ───
+
+  /** Probe every peer's round trip periodically. */
+  enablePing(): void
+
+  /**
+   * Last measured round trip to a peer in ms; undefined until a probe has been
+   * answered. (`pathStats().srttUs` has the transport's own figure without any
+   * probing.)
+   */
+  peerRttMs(peerId: string): number | undefined
+
+  /**
+   * Redial dropped peers with exponential backoff. Every address dialed is
+   * remembered; with `dataDir` the list survives restarts.
+   */
+  enableReconnect(): void
+
+  /** Keep host:port connected. Throws if the host does not resolve. */
+  addReconnect(host: string, port: number): void
+
+  /** Stop keeping host:port connected and forget it. */
+  removeReconnect(host: string, port: number): void
 }

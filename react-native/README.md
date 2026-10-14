@@ -2,24 +2,27 @@
 
 React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
 
-Status: **working on both platforms.** Core messaging and peer events, file
-transfer, and pub/sub, verified running on an iOS simulator and an Android
-emulator by the [example app](#example-app). Discovery (DHT, mDNS) and NAT
-traversal controls are not here yet — see [Scope](#scope-of-this-slice).
+Status: **working on both platforms** for core messaging, peer events, file
+transfer and pub/sub, which the [example app](#example-app) has run on an iOS
+simulator and an Android emulator. The rest of the surface — live messages, path
+statistics, peer info, discovery, NAT traversal, JSON messaging, ping and
+reconnection — is compiled against the generated Nitro headers but has not yet
+been run on a device; see [What is verified](#what-is-verified).
 
 ## Why Nitro
 
 Nitro can implement a HybridObject in **C++ for both platforms**, and librats is
 already C++. So there is exactly one implementation —
 [`cpp/HybridRatsNode.cpp`](cpp/HybridRatsNode.cpp) — shared by iOS and Android,
-with no JNI bridge and no Swift wrapper to keep in sync. For comparison, the
-native Android binding needs 753 lines of JNI plus 758 lines of Java to do less.
+with no JNI bridge and no Swift wrapper to keep in sync. (The native Android
+binding needs a JNI layer plus a Java class to do the same.)
 
 This binding calls the **C++ `Node` API directly** rather than going through the
 C ABI in `src/librats/bindings/rats.h`. The C ABI exists to cross an FFI boundary
 (ctypes, JNI, N-API); Nitro is a C++ consumer with no such boundary, so routing
 through it would only add hex-string formatting and extra copies. The C ABI
-remains the reference for *which* capabilities to expose.
+remains the reference for *which* capabilities to expose, and the two cover the
+same ground apart from BitTorrent, which is not exposed here.
 
 ## Install
 
@@ -45,15 +48,16 @@ inside `react-native/` has to come first.
 ```ts
 import { createNode, encodeUtf8, decodeUtf8 } from 'react-native-librats'
 
-// Configure first, then attach listeners, then start. librats fixes config at
-// construction, and it stores handlers without a lock while reactor threads read
-// them -- so every on*() call has to happen before start(), which throws otherwise.
+// Configure first, then enable subsystems and attach listeners, then start.
+// librats fixes config at construction, and it keeps listeners and subsystems in
+// tables reactor threads read without a lock -- so those calls throw after start().
 const node = createNode({
   listenPort: 8080,
   protocol: 'myapp/1.0',   // must be identical on every platform of your app
 })
 
 node.onPeerConnected((peerId) => console.log('connected', peerId))
+node.onPeerDisconnected((peerId, reason) => console.log('gone', peerId, reason))
 node.onMessage('chat', (peerId, data) => {
   console.log(peerId, decodeUtf8(data))
 })
@@ -63,6 +67,16 @@ node.connect('192.168.1.42', 8080)
 
 node.broadcast('chat', encodeUtf8('hello'))
 ```
+
+Every other `RatsConfig` field is optional and mirrors `librats::NodeConfig`:
+transports and which one a dial tries first (UDP by default, TCP raced after
+`transportFallbackMs`), `dialOnly`, `maxPeers`, `security`, the send-queue limit,
+the UDP congestion controller and windows, and so on — the spec documents each.
+
+`reason` in `onPeerDisconnected` is worth branching on. `'slow_consumer'` means
+this node kept sending while the peer's queue was full: `send()` returning false
+(or `peerWritable()`) was the warning, and `onPeerWritable` says when to resume.
+Redialing without slowing down just repeats it.
 
 `encodeUtf8` / `decodeUtf8` are exported because **Hermes has no `TextDecoder`**
 (it does provide `TextEncoder`), so the symmetric pair you would reach for does
@@ -88,6 +102,41 @@ AppState.addEventListener('change', (state) => {
 
 Set `dataDir` to an app-writable path (iOS: inside the sandbox, e.g. Documents;
 Android: `filesDir`) so the node keeps a stable identity across those restarts.
+
+## Live messages and path statistics
+
+A message sent with a lifetime is *live*: worth delivering only within that many
+milliseconds. It is repaired while it can still arrive in time and dropped whole
+once it cannot, and it is ordered with nothing — number your frames if order
+matters. The receiver's `onMessage` gets it like any other.
+
+```ts
+node.send(peerId, 'video', frame, 150)     // at most 30000 ms, at most 1 MiB
+```
+
+For a sender that sizes itself to the path, `pathStats(peerId)` returns what the
+transport currently knows: the congestion controller's `bandwidthBps`, round
+trips, loss, `queuedBytes`, and how many live messages expired. Sampling runs
+only when asked for — set `pathSampleMs`, or register `onPeerPath` (which then
+samples every 100 ms and sends each sample across to the JS thread, so prefer the
+getter when you only need the figures now and then).
+
+## Discovery and NAT traversal
+
+All opt-in, before `start()`:
+
+| Call | What it does |
+|------|--------------|
+| `enableDht({ port?, discoveryKey? })` | Finds peers through the mainline DHT; the key defaults to `protocol`. |
+| `enableMdns()` | Finds peers on the local network. On iOS 14+ raw multicast needs the `com.apple.developer.networking.multicast` entitlement. |
+| `enablePeerExchange()` | Connected peers trade addresses, so one contact is enough. |
+| `enablePortMapping({ upnp?, natpmp? })` | Asks the router to forward the listen port. Moot on cellular CGNAT. |
+| `enableHolePunch(serveRendezvous?)` | UDP hole punching through a peer both sides share; `punchPeer(id)` starts one. |
+| `enableRelay(serve?)` | Reaches a peer nothing else can, through a node both ends hold; `connectViaRelay(id)` starts one. Leave `serve` off on a phone — it carries other peers' traffic. |
+
+`natMapping` reports what the mesh has shown about this node's NAT;
+`'endpoint_dependent'` (symmetric) means punching cannot work from here.
+`peerInfo(id).transport` is `'relay'` for a relayed peer.
 
 ## Threading
 
@@ -168,7 +217,7 @@ node.onFileProgress((p) => {
   console.log(`${p.percent.toFixed(0)}% at ${p.transferRateBps / 1024} KiB/s, eta ${p.etaMs}ms`)
 })
 
-node.onFileComplete((transferId, success, path) => {
+node.onFileComplete((transferId, peerId, success, path) => {
   console.log(success ? `saved to ${path}` : 'transfer failed')
 })
 
@@ -237,6 +286,21 @@ Unlike `onMessage` and the peer events, `subscribe`/`unsubscribe` are safe to ca
 **after** `start()` — `PubSub` guards its topic tables with a mutex, whereas the
 core's channel router does not. Only `enablePubSub()` has to precede `start()`.
 
+## JSON messaging
+
+`enableJson()` adds typed messages carrying a JSON document. JSON crosses the
+bridge as text, so stringify and parse on the JS side:
+
+```ts
+node.enableJson()
+node.onJson('presence', (peerId, json) => console.log(peerId, JSON.parse(json)))
+node.start()
+node.sendJson(peerId, 'presence', JSON.stringify({ status: 'away' }))
+```
+
+`onJson`, `onceJson` and `offJson` are safe on a running node; invalid JSON in
+`sendJson`/`broadcastJson` throws.
+
 ### Why there is no `setValidator`
 
 librats lets you gate inbound messages per topic with a validator returning
@@ -254,11 +318,17 @@ If you need to drop messages, do it in the `subscribe` listener. The difference 
 that you cannot prevent the message being forwarded to the rest of the mesh — for
 that, a validator has to live in native code.
 
-## Scope of this slice
+## Scope
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
-`connect`, `peerCount`, `peerIds`, `send`, `broadcast`, `onMessage`,
-`onPeerConnected`, `onPeerDisconnected`.
+`protocol`, `transports`, `natMapping`, `observedAddresses`, `connect`,
+`disconnect`, `peerCount`, `peerIds`, `peerInfo`, `maxPeers`, `send`,
+`broadcast`, `peerWritable`, `pathStats`, `onMessage`, `onPeerConnected`,
+`onPeerDisconnected`, `onDialFailed`, `onPeerWritable`, `onPeerPath`.
+
+Discovery and NAT traversal: `enableDht`, `enableMdns`, `enablePeerExchange`,
+`enablePortMapping`, `enableHolePunch`, `punchPeer`, `enableRelay`,
+`connectViaRelay`.
 
 File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
 `rejectFile`, `pauseTransfer`, `resumeTransfer`, `cancelTransfer`,
@@ -267,8 +337,11 @@ File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
 Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 `subscribedTopics`, `topicPeers`, `meshPeers`. Not `setValidator` — see above.
 
-Not yet: DHT and mDNS discovery, NAT traversal controls, typed JSON messaging,
-and the storage and BitTorrent modules.
+JSON messaging: `enableJson`, `onJson`, `onceJson`, `offJson`, `sendJson`,
+`broadcastJson`. Ping and reconnection: `enablePing`, `peerRttMs`,
+`enableReconnect`, `addReconnect`, `removeReconnect`.
+
+Not here: the storage and BitTorrent modules.
 
 ## Example app
 
@@ -294,7 +367,7 @@ npx react-native run-ios
 npx react-native run-android
 ```
 
-Press **chat test** or **file test**; each log ends in `PASS`. The file test
+Press **chat test**, **file test** or **pubsub test**; each log ends in `PASS`. The file test
 writes a 512 KiB file, offers it from one node to the other, accepts it, and
 compares the received bytes against what was sent. First `pod install` builds
 `LibRats.xcframework` from the C++ core, which takes a few minutes.
@@ -311,8 +384,9 @@ you need — the module honours it.
 
 ### What is verified
 
-**Both platforms, both tests, end to end** — iOS on a simulator and Android on an
-emulator (`libLibratsRN.so`, arm64-v8a, with the librats core linked in):
+**Both platforms, end to end** — iOS on a simulator and Android on an emulator
+(`libLibratsRN.so`, arm64-v8a, with the librats core linked in). These runs
+predate the current API surface:
 
 | | iOS simulator | Android emulator |
 |---|---|---|
@@ -320,9 +394,12 @@ emulator (`libLibratsRN.so`, arm64-v8a, with the librats core linked in):
 | 512 KiB file: offer, accept, 10 progress events, complete | `PASS` | `PASS` |
 | Received bytes compared against source | identical | identical |
 
-Also verified: Nitrogen generates from the spec; the C++ compiles clean
-(`-Wall -Wextra`, zero warnings); TypeScript typechecks in both the module and
-the example.
+Since then the binding grew live messages, path statistics, peer info,
+discovery, NAT traversal, JSON messaging, ping and reconnection. For that version:
+Nitrogen 0.37 generates from the spec, and the C++ compiles against the generated
+headers with no warnings under `-Wall -Wextra` (checked on a desktop host, not
+with the NDK or Xcode); the module and the example typecheck with `tsc`. It has
+not been rebuilt for or run on either platform.
 
 Not yet verified: **a physical device.** Everything above ran on a simulator and
 an emulator, so nothing here exercises real ARM hardware, a real network

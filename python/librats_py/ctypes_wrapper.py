@@ -1,74 +1,74 @@
 """
-Low-level ctypes wrapper for the librats C ABI (``src/librats/bindings/rats.h``).
+ctypes declarations for the librats C ABI (``src/librats/bindings/rats.h``).
 
-This module declares the shared-library handle and the argtypes/restypes for
-every C function the high-level API uses. Heap-allocated strings returned by the
-library (``rats_local_id``, ``rats_protocol``, ``rats_peer_ids`` entries) are
-declared ``c_void_p`` so the bytes can be copied
-out and the original pointer released with ``rats_string_free``; use
-:func:`take_string` for that. Static strings (``rats_version_string``,
-``rats_git_describe``, ``rats_error_str``) are declared ``c_char_p`` and must
-NOT be freed.
+Loads the shared library and declares every struct and function signature.
+Library-owned strings (``rats_local_id``, ``rats_protocol``, the static names)
+are ``const char*`` and declared ``c_char_p``: ctypes copies them, nothing is
+freed. The arrays from ``rats_peer_ids`` / ``rats_observed_addresses`` are
+caller-owned and released with ``rats_strings_free``.
 """
 
 import os
 import platform
 from ctypes import (
-    CDLL, POINTER, Structure, c_void_p, c_char_p, c_int, c_size_t,
-    c_uint16, c_uint32, c_uint64, c_int64, c_double, string_at,
+    CDLL, POINTER, Structure, c_char, c_char_p, c_double, c_int, c_int64, c_size_t,
+    c_uint16, c_uint32, c_uint64, c_void_p,
 )
 from typing import Optional
 
 from .callbacks import (
-    PeerCallbackType, PeerDisconnectCallbackType, PathCallbackType,
-    MessageCallbackType, TopicCallbackType, JsonCallbackType,
+    PeerCallbackType, DisconnectCallbackType, DialFailedCallbackType, MessageCallbackType,
+    PathCallbackType, TopicCallbackType, JsonCallbackType,
     FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
 )
 
 
-class LibratsNotFoundError(Exception):
-    """Raised when the librats shared library cannot be located/loaded."""
-    pass
+class LibratsNotFoundError(ImportError):
+    """The librats shared library could not be found or loaded."""
 
 
 class RatsConfig(Structure):
-    """ctypes mirror of ``rats_config_t``.
-
-    Obtain a defaults-filled instance via ``LibratsCtypes.config_default()``,
-    set the fields you care about, then pass it to ``rats_create_config``.
-    """
+    """``rats_config_t``. Zero in every field is the library default."""
     _fields_ = [
-        ("listen_port", c_uint16),       # uint16_t
-        ("enable_listen", c_int),        # int (0 = dial-only)
-        ("bind_address", c_char_p),      # const char* (NULL → "::")
-        ("security", c_int),             # rats_security_t
-        ("data_dir", c_char_p),          # const char*
-        ("protocol", c_char_p),          # const char* (NULL → "librats/1.0")
-        ("max_peers", c_size_t),         # size_t (0 = unlimited)
-        # Transports. Both are on by default and bind the SAME port, so one
-        # advertised address is dialable either way.
-        ("enable_tcp", c_int),           # int (default 1)
-        ("enable_udp", c_int),           # int (default 1)
-        ("preferred_transport", c_int),  # rats_transport_t (default UDP)
-        ("transport_fallback_ms", c_uint32),  # 0 = never race the other transport
-        # Bytes a peer's send queue may hold before an application that keeps
-        # sending anyway has that peer dropped with RATS_CLOSE_SLOW_CONSUMER.
-        # 0 = the library default (8 MiB). Not a maximum message size — one
-        # message of any size is always queued.
+        # identity
+        ("protocol", c_char_p),
+        ("data_dir", c_char_p),
+        ("security", c_int),
+        # listening
+        ("listen_port", c_uint16),
+        ("bind_address", c_char_p),
+        ("dial_only", c_int),
+        ("max_peers", c_size_t),
+        # transports
+        ("transports", c_uint32),
+        ("preferred_transport", c_int),
+        ("transport_fallback_ms", c_uint32),
+        # sending
         ("send_queue_limit", c_size_t),
-        ("congestion_control", c_int),   # rats_congestion_t (default BBR)
-        # Ceiling a UDP stream's receive window grows to; 0 = default (16 MiB).
-        ("udp_receive_window", c_size_t),
-        # Out-of-order bytes all UDP streams may hold together; 0 = default (64 MiB).
-        ("udp_receive_budget", c_size_t),
-        # How often each peer's path is sampled, ms; 0 = only while an
-        # on_peer_path callback is registered, and then every 100 ms.
         ("path_sample_ms", c_uint32),
+        # UDP transport
+        ("congestion_control", c_int),
+        ("udp_receive_window", c_size_t),
+        ("udp_receive_budget", c_size_t),
+        ("disable_udp_offload", c_int),
+        # runtime
+        ("reactor_threads", c_size_t),
+        ("disable_network_monitor", c_int),
+    ]
+
+
+class RatsPeerInfo(Structure):
+    """``rats_peer_info_t``."""
+    _fields_ = [
+        ("transport", c_int),
+        ("transports", c_uint32),
+        ("direction", c_int),
+        ("address", c_char * 64),
     ]
 
 
 class RatsPathStats(Structure):
-    """ctypes mirror of ``rats_path_stats_t``."""
+    """``rats_path_stats_t``."""
     _fields_ = [
         ("bandwidth_bps", c_uint64),
         ("app_limited", c_int),
@@ -86,334 +86,185 @@ class RatsPathStats(Structure):
     ]
 
 
-def find_librats_library() -> str:
-    """Locate the librats shared library, returning a loadable path or name."""
-    system = platform.system().lower()
-
-    if system == 'windows':
-        lib_names = ['rats.dll', 'librats.dll']
-    elif system == 'darwin':
-        lib_names = ['librats.dylib', 'librats.so']
-    else:  # Linux and others
-        lib_names = ['librats.so', 'librats.so.1']
-
-    here = os.path.dirname(__file__)
-    search_paths = [
-        here,                                          # alongside the package
-        '.',
-        os.path.join(here, '..', '..', 'build', 'lib'),
-        os.path.join(here, '..', '..', 'build', 'bin'),
-        os.path.join(here, '..', '..', 'build'),
-        '../build', '../../build', '../../../build',
-        '/usr/local/lib',
-        '/usr/lib',
+class RatsFileProgress(Structure):
+    """``rats_file_progress_t``."""
+    _fields_ = [
+        ("transfer_id", c_uint64),
+        ("peer_id", c_char_p),
+        ("direction", c_int),
+        ("status", c_int),
+        ("bytes_transferred", c_uint64),
+        ("total_bytes", c_uint64),
+        ("files_completed", c_uint32),
+        ("total_files", c_uint32),
+        ("rate_bytes_per_sec", c_double),
     ]
 
-    if 'LD_LIBRARY_PATH' in os.environ:
-        search_paths.extend(os.environ['LD_LIBRARY_PATH'].split(os.pathsep))
-    if system == 'windows' and 'PATH' in os.environ:
-        search_paths.extend(os.environ['PATH'].split(os.pathsep))
 
-    for path in search_paths:
-        for lib_name in lib_names:
-            lib_path = os.path.join(path, lib_name)
-            if os.path.exists(lib_path):
-                return os.path.abspath(lib_path)
-
-    # Fall back to letting the OS loader search by bare name.
-    for lib_name in lib_names:
-        try:
-            CDLL(lib_name)
-            return lib_name
-        except OSError:
-            continue
-
-    raise LibratsNotFoundError(
-        f"Could not find librats shared library (tried {lib_names})."
-    )
+class RatsBtConfig(Structure):
+    """``rats_bt_config_t``. Zero in every field is the default."""
+    _fields_ = [
+        ("listen_port", c_uint16),
+        ("download_path", c_char_p),
+        ("outgoing_encryption", c_int),
+        ("incoming_encryption", c_int),
+        ("disable_outgoing_utp", c_int),
+        ("disable_incoming_utp", c_int),
+    ]
 
 
-def take_string(lib: "LibratsCtypes", ptr) -> Optional[str]:
-    """Copy a heap string returned by the library and free the original.
+# (name, restype, argtypes) of every function in rats.h.
+_N = c_void_p          # rats_t
+_S = c_char_p          # const char*
+_E = c_int             # rats_error_t and the other enums
+_SIGNATURES = [
+    ("rats_error_str", _S, [_E]),
+    ("rats_close_reason_str", _S, [_E]),
+    # configuration and lifecycle
+    ("rats_create", _N, [POINTER(RatsConfig)]),
+    ("rats_destroy", None, [_N]),
+    ("rats_start", _E, [_N]),
+    ("rats_stop", None, [_N]),
+    # this node
+    ("rats_local_id", _S, [_N]),
+    ("rats_protocol", _S, [_N]),
+    ("rats_listen_port", c_uint16, [_N]),
+    ("rats_transports", c_uint32, [_N]),
+    ("rats_nat_mapping", _E, [_N]),
+    ("rats_observed_addresses", POINTER(c_char_p), [_N, POINTER(c_size_t)]),
+    # peers
+    ("rats_connect", _E, [_N, _S, c_uint16]),
+    ("rats_disconnect", _E, [_N, _S]),
+    ("rats_peer_count", c_size_t, [_N]),
+    ("rats_peer_ids", POINTER(c_char_p), [_N, POINTER(c_size_t)]),
+    ("rats_peer_info", _E, [_N, _S, POINTER(RatsPeerInfo)]),
+    ("rats_set_max_peers", None, [_N, c_size_t]),
+    ("rats_max_peers", c_size_t, [_N]),
+    # messaging
+    ("rats_send", _E, [_N, _S, _S, c_void_p, c_size_t, c_uint32]),
+    ("rats_broadcast", _E, [_N, _S, c_void_p, c_size_t, c_uint32]),
+    ("rats_peer_writable", c_int, [_N, _S]),
+    ("rats_path_stats", _E, [_N, _S, POINTER(RatsPathStats)]),
+    # callbacks
+    ("rats_on_peer_connected", _E, [_N, PeerCallbackType, c_void_p]),
+    ("rats_on_peer_disconnected", _E, [_N, DisconnectCallbackType, c_void_p]),
+    ("rats_on_dial_failed", _E, [_N, DialFailedCallbackType, c_void_p]),
+    ("rats_on_peer_writable", _E, [_N, PeerCallbackType, c_void_p]),
+    ("rats_on_peer_path", _E, [_N, PathCallbackType, c_void_p]),
+    ("rats_on", _E, [_N, _S, MessageCallbackType, c_void_p]),
+    # discovery
+    ("rats_enable_dht", _E, [_N, c_uint16, _S]),
+    ("rats_enable_mdns", _E, [_N]),
+    ("rats_enable_peer_exchange", _E, [_N]),
+    # NAT traversal
+    ("rats_enable_port_mapping", _E, [_N, c_int, c_int]),
+    ("rats_enable_hole_punch", _E, [_N, c_int]),
+    ("rats_punch_peer", _E, [_N, _S]),
+    ("rats_enable_relay", _E, [_N, c_int]),
+    ("rats_connect_via_relay", _E, [_N, _S]),
+    # pub/sub
+    ("rats_enable_pubsub", _E, [_N]),
+    ("rats_subscribe", _E, [_N, _S, TopicCallbackType, c_void_p]),
+    ("rats_unsubscribe", _E, [_N, _S]),
+    ("rats_publish", _E, [_N, _S, c_void_p, c_size_t]),
+    # JSON messaging
+    ("rats_enable_json", _E, [_N]),
+    ("rats_on_json", _E, [_N, _S, JsonCallbackType, c_void_p]),
+    ("rats_once_json", _E, [_N, _S, JsonCallbackType, c_void_p]),
+    ("rats_off_json", _E, [_N, _S]),
+    ("rats_send_json", _E, [_N, _S, _S, _S]),
+    ("rats_broadcast_json", _E, [_N, _S, _S]),
+    # file transfer
+    ("rats_enable_file_transfer", _E, [_N, _S]),
+    ("rats_on_file_offer", _E, [_N, FileOfferCallbackType, c_void_p]),
+    ("rats_on_file_progress", _E, [_N, FileProgressCallbackType, c_void_p]),
+    ("rats_on_file_complete", _E, [_N, FileCompleteCallbackType, c_void_p]),
+    ("rats_send_file", _E, [_N, _S, _S, POINTER(c_uint64)]),
+    ("rats_send_directory", _E, [_N, _S, _S, POINTER(c_uint64)]),
+    ("rats_accept_file", _E, [_N, _S, c_uint64, _S]),
+    ("rats_reject_file", _E, [_N, _S, c_uint64]),
+    ("rats_cancel_file", _E, [_N, _S, c_uint64]),
+    ("rats_pause_file", _E, [_N, _S, c_uint64]),
+    ("rats_resume_file", _E, [_N, _S, c_uint64]),
+    # ping
+    ("rats_enable_ping", _E, [_N]),
+    ("rats_peer_rtt_ms", c_int64, [_N, _S]),
+    # reconnection
+    ("rats_enable_reconnect", _E, [_N]),
+    ("rats_add_reconnect", _E, [_N, _S, c_uint16]),
+    ("rats_remove_reconnect", _E, [_N, _S, c_uint16]),
+    # BitTorrent (RATS_ERR_NOT_ENABLED in builds without RATS_SEARCH_FEATURES)
+    ("rats_enable_bittorrent", _E, [_N, POINTER(RatsBtConfig)]),
+    ("rats_bt_add_magnet", _E, [_N, _S, _S]),
+    ("rats_bt_add_torrent_file", _E, [_N, _S, _S]),
+    ("rats_bt_remove_torrent", _E, [_N, _S]),
+    # process-wide
+    ("rats_set_log_level", None, [_E]),
+    ("rats_set_log_file", None, [_S]),
+    ("rats_version_string", _S, []),
+    ("rats_version", None, [POINTER(c_int)] * 4),
+    ("rats_git_describe", _S, []),
+    ("rats_abi", c_uint32, []),
+    ("rats_strings_free", None, [POINTER(c_char_p), c_size_t]),
+]
 
-    ``ptr`` must be a ``c_void_p``-typed result (or ``None``). Returns the
-    decoded ``str`` (empty string for a NULL pointer). The underlying buffer is
-    released via ``rats_string_free``.
-    """
-    if not ptr:
-        return ""
-    try:
-        value = string_at(ptr).decode('utf-8', errors='replace')
-    finally:
-        lib.lib.rats_string_free(ptr)
-    return value
+
+def find_librats_library() -> str:
+    """Locate the librats shared library; returns a path or a bare name."""
+    system = platform.system().lower()
+    if system == 'windows':
+        names = ['rats.dll', 'librats.dll']
+    elif system == 'darwin':
+        names = ['librats.dylib']
+    else:
+        names = ['librats.so']
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.join(here, '..', '..')
+    search = [here, os.path.join(root, 'build', 'lib'), os.path.join(root, 'build', 'bin'),
+              os.path.join(root, 'build')]
+    env = os.environ.get('LIBRATS_LIBRARY_PATH')
+    if env:
+        search[:0] = env.split(os.pathsep)
+
+    for path in search:
+        for name in names:
+            candidate = os.path.join(path, name)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    # Leave the rest to the OS loader (PATH, LD_LIBRARY_PATH, system dirs).
+    return names[0]
 
 
 class LibratsCtypes:
-    """Loads librats and declares all C function signatures."""
+    """The loaded library with every signature declared (``.lib``)."""
 
     def __init__(self):
         lib_path = find_librats_library()
-        # Python 3.8+ on Windows no longer searches PATH when resolving a DLL's
-        # own dependencies, so a librats.dll sitting next to its runtime DLLs
-        # would still fail to load. Register its directory explicitly.
+        # Since Python 3.8 Windows does not search PATH for a DLL's own
+        # dependencies; register the library's directory so ones shipped next to
+        # it resolve.
         dll_dir = None
-        if platform.system().lower() == 'windows' and os.path.isabs(lib_path):
-            try:
-                dll_dir = os.add_dll_directory(os.path.dirname(lib_path))
-            except (AttributeError, OSError):
-                dll_dir = None
+        if os.name == 'nt' and os.path.isabs(lib_path):
+            dll_dir = os.add_dll_directory(os.path.dirname(lib_path))
         try:
             self.lib = CDLL(lib_path)
         except OSError as e:
-            raise LibratsNotFoundError(
-                f"Failed to load librats library at {lib_path}: {e}")
+            raise LibratsNotFoundError(f"cannot load the librats library ({lib_path}): {e}") from e
         finally:
             if dll_dir is not None:
                 dll_dir.close()
-        self._setup_signatures()
+        for name, restype, argtypes in _SIGNATURES:
+            fn = getattr(self.lib, name)
+            fn.restype = restype
+            fn.argtypes = argtypes
 
-    def _setup_signatures(self):
-        lib = self.lib
 
-        # --- error / utility ---
-        lib.rats_error_str.argtypes = [c_int]
-        lib.rats_error_str.restype = c_char_p  # static, do not free
-
-        lib.rats_string_free.argtypes = [c_void_p]
-        lib.rats_string_free.restype = None
-
-        # --- construction / lifecycle ---
-        lib.rats_config_default.argtypes = []
-        lib.rats_config_default.restype = RatsConfig
-
-        lib.rats_create_config.argtypes = [POINTER(RatsConfig)]
-        lib.rats_create_config.restype = c_void_p
-
-        lib.rats_create.argtypes = [c_uint16]
-        lib.rats_create.restype = c_void_p
-
-        lib.rats_destroy.argtypes = [c_void_p]
-        lib.rats_destroy.restype = None
-
-        lib.rats_start.argtypes = [c_void_p]
-        lib.rats_start.restype = c_int
-
-        lib.rats_stop.argtypes = [c_void_p]
-        lib.rats_stop.restype = None
-
-        lib.rats_listen_port.argtypes = [c_void_p]
-        lib.rats_listen_port.restype = c_uint16
-
-        lib.rats_transports.argtypes = [c_void_p]
-        lib.rats_transports.restype = c_uint32
-
-        lib.rats_peer_transport.argtypes = [c_void_p, c_char_p]
-        lib.rats_peer_transport.restype = c_int
-
-        lib.rats_peer_transports.argtypes = [c_void_p, c_char_p]
-        lib.rats_peer_transports.restype = c_int
-
-        lib.rats_local_id.argtypes = [c_void_p]
-        lib.rats_local_id.restype = c_void_p  # heap; free with rats_string_free
-
-        lib.rats_protocol.argtypes = [c_void_p]
-        lib.rats_protocol.restype = c_void_p  # heap
-
-        # --- connections ---
-        lib.rats_connect.argtypes = [c_void_p, c_char_p, c_uint16]
-        lib.rats_connect.restype = c_int
-
-        lib.rats_peer_count.argtypes = [c_void_p]
-        lib.rats_peer_count.restype = c_size_t
-
-        lib.rats_set_max_peers.argtypes = [c_void_p, c_size_t]
-        lib.rats_set_max_peers.restype = None
-
-        lib.rats_max_peers.argtypes = [c_void_p]
-        lib.rats_max_peers.restype = c_size_t
-
-        # --- messaging (named channel, raw bytes) ---
-        lib.rats_send.argtypes = [c_void_p, c_char_p, c_char_p, c_void_p, c_size_t, c_uint32]
-        lib.rats_send.restype = c_int
-
-        lib.rats_broadcast.argtypes = [c_void_p, c_char_p, c_void_p, c_size_t, c_uint32]
-        lib.rats_broadcast.restype = c_int
-
-        lib.rats_peer_writable.argtypes = [c_void_p, c_char_p]
-        lib.rats_peer_writable.restype = c_int
-
-        lib.rats_path_stats.argtypes = [c_void_p, c_char_p, POINTER(RatsPathStats)]
-        lib.rats_path_stats.restype = c_int
-
-        lib.rats_close_reason_str.argtypes = [c_int]
-        lib.rats_close_reason_str.restype = c_char_p
-
-        # --- core callbacks ---
-        lib.rats_on_peer_connected.argtypes = [c_void_p, PeerCallbackType, c_void_p]
-        lib.rats_on_peer_connected.restype = c_int
-
-        lib.rats_on_peer_disconnected.argtypes = [c_void_p, PeerDisconnectCallbackType, c_void_p]
-        lib.rats_on_peer_disconnected.restype = c_int
-
-        lib.rats_on_peer_writable.argtypes = [c_void_p, PeerCallbackType, c_void_p]
-        lib.rats_on_peer_writable.restype = c_int
-
-        lib.rats_on_peer_path.argtypes = [c_void_p, PathCallbackType, c_void_p]
-        lib.rats_on_peer_path.restype = c_int
-
-        lib.rats_on.argtypes = [c_void_p, c_char_p, MessageCallbackType, c_void_p]
-        lib.rats_on.restype = c_int
-
-        # --- discovery / port mapping subsystems ---
-        lib.rats_enable_dht.argtypes = [c_void_p, c_uint16, c_char_p]
-        lib.rats_enable_dht.restype = c_int
-
-        lib.rats_enable_mdns.argtypes = [c_void_p]
-        lib.rats_enable_mdns.restype = c_int
-
-        lib.rats_enable_port_mapping.argtypes = [c_void_p, c_int, c_int]
-        lib.rats_enable_port_mapping.restype = c_int
-
-        # --- NAT traversal (hole punching) ---
-        lib.rats_enable_hole_punch.argtypes = [c_void_p, c_int]
-        lib.rats_enable_hole_punch.restype = c_int
-
-        lib.rats_punch_peer.argtypes = [c_void_p, c_char_p]
-        lib.rats_punch_peer.restype = c_int
-
-        # --- NAT traversal (relaying) ---
-        lib.rats_enable_relay.argtypes = [c_void_p, c_int]
-        lib.rats_enable_relay.restype = c_int
-
-        lib.rats_connect_via_relay.argtypes = [c_void_p, c_char_p]
-        lib.rats_connect_via_relay.restype = c_int
-
-        lib.rats_nat_mapping.argtypes = [c_void_p]
-        lib.rats_nat_mapping.restype = c_int
-
-        # --- peer enumeration ---
-        lib.rats_peer_ids.argtypes = [c_void_p, POINTER(c_size_t)]
-        lib.rats_peer_ids.restype = POINTER(c_void_p)
-
-        lib.rats_free_peer_ids.argtypes = [POINTER(c_void_p), c_size_t]
-        lib.rats_free_peer_ids.restype = None
-
-        # --- pub/sub ---
-        lib.rats_enable_pubsub.argtypes = [c_void_p]
-        lib.rats_enable_pubsub.restype = c_int
-
-        lib.rats_subscribe.argtypes = [c_void_p, c_char_p, TopicCallbackType, c_void_p]
-        lib.rats_subscribe.restype = c_int
-
-        lib.rats_unsubscribe.argtypes = [c_void_p, c_char_p]
-        lib.rats_unsubscribe.restype = c_int
-
-        lib.rats_publish.argtypes = [c_void_p, c_char_p, c_void_p, c_size_t]
-        lib.rats_publish.restype = c_int
-
-        # --- typed JSON messaging ---
-        lib.rats_enable_json.argtypes = [c_void_p]
-        lib.rats_enable_json.restype = c_int
-
-        lib.rats_on_json.argtypes = [c_void_p, c_char_p, JsonCallbackType, c_void_p]
-        lib.rats_on_json.restype = c_int
-
-        lib.rats_once_json.argtypes = [c_void_p, c_char_p, JsonCallbackType, c_void_p]
-        lib.rats_once_json.restype = c_int
-
-        lib.rats_off_json.argtypes = [c_void_p, c_char_p]
-        lib.rats_off_json.restype = c_int
-
-        lib.rats_send_json.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
-        lib.rats_send_json.restype = c_int
-
-        lib.rats_broadcast_json.argtypes = [c_void_p, c_char_p, c_char_p]
-        lib.rats_broadcast_json.restype = c_int
-
-        # --- file transfer ---
-        lib.rats_enable_file_transfer.argtypes = [c_void_p, c_char_p]
-        lib.rats_enable_file_transfer.restype = c_int
-
-        lib.rats_on_file_offer.argtypes = [c_void_p, FileOfferCallbackType, c_void_p]
-        lib.rats_on_file_offer.restype = c_int
-
-        lib.rats_on_file_progress.argtypes = [c_void_p, FileProgressCallbackType, c_void_p]
-        lib.rats_on_file_progress.restype = c_int
-
-        lib.rats_on_file_complete.argtypes = [c_void_p, FileCompleteCallbackType, c_void_p]
-        lib.rats_on_file_complete.restype = c_int
-
-        lib.rats_send_file.argtypes = [c_void_p, c_char_p, c_char_p]
-        lib.rats_send_file.restype = c_uint64
-
-        lib.rats_send_directory.argtypes = [c_void_p, c_char_p, c_char_p]
-        lib.rats_send_directory.restype = c_uint64
-
-        lib.rats_accept_file.argtypes = [c_void_p, c_char_p, c_uint64, c_char_p]
-        lib.rats_accept_file.restype = c_int
-
-        lib.rats_reject_file.argtypes = [c_void_p, c_char_p, c_uint64]
-        lib.rats_reject_file.restype = c_int
-
-        lib.rats_cancel_file.argtypes = [c_void_p, c_char_p, c_uint64]
-        lib.rats_cancel_file.restype = c_int
-
-        lib.rats_pause_file.argtypes = [c_void_p, c_char_p, c_uint64]
-        lib.rats_pause_file.restype = c_int
-
-        lib.rats_resume_file.argtypes = [c_void_p, c_char_p, c_uint64]
-        lib.rats_resume_file.restype = c_int
-
-        # --- liveness (ping/RTT) ---
-        lib.rats_enable_ping.argtypes = [c_void_p]
-        lib.rats_enable_ping.restype = c_int
-
-        lib.rats_peer_rtt_ms.argtypes = [c_void_p, c_char_p]
-        lib.rats_peer_rtt_ms.restype = c_int64
-
-        # --- automatic reconnection ---
-        lib.rats_enable_reconnect.argtypes = [c_void_p]
-        lib.rats_enable_reconnect.restype = c_int
-
-        lib.rats_add_reconnect.argtypes = [c_void_p, c_char_p, c_uint16]
-        lib.rats_add_reconnect.restype = c_int
-
-        lib.rats_remove_reconnect.argtypes = [c_void_p, c_char_p, c_uint16]
-        lib.rats_remove_reconnect.restype = c_int
-
-        # --- logging (process-global) ---
-        lib.rats_set_log_level.argtypes = [c_int]
-        lib.rats_set_log_level.restype = None
-
-        lib.rats_set_log_file.argtypes = [c_char_p]
-        lib.rats_set_log_file.restype = None
-
-        # --- library info (process-global) ---
-        lib.rats_version_string.argtypes = []
-        lib.rats_version_string.restype = c_char_p  # static, do not free
-
-        lib.rats_version.argtypes = [
-            POINTER(c_int), POINTER(c_int), POINTER(c_int), POINTER(c_int)]
-        lib.rats_version.restype = None
-
-        lib.rats_git_describe.argtypes = []
-        lib.rats_git_describe.restype = c_char_p  # static, do not free
-
-        lib.rats_abi.argtypes = []
-        lib.rats_abi.restype = c_uint32
-
-    def config_default(self) -> RatsConfig:
-        """Return a ``rats_config_t`` pre-filled with the library defaults."""
-        return self.lib.rats_config_default()
-
-
-# Global singleton instance
 _librats: Optional[LibratsCtypes] = None
 
 
 def get_librats() -> LibratsCtypes:
-    """Get (lazily creating) the process-global librats ctypes instance."""
+    """The process-wide library instance, loaded on first use."""
     global _librats
     if _librats is None:
         _librats = LibratsCtypes()

@@ -1,28 +1,29 @@
 # librats — Node.js bindings
 
 Node.js bindings for [librats](../README.md), a C++17 peer-to-peer networking
-library: encrypted transport, DHT/mDNS discovery, NAT traversal, pub/sub, typed
-JSON messaging and file transfer.
+library. They wrap the librats C API one call to one method; the full reference,
+with every option and its default, is [`lib/index.d.ts`](lib/index.d.ts).
 
 ## The model
 
-A `RatsNode` is one librats node. On its own it gives you secure transport
-(Noise XX over TCP **or** the library's reliable stream over UDP, both on the
-same port), a self-certifying peer id, manual dialing, and raw messaging on named
-channels — nothing else. Discovery, pub/sub, JSON messaging, file transfer, NAT
-port mapping, hole punching, RTT probing and reconnection are **opt-in
-subsystems**: you pay only for what you turn on.
-
-Two rules follow from that:
+A `RatsNode` is one librats node. By itself it is an encrypted transport —
+Noise XX over UDP or TCP, both on one port — with a self-certifying peer id
+(64-char hex), manual dialing, and messaging on named channels. Everything else
+is opt-in: DHT, mDNS and peer-exchange discovery, port mapping, hole punching,
+relaying, pub/sub, JSON messaging, file transfer, ping and reconnection.
 
 - **Enable subsystems and register callbacks before `start()`.** Enabling after
-  start throws `RATS_ERR_ALREADY_STARTED`; using a subsystem before its enable
-  throws `RATS_ERR_NOT_ENABLED`.
-- **Callbacks are marshalled onto the JS thread** from a librats reactor thread.
-  Keep them short anyway — a slow handler backs up the reactor's queue.
-
-Fallible calls **throw** an `Error` whose message is `librats: <CODE>`; pure
-getters are properties.
+  start throws `ALREADY_STARTED`; using a subsystem that was not enabled throws
+  `NOT_ENABLED`.
+- **Errors are thrown** as an `Error` whose `code` is `'NOT_ENABLED'`,
+  `'NO_SUCH_PEER'`, `'BIND'`, …. Calls that may simply have nothing to act on
+  return a boolean instead (`disconnect`, `punchPeer`, `connectViaRelay`,
+  `cancelFile`, …), and lookups return `null` (`peerInfo`, `pathStats`,
+  `peerRttMs`).
+- **Enumerations are strings**: `'udp'`, `'inbound'`, `'slow-consumer'`, ….
+- **Callbacks run on the JS thread**, carried over from librats' own threads.
+  While a node has callbacks registered it keeps the process alive; `destroy()`
+  releases it.
 
 ## Installation
 
@@ -30,16 +31,10 @@ getters are properties.
 npm install librats
 ```
 
-The install builds the native librats library with CMake, then compiles the
-Node.js addon against it. You need:
-
-- **Node.js** 20+
-- **CMake** 3.14+ ([download](https://cmake.org/download/))
-- a **C++17 toolchain** — Visual Studio Build Tools 2017+ (Windows),
-  `build-essential` (Linux), `xcode-select --install` (macOS)
-
-See [INSTALLATION.md](INSTALLATION.md) for what runs during install and how to
-troubleshoot it.
+This builds librats with CMake and then the addon with node-gyp, so it needs
+Node.js 20+, CMake 3.14+ and a C++17 compiler (Visual Studio Build Tools 2017+
+on Windows, `build-essential` on Linux, Xcode Command Line Tools on macOS).
+[INSTALLATION.md](INSTALLATION.md) describes the build steps.
 
 ## Quick start
 
@@ -48,161 +43,113 @@ const { RatsNode } = require('librats');
 
 const node = new RatsNode({ listenPort: 8080, dataDir: './state' });
 
-// Everything below happens before start().
-node.onPeerConnected((peerId) => {
-  console.log(`+ ${peerId}`);
-  node.send(peerId, 'chat', 'Hello from Node.js!');
-});
-node.on('chat', (peerId, data) => {
-  console.log(`[chat] ${peerId}: ${data.toString('utf8')}`);
-});
-node.enableDht();       // find peers on the mainline DHT
-node.enableMdns();      // …and on the local network
+node.onPeerConnected((peerId) => node.send(peerId, 'chat', 'hello'));
+node.on('chat', (peerId, data) => console.log(peerId, data.toString()));
+node.enableDht();    // find peers on the mainline DHT
+node.enableMdns();   // and on the local network
 
 node.start();
-console.log(node.localId, 'listening on', node.listenPort);
+console.log(node.localId, 'on port', node.listenPort);
 ```
 
-### Pub/sub
+`dataDir` keeps the identity (and the DHT routing table) across restarts;
+without it the node gets a new peer id every run. `protocol` (default
+`'librats/1.0'`) is bound into the handshake — nodes with different protocols
+cannot connect, and DHT discovery only finds nodes with the same one.
+
+## Sending
+
+`send(peerId, channel, data, lifetimeMs?)` queues a string or Buffer for one
+peer; `broadcast(channel, data, lifetimeMs?)` for all of them. Handlers get a
+`Buffer`.
+
+Sending returns as soon as the message is queued. A sender that outruns the
+link has the peer dropped with reason `'slow-consumer'`, so a bulk sender
+checks `peerWritable(peerId)` after each send and, once it is false, waits for
+`onPeerWritable`:
+
+```javascript
+function pump(peerId) {
+  while (chunks.length) {
+    node.send(peerId, 'bulk', chunks.shift());
+    if (!node.peerWritable(peerId)) return;   // resume from onPeerWritable
+  }
+}
+node.onPeerWritable(pump);
+```
+
+A non-zero `lifetimeMs` makes a **live** message: delivered within that many
+ms or dropped whole, never partly or twice, and not ordered with anything.
+That suits audio and video frames. The limits are `LIVE_MAX_LIFETIME_MS`
+(30 s) and `LIVE_MAX_PAYLOAD` (1 MiB). An encoder can size itself to the path
+with `pathStats(peerId)` (bandwidth estimate, round trip, loss, queued bytes,
+expired live messages) or with `onPeerPath`.
+
+## Subsystems
+
+| | enable before start | then |
+|---|---|---|
+| DHT discovery | `enableDht(port?, discoveryKey?)` | |
+| mDNS discovery | `enableMdns()` | |
+| Peer exchange | `enablePeerExchange()` | |
+| Port mapping | `enablePortMapping(upnp?, natpmp?)` | |
+| Hole punching | `enableHolePunch(serveRendezvous?)` | `punchPeer(id)`, `natMapping` |
+| Relaying | `enableRelay(serve?)` | `connectViaRelay(id)` |
+| Pub/sub | `enablePubsub()` | `subscribe`, `unsubscribe`, `publish` |
+| JSON messaging | `enableJson()` | `onJson`, `onceJson`, `offJson`, `sendJson`, `broadcastJson` |
+| File transfer | `enableFileTransfer(tempDir?)` | `onFileOffer`, `onFileProgress`, `onFileComplete`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`, `cancelFile`, `pauseFile`, `resumeFile` |
+| Ping | `enablePing()` | `peerRttMs(id)` |
+| Reconnection | `enableReconnect()` | `addReconnect(host, port)`, `removeReconnect(host, port)` |
+
+### Pub/sub and JSON
 
 ```javascript
 node.enablePubsub();
-node.subscribe('lobby', (peerId, topic, data) => {
-  console.log(`[${topic}] ${peerId}: ${data.toString('utf8')}`);
-});
+node.subscribe('lobby', (peerId, topic, data) => console.log(topic, data.toString()));
+
+node.enableJson();
+node.onJson('greeting', (peerId, value) => console.log(value.hello));
+
 node.start();
 node.publish('lobby', 'hi everyone');
-```
-
-### Typed JSON messaging
-
-Values are serialized and parsed for you — handlers receive the parsed value.
-
-```javascript
-node.enableJson();
-node.onJson('greeting', (peerId, value) => console.log(peerId, value.hello));
-node.start();
-node.broadcastJson('greeting', { hello: 'world' });
+node.broadcastJson('greeting', { hello: 'world' });   // any JSON-serializable value
 ```
 
 ### File transfer
 
-```javascript
-node.enableFileTransfer('./tmp');   // in-progress downloads live here
+The sender offers; the receiver accepts or rejects. `(peerId, transferId)`
+names a transfer on both sides.
 
+```javascript
+node.enableFileTransfer('./tmp');   // partial downloads live here
 node.onFileOffer((peerId, transferId, name, size, isDirectory) => {
   node.acceptFile(peerId, transferId, `./downloads/${name}`);
 });
-node.onFileProgress((transferId, peerId, done, total) => {
-  console.log(`${transferId}: ${done}/${total}`);
-});
-node.onFileComplete((transferId, success, path) => {
-  console.log(`${transferId} ${success ? 'done' : 'failed'} ${path}`);
-});
-
+node.onFileProgress((p) => console.log(p.transferId, p.status, p.bytesTransferred, '/', p.totalBytes));
+node.onFileComplete((peerId, transferId, success, path) => console.log(transferId, success, path));
 node.start();
-const transferId = node.sendFile(peerId, './myfile.txt');  // 0 on failure
+
+const transferId = node.sendFile(peerId, './file.bin');   // throws NO_SUCH_PEER / NOT_FOUND
 ```
 
 ### NAT traversal
 
-Port forwarding is the easy path; hole punching covers the networks where it
-fails. Both are opt-in, and punching needs peers that relay the rendezvous.
+Port mapping asks the router to forward the port. Where that fails, hole
+punching has a peer both sides share arrange for them to dial each other at
+the same moment; every node involved needs it enabled, and at least one must
+serve the rendezvous. A symmetric NAT (`natMapping === 'endpoint-dependent'`)
+cannot be punched; relaying routes the connection through a shared peer
+instead, still encrypted end to end, and `peerInfo(id).transport` reports
+`'relay'`. With both enabled, a punch that cannot work falls back to a relay,
+and a relayed peer is moved to a direct connection when a later punch succeeds.
 
 ```javascript
-node.enablePortMapping();     // UPnP IGD + NAT-PMP
-node.enableHolePunch(true);   // true = also relay other peers' rendezvous
-node.enableRelay(false);      // last resort; true = also carry others' connections
+node.enablePortMapping();
+node.enableHolePunch();        // also serves rendezvous for others (default)
+node.enableRelay();            // pass true to carry other peers' connections too
 node.start();
 
-node.punchPeer(peerId);       // success arrives as onPeerConnected
-console.log(node.natMapping); // NatMapping.ENDPOINT_INDEPENDENT ⇒ punchable
-```
-
-A symmetric NAT cannot be punched at all, and that is what `enableRelay` is for: the
-connection itself is routed through a node both ends already reach. It stays
-encrypted end to end — the relay moves ciphertext — and the peer behaves like any
-other, except that `peerTransport(peerId)` reports `Transport.RELAY`. With both
-enabled the ladder runs itself: a punch that cannot work falls back to a relay, and
-a relayed peer keeps trying to become a direct one.
-
-## API
-
-### Construction
-
-```javascript
-new RatsNode(port)     // listen on port (0 = ephemeral)
-new RatsNode(config)   // full config
-```
-
-| config field | default | meaning |
-|---|---|---|
-| `listenPort` | `0` | inbound port shared by both transports; 0 = ephemeral |
-| `enableListen` | `true` | `false` makes a dial-only node |
-| `bindAddress` | `"::"` | dual-stack wildcard by default |
-| `security` | `Security.NOISE` | or `Security.PLAINTEXT` |
-| `dataDir` | — | persistent identity + subsystem state; omit for an ephemeral identity |
-| `protocol` | `"librats/1.0"` | handshake app id; peers whose protocol differs cannot connect |
-| `maxPeers` | `0` | established-peer cap; 0 = unlimited |
-| `enableTcp` / `enableUdp` | `true` | which wires to accept and dial on |
-| `preferredTransport` | `Transport.UDP` | which one a dial tries first |
-| `transportFallbackMs` | `1200` | delay before racing the other; 0 disables |
-
-### Lifecycle
-
-`start()` · `stop()` · `destroy()`
-
-### Properties
-
-`listenPort` · `localId` · `protocol` · `transports` · `peerCount` · `peerIds` ·
-`maxPeers` *(settable)* · `natMapping`
-
-### Connections
-
-`connect(host, port)` · `peerTransport(peerId)` · `peerTransports(peerId)`
-
-### Raw channel messaging
-
-`send(peerId, channel, data, lifetimeMs?)` · `broadcast(channel, data, lifetimeMs?)` ·
-`on(channel, (peerId, data) => …)` — `data` is a `Buffer` in, `string | Buffer` out.
-A non-zero `lifetimeMs` (30000 at most) makes it a *live* message — delivered
-within that many ms or dropped whole, unordered, at most 1 MiB — for video and
-audio frames; the default 0 is reliable and ordered.
-
-### Peer events *(before start)*
-
-`onPeerConnected(cb)` · `onPeerDisconnected(cb)`
-
-### Subsystems *(enable before start)*
-
-| subsystem | enable | then |
-|---|---|---|
-| DHT discovery | `enableDht(dhtPort?, discoveryKey?)` | — |
-| mDNS discovery | `enableMdns()` | — |
-| NAT port mapping | `enablePortMapping(upnp?, natpmp?)` | — |
-| Hole punching | `enableHolePunch(serveAsRelay?)` | `punchPeer(peerId)`, `natMapping` |
-| Relaying | `enableRelay(serveAsRelay?)` | `connectViaRelay(peerId)` |
-| Pub/sub | `enablePubsub()` | `subscribe(topic, cb)`, `unsubscribe(topic)`, `publish(topic, data)` |
-| Typed JSON | `enableJson()` | `onJson(type, cb)`, `onceJson(type, cb)`, `offJson(type)`, `sendJson(peerId, type, value)`, `broadcastJson(type, value)` |
-| File transfer | `enableFileTransfer(tempDir?)` | `onFileOffer/onFileProgress/onFileComplete`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`, `cancelFile`, `pauseFile`, `resumeFile` |
-| Liveness | `enablePing()` | `peerRttMs(peerId)` — ms, or -1 if unknown |
-| Reconnection | `enableReconnect()` | `addReconnect(host, port)`, `removeReconnect(host, port)` |
-
-### Module level
-
-`version()` · `versionInfo()` · `gitDescribe()` · `abi()` ·
-`setLogLevel(level)` · `setLogFile(path?)` ·
-`Security` · `Transport` · `TransportMask` · `NatMapping` · `LogLevel`
-
-## TypeScript
-
-Definitions ship with the package.
-
-```typescript
-import { RatsNode, Security } from 'librats';
-
-const node = new RatsNode({ listenPort: 8080, security: Security.NOISE });
-node.start();
+node.punchPeer(peerId);        // false: declined (already connected, already trying, …)
 ```
 
 ## Examples
@@ -218,8 +165,7 @@ node examples/gossipsub_chat.js 8080 Alice lobby
 
 ```bash
 npm test
-npm run verify     # check a fresh install end-to-end
-LIBRATS_DEBUG=1 node examples/basic_client.js   # log which addon was loaded
+npm run verify     # load the addon and start a node
 ```
 
 ## License

@@ -1,171 +1,72 @@
-# librats Python Bindings — Technical Notes
+# librats Python bindings — maintainer notes
 
-Technical details of the Python bindings, which target the librats C ABI
-(`src/librats/bindings/rats.h`) via `ctypes`.
+How the package is put together, for whoever changes it. Usage is in
+[README.md](README.md).
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Python Application                       │
-├─────────────────────────────────────────────────────────────┤
-│                      librats_py package                      │
-│  core.py (RatsNode)   exceptions.py   enums.py             │
-│  callbacks.py (CFUNCTYPE prototypes + Pythonic aliases)      │
-│  ctypes_wrapper.py (CDLL + argtypes/restypes, RatsConfig)    │
-├─────────────────────────────────────────────────────────────┤
-│         librats shared library — C ABI: src/librats/bindings/rats.h  │
-│              (rats.dll / librats.so / librats.dylib)         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Module structure
+## Layout
 
 | File | Role |
 | --- | --- |
-| `core.py` | `RatsNode` — the high-level node wrapper, plus the process-global helpers (`version`, `set_log_level`, …) |
-| `ctypes_wrapper.py` | `CDLL` load, `RatsConfig` struct, all argtypes/restypes, `take_string` helper |
-| `callbacks.py` | Raw `CFUNCTYPE` prototypes mirroring `rats.h` + Pythonic type aliases |
-| `enums.py` | `RatsError`/`Security`/`Transport`/`TransportMask`/`NatMapping`/`LogLevel`/`FileTransferStatus`, `VersionInfo` |
-| `exceptions.py` | Exception hierarchy + `check_error` |
-| `examples/`, `tests/` | Demos and tests |
+| `ctypes_wrapper.py` | loads the library; ctypes mirrors of every `rats.h` struct; one `_SIGNATURES` table with the restype/argtypes of every function |
+| `callbacks.py` | `CFUNCTYPE` prototypes matching the C callback typedefs, and the Pythonic callback signatures |
+| `enums.py` | the C enums as `IntEnum`/`IntFlag`, the limits, and the value types (`PeerInfo`, `PathStats`, `FileProgress`, `VersionInfo`) |
+| `exceptions.py` | one `RatsError` subclass per `rats_error_t`; `check_error()` raises the right one |
+| `core.py` | `RatsNode` and the process-wide functions |
 
-## The C ABI contract that shapes the bindings
+## Rules the C ABI imposes
 
-* **Opaque handle.** `rats_t` is a `void*`; declared `c_void_p`. Constructed via
-  `rats_create_config(&cfg)` from a `rats_config_t` obtained from
-  `rats_config_default()` (see `RatsConfig` in `ctypes_wrapper.py`). The struct
-  must start from the defaults — zero-initialising it would yield a dial-only
-  node.
-* **Error model.** Fallible calls return `rats_error_t` (`RATS_OK == 0`). The
-  bindings route non-OK codes through `check_error`, which raises the matching
-  exception. This inverts the old "non-zero == success" convention.
-* **Heap vs static strings.** `rats_local_id`, `rats_protocol`
-  and each entry of `rats_peer_ids` are heap-allocated
-  and must be freed with `rats_string_free`. They are declared `c_void_p` (NOT
-  `c_char_p`, which auto-converts and would leak/lose the pointer) and read via
-  `take_string`, which copies the bytes then frees the original.
-  `rats_version_string`, `rats_git_describe`, `rats_error_str` return static
-  strings declared `c_char_p` — never freed.
-* **Peer id arrays.** `rats_peer_ids(node, &count)` returns `char**`; declared
-  `POINTER(c_void_p)`. Each element is copied out, then the whole array is freed
-  with `rats_free_peer_ids(arr, count)`.
+- **Structs must match byte for byte.** Field order and widths in
+  `ctypes_wrapper.py` follow `rats.h` exactly (`size_t` → `c_size_t`, enums →
+  `c_int`, `char[64]` → `c_char * 64`). `rats_config_t` and `rats_bt_config_t`
+  are zero-initialisable, which is why `RatsNode` builds a fresh `RatsConfig()`
+  and only sets what the caller passed; booleans that default to on are spelled
+  `disable_*` in C and inverted in `core.py`.
+- **Strings.** `rats_local_id`, `rats_protocol` and the static names are
+  library-owned `const char*`, declared `c_char_p` (ctypes copies them; nothing
+  is freed). `rats_peer_ids` / `rats_observed_addresses` return a caller-owned
+  `char**`, declared `POINTER(c_char_p)` and released with `rats_strings_free`
+  after copying.
+- **The handle is not checked by C.** Every method reaches it through
+  `RatsNode._h`, which raises once the node is destroyed instead of passing NULL
+  on.
+- **`rats_create` returns NULL for an impossible config** (no transport, a
+  preferred transport that is off, an out-of-range enum) or an identity it
+  cannot load; the constructor turns that into `RatsInvalidArgError`.
 
-## Callback bridging
+## Callbacks
 
-The raw `CFUNCTYPE` prototypes in `callbacks.py` mirror the C typedefs exactly.
-Each C callback takes `void* user` first. Payloads arrive as a `void*`
-(`c_void_p`) + `size_t` length pair; ids/topics/JSON arrive as `c_char_p`.
+Each user callback is wrapped by `_guard()` in `core.py`, which converts the C
+arguments (`c_char_p` → `str`, `void*` + length → `bytes`, struct pointers →
+dataclasses via `Structure.from_address`) and catches every exception, so
+nothing unwinds into C.
 
-`core.py` wraps each user callback in a *trampoline* that:
+Every `CFUNCTYPE` object is appended to `RatsNode._thunks` and kept until the
+node is gone. That includes handlers later replaced (`subscribe` again,
+`on_file_offer` again) or removed (`off_json`, `unsubscribe`): the C side may be
+calling one on a reactor thread at that moment, and a collected thunk is a
+crash, while a kept one costs a few hundred bytes.
 
-1. decodes `c_char_p` ids/topics to `str`,
-2. copies payload bytes via `string_at(ptr, length)` into a Python `bytes`,
-3. parses JSON for the typed-JSON path,
-4. **catches every exception** (`_report`) so nothing propagates into C.
+ctypes releases the GIL during a foreign call, so a reactor thread can enter a
+Python callback while the main thread is inside, say, `destroy()`, which joins
+those threads.
 
-```python
-def trampoline(user, peer_id_ptr, data_ptr, length):
-    try:
-        peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
-        data = string_at(data_ptr, length) if (data_ptr and length) else b""
-        callback(peer_id, data)
-    except Exception as exc:
-        _report(exc, "message callback")
-c_cb = MessageCallbackType(trampoline)
-self._c_callbacks["on:chat"] = c_cb   # keep the CFUNCTYPE object alive
-```
+## Adding a C function
 
-### Keeping callbacks alive
+1. Add its `(name, restype, argtypes)` to `_SIGNATURES` and any new struct to
+   `ctypes_wrapper.py`; a new callback typedef gets a prototype in
+   `callbacks.py`.
+2. Add the method to `RatsNode`, routing a `rats_error_t` through
+   `check_error()`, and a test under `librats_py/tests` (mark it `native`).
+3. Check the layout against the compiler when a struct changes: compile a small
+   C file printing `sizeof`/`offsetof` and compare with ctypes `sizeof` and
+   `Field.offset`.
 
-Every `CFUNCTYPE` object is stored in `RatsNode._c_callbacks` for the node's
-lifetime. If a wrapper were garbage-collected while C still held the pointer,
-the next invocation on the reactor thread would crash. JSON `on_json` handlers
-are additive, so each registration uses a unique key (`json:<type>:<id>`);
-`off_json(type)` drops all retained trampolines for that type.
-
-### Threading
-
-Callbacks run on the librats internal reactor thread. The GIL serialises Python
-execution, but user callbacks should not block — they stall the reactor.
-
-## Lifecycle ordering
-
-Register callbacks and call `enable_*` **before** `start()`:
-
-* `enable_*` after `start()` → `RATS_ERR_ALREADY_STARTED` → `RatsAlreadyStartedError`.
-* subsystem op before its `enable_*` → `RATS_ERR_NOT_ENABLED` → `RatsNotEnabledError`.
-
-The `max_peers` property and `add_reconnect` / `remove_reconnect` may be used
-before or after start.
-
-`destroy()` releases the handle early. Because the C ABI does not null-check its
-handle, every method reads it through the private `_h` property, which raises
-rather than handing NULL to C.
-
-## Error / exception mapping
-
-```
-RatsError (base, error_code = rats_error_t)
-├── RatsInvalidArgError       (INVALID_ARG)
-├── RatsNotStartedError       (NOT_STARTED)
-├── RatsAlreadyStartedError   (ALREADY_STARTED)
-├── RatsNotEnabledError       (NOT_ENABLED)
-├── RatsNoSuchPeerError       (NO_SUCH_PEER)
-├── RatsBindError             (BIND)
-└── RatsConnectionError       (connection helpers)
-```
-
-`send_file` / `send_directory` return a `uint64` transfer id (0 = failure);
-the wrappers raise `RatsError` on a 0 id rather than returning it.
-
-## Library loading
-
-`find_librats_library()` searches: alongside the package, `.`,
-`../../build/{lib,bin}`, `../build`, `../../build`, `../../../build`,
-`/usr/local/lib`, `/usr/lib`, then `LD_LIBRARY_PATH` / `PATH`, then the bare
-name via the OS loader. Names: `rats.dll`/`librats.dll`, `librats.dylib`,
-`librats.so`/`librats.so.1`.
-
-## Building the native library
-
-`build.py --build-native` runs CMake with `-DRATS_SHARED_LIBRARY=ON`
-(tests/examples off), then copies the shared library next to the package. CMake
-compiles the full `LIBRARY_SOURCES` set, including `src/librats/bindings/rats.cpp` (gated
-by `RATS_BINDINGS`, default ON), and links `ws2_32`/`iphlpapi`/`bcrypt` on
-Windows and `pthread` elsewhere — include paths `src/`, `src/librats/crypto/`, and the
-generated `version.h` directory.
-
-`build.py --compile-direct` prints a CMake-free recipe that mirrors
-`LIBRARY_SOURCES` for environments without CMake. The canonical source list
-lives in `CMakeLists.txt`; keep `build.py`'s `LIBRARY_SOURCES` in sync.
-
-## Tests
+## Testing against a local build
 
 ```bash
-python -m pytest librats_py/tests/test_client.py        # unit (skips if no lib)
-python -m pytest librats_py/tests/test_integration.py   # needs native library
+cmake -S .. -B ../build-shared -DRATS_SHARED_LIBRARY=ON -DRATS_STATIC_LIBRARY=OFF -DRATS_BUILD_TESTS=OFF
+cmake --build ../build-shared
+LIBRATS_LIBRARY_PATH=../build-shared/bin python -m pytest librats_py/tests
 ```
 
-## Adding a new C function
-
-1. Declare it in `ctypes_wrapper.py` (`argtypes` / `restype`, matching
-   `rats.h`; use `c_void_p` for heap strings, `c_char_p` for static ones).
-2. Add a method in `core.py`, routing the result through `check_error` for
-   `rats_error_t` returns and `take_string` for heap strings.
-3. For a new callback, add the `CFUNCTYPE` prototype + Pythonic alias in
-   `callbacks.py` and a trampoline that keeps the object alive in
-   `_c_callbacks`.
-
-## What the C ABI does not expose
-
-The C ABI is deliberately narrower than the C++ core: ICE/STUN/TURN, runtime
-encryption toggles and key introspection, configuration load/save, granular
-logging controls (colours, timestamps, rotation, retention), historical peers and
-statistics JSON have no C entry points, so they have no Python surface either.
-Their replacements are `enable_port_mapping` / `enable_hole_punch`, the
-`security` and `data_dir` constructor arguments, `enable_dht` / `enable_mdns`,
-`enable_reconnect`, and `set_log_level` / `set_log_file`.
-
-BitTorrent (`rats_enable_bittorrent`, `rats_bt_*`) exists in the C ABI but is not
-wrapped here; it is only functional in a build with `RATS_SEARCH_FEATURES`.
+With MinGW, put the runtime DLLs next to `librats.dll` first (see README).

@@ -15,27 +15,29 @@ const nodejsRoot = path.resolve(__dirname, '..');
 const buildDir = path.resolve(nodejsRoot, 'build-native');
 
 // Determine source location:
-// 1. When installed from npm: sources are in nodejs/native-src/
-// 2. When developing locally: sources are in project root (../../ from scripts)
+// 1. Inside the librats repository: the project root (../../ from scripts). It
+//    wins whenever it exists, because native-src/ is only a snapshot of it made
+//    by `npm run prepare` and goes stale as soon as the sources change.
+// 2. Installed from npm: the bundled snapshot in nodejs/native-src/.
 let projectRoot;
 let srcDir;
 let cmakeLists;
 
 const nativeSrcDir = path.resolve(nodejsRoot, 'native-src');
 const devProjectRoot = path.resolve(__dirname, '..', '..');
+const isRepoCheckout = fs.existsSync(path.join(devProjectRoot, 'CMakeLists.txt')) &&
+    fs.existsSync(path.join(devProjectRoot, 'src', 'librats', 'bindings', 'rats.h'));
 
-if (fs.existsSync(path.join(nativeSrcDir, 'CMakeLists.txt'))) {
-    // npm install scenario: use native-src directory
-    projectRoot = nativeSrcDir;
-    srcDir = path.resolve(nativeSrcDir, 'src');
-    cmakeLists = path.resolve(nativeSrcDir, 'CMakeLists.txt');
-    console.log('Using bundled source files from native-src/');
-} else if (fs.existsSync(path.join(devProjectRoot, 'CMakeLists.txt'))) {
-    // Development scenario: use parent directory
+if (isRepoCheckout) {
     projectRoot = devProjectRoot;
     srcDir = path.resolve(devProjectRoot, 'src');
     cmakeLists = path.resolve(devProjectRoot, 'CMakeLists.txt');
     console.log('Using source files from project root (development mode)');
+} else if (fs.existsSync(path.join(nativeSrcDir, 'CMakeLists.txt'))) {
+    projectRoot = nativeSrcDir;
+    srcDir = path.resolve(nativeSrcDir, 'src');
+    cmakeLists = path.resolve(nativeSrcDir, 'CMakeLists.txt');
+    console.log('Using bundled source files from native-src/');
 } else {
     console.error('ERROR: Cannot find librats source files.');
     console.error('');
@@ -145,20 +147,24 @@ try {
 
     // Add platform-specific CMake arguments
     if (isWindows) {
-        // Try to detect Visual Studio version
-        const vsVersions = ['2022', '2019', '2017'];
+        // MSVC is required: node-gyp links the addon with MSVC, which cannot
+        // consume a MinGW archive. vswhere ships with every Visual Studio and
+        // Build Tools install since 2017, wherever it was installed to.
+        const generators = { '2022': 'Visual Studio 17 2022', '2019': 'Visual Studio 16 2019', '2017': 'Visual Studio 15 2017' };
         let generator = null;
-        
-        for (const version of vsVersions) {
+        const vswhere = path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+                                  'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+        if (fs.existsSync(vswhere)) {
             try {
-                execSync(`where "C:\\Program Files\\Microsoft Visual Studio\\${version}"`, { stdio: 'ignore' });
-                generator = `Visual Studio ${version === '2022' ? '17' : version === '2019' ? '16' : '15'} ${version}`;
-                break;
+                const year = execSync(`"${vswhere}" -latest -products * ` +
+                    '-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ' +
+                    '-property catalog_productLineVersion', { encoding: 'utf8' }).trim();
+                generator = generators[year] || null;
             } catch (e) {
-                // Try next version
+                // fall through to CMake's own choice
             }
         }
-        
+
         if (generator) {
             cmakeArgs.push(`-G "${generator}"`);
             cmakeArgs.push('-A x64');
@@ -172,6 +178,14 @@ try {
     }
 
     // Calculate the relative path from build directory to source root
+    // Remove what an earlier build left, so the check after building can only
+    // find libraries this run produced.
+    for (const stale of [path.join(buildDir, 'lib', 'Debug', 'rats.lib'),
+                         path.join(buildDir, 'lib', 'Release', 'rats.lib'),
+                         path.join(buildDir, 'lib', 'librats.a')]) {
+        fs.rmSync(stale, { force: true });
+    }
+
     const relativePath = path.relative(buildDir, projectRoot);
     const cmakeConfigCmd = `cmake ${cmakeArgs.join(' ')} "${relativePath}"`;
     exec(cmakeConfigCmd);

@@ -1,17 +1,16 @@
 package com.librats;
 
 /**
- * Notified when a typed JSON message of a registered type arrives.
+ * Handed the JSON messages of one type.
  *
- * <p>Register with {@link RatsNode#onJson(String, JsonCallback)} /
- * {@link RatsNode#onceJson(String, JsonCallback)}. Fires on an internal reactor
- * thread.</p>
+ * <p>Register with {@link RatsNode#onJson(String, JsonCallback)} or
+ * {@link RatsNode#onceJson(String, JsonCallback)}. Runs on a reactor thread.</p>
  */
 @FunctionalInterface
 public interface JsonCallback {
     /**
-     * @param peerId 64-char lowercase hex of the sending peer's id
-     * @param json   compact JSON text; parse it with your JSON library of choice
+     * @param peerId the sender, as authenticated by the handshake
+     * @param json   compact JSON text
      */
     void onJsonMessage(String peerId, String json);
 }

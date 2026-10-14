@@ -8,14 +8,27 @@ answer to app backgrounding; see [Remaining work](#remaining-work).
 
 ## Why this is smaller than the Android binding
 
-Android needs JNI: 753 lines of C++ bridge plus 758 lines of Java, because every
-function and every callback has to be hand-marshalled across the JNI boundary.
+Android needs JNI: a C++ bridge plus a Java class of about the same size, because
+every function and every callback has to be hand-marshalled across the JNI
+boundary.
 
 Swift imports C headers directly. [`module.modulemap`](module.modulemap) declares
 one header — [`librats/bindings/rats.h`](../src/librats/bindings/rats.h), the same
-70-function C ABI every other binding is built on — and Swift can then call all of
-it with no bridge layer at all. `rats.h` is plain C (`stddef.h`, `stdint.h`, and
-the preprocessor-only `rats_export.h`), which is what makes that possible.
+C ABI every other binding is built on — and Swift can then call all of it with no
+bridge layer at all. `rats.h` is plain C (`stddef.h`, `stdint.h`, and the
+preprocessor-only `rats_export.h`), which is what makes that possible. It also
+imports cleanly: `rats_t` is an opaque struct pointer (`OpaquePointer` in Swift),
+and every zero in `rats_config_t` is a default, so `rats_config_t()` is a complete
+config:
+
+```swift
+let node = dataDir.withCString { dir -> rats_t? in
+    var config = rats_config_t()
+    config.dial_only = 1
+    config.data_dir  = dir        // rats_create copies it; it only has to live for the call
+    return rats_create(&config)   // nil for an impossible config
+}
+```
 
 So the Swift wrapper that still needs writing is for *ergonomics* — optionals,
 `Error`, `async`, ARC lifetime — not for mechanics. The Java class in

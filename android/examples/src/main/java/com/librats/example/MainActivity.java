@@ -1,7 +1,7 @@
 package com.librats.example;
 
-import android.Manifest;
-import android.content.pm.PackageManager;
+import android.content.Context;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
@@ -11,30 +11,31 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
+import com.librats.CloseReason;
 import com.librats.LogLevel;
+import com.librats.PeerInfo;
 import com.librats.RatsException;
 import com.librats.RatsNode;
 
 import java.nio.charset.StandardCharsets;
 
 /**
- * Minimal librats chat: start a node, dial a peer, broadcast on a channel.
+ * Minimal librats chat: start a node, dial a peer or find one over mDNS, and
+ * broadcast on a channel.
  *
- * <p>Note the ordering — every callback and every {@code enable*} happens while
- * the node is still stopped, and callbacks arrive on a reactor thread, so each
- * one hops to the UI thread before touching a view.</p>
+ * <p>Every callback and every {@code enable*} is set up while the node is still
+ * stopped, and since callbacks arrive on a reactor thread, each one hops to the UI
+ * thread before touching a view.</p>
  */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "LibRatsExample";
-    private static final int PERMISSION_REQUEST_CODE = 1;
 
     /** Application channel this demo uses for chat messages. */
     private static final String CHAT_CHANNEL = "chat";
 
     private RatsNode node;
+    private WifiManager.MulticastLock multicastLock;
     private TextView statusText;
     private TextView messagesText;
     private EditText hostInput;
@@ -50,7 +51,6 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         initViews();
-        checkPermissions();
         setupNode();
     }
 
@@ -75,22 +75,6 @@ public class MainActivity extends AppCompatActivity {
         updateUI();
     }
 
-    private void checkPermissions() {
-        String[] permissions = {
-            Manifest.permission.INTERNET,
-            Manifest.permission.ACCESS_NETWORK_STATE,
-            Manifest.permission.ACCESS_WIFI_STATE,
-            Manifest.permission.CHANGE_WIFI_MULTICAST_STATE
-        };
-
-        for (String permission : permissions) {
-            if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
-                return;
-            }
-        }
-    }
-
     private void setupNode() {
         try {
             RatsNode.setLogLevel(LogLevel.INFO);
@@ -102,21 +86,30 @@ public class MainActivity extends AppCompatActivity {
 
             // Everything below runs while the node is still stopped.
             node.onPeerConnected(peerId -> runOnUiThread(() -> {
-                appendMessage("+ peer " + peerId);
+                PeerInfo info = node.peerInfo(peerId);
+                appendMessage("+ peer " + shortId(peerId)
+                        + (info != null ? " over " + info.transport() : ""));
                 updateUI();
             }));
 
             node.onPeerDisconnected((peerId, reason) -> runOnUiThread(() -> {
-                appendMessage("- peer " + peerId + " (" + reason + ")");
+                appendMessage("- peer " + shortId(peerId) + " (" + reason + ")");
+                if (reason == CloseReason.SLOW_CONSUMER) {
+                    appendMessage("  we were sending faster than the link could carry");
+                }
                 updateUI();
             }));
 
+            node.onDialFailed(address -> runOnUiThread(() ->
+                    appendMessage("could not reach " + address)));
+
             node.on(CHAT_CHANNEL, (peerId, data) -> {
                 String message = new String(data, StandardCharsets.UTF_8);
-                runOnUiThread(() -> appendMessage(peerId.substring(0, 16) + "…: " + message));
+                runOnUiThread(() -> appendMessage(shortId(peerId) + ": " + message));
             });
 
-            node.enableMdns();   // find peers on the same Wi-Fi
+            node.enableMdns();          // find peers on the same Wi-Fi
+            node.enablePeerExchange();  // and the peers they know
 
             appendMessage("librats " + RatsNode.version() + " ready");
         } catch (RatsException e) {
@@ -128,14 +121,25 @@ public class MainActivity extends AppCompatActivity {
     private void onStartClicked(View view) {
         if (node == null) return;
         try {
+            acquireMulticastLock();
             node.start();
-            appendMessage("started on port " + node.listenPort() + " (" + node.transports() + ")");
+            appendMessage("started on port " + node.listenPort() + " " + node.transports());
             appendMessage("our peer id: " + node.localId());
             updateUI();
         } catch (RatsException e) {
             Log.e(TAG, "Error starting the node", e);
             appendMessage("error: " + e.getMessage());
         }
+    }
+
+    /** Most devices drop multicast, and with it mDNS, unless a MulticastLock is held. */
+    private void acquireMulticastLock() {
+        if (multicastLock != null) return;
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi == null) return;
+        multicastLock = wifi.createMulticastLock("librats-mdns");
+        multicastLock.setReferenceCounted(false);
+        multicastLock.acquire();
     }
 
     private void onConnectClicked(View view) {
@@ -178,11 +182,16 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private static String shortId(String peerId) {
+        return peerId.length() > 12 ? peerId.substring(0, 12) + "…" : peerId;
+    }
+
     private void appendMessage(String message) {
         Log.d(TAG, message);
         messagesText.append(message + "\n");
 
         messagesText.post(() -> {
+            if (messagesText.getLayout() == null) return;
             int scrollAmount = messagesText.getLayout().getLineTop(messagesText.getLineCount())
                               - messagesText.getHeight();
             messagesText.scrollTo(0, Math.max(scrollAmount, 0));
@@ -198,37 +207,23 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        try {
-            long peerCount = node.peerCount();
-            statusText.setText("Status: " + peerCount + " peers connected");
-            startButton.setEnabled(true);
-            connectButton.setEnabled(true);
-            sendButton.setEnabled(peerCount > 0);
-        } catch (RatsException e) {
-            statusText.setText("Status: error");
-            Log.e(TAG, "Error updating the UI", e);
-        }
+        int peerCount = node.peerCount();
+        statusText.setText("Status: " + peerCount + " peers connected");
+        startButton.setEnabled(true);
+        connectButton.setEnabled(true);
+        sendButton.setEnabled(peerCount > 0);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         if (node != null) {
-            node.close();   // stops the node and releases the native resources
+            node.close();   // stops the node and frees it
             node = null;
         }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != PERMISSION_REQUEST_CODE) return;
-        for (int result : grantResults) {
-            if (result != PackageManager.PERMISSION_GRANTED) {
-                Toast.makeText(this, "Network permissions are required for librats",
-                        Toast.LENGTH_LONG).show();
-                return;
-            }
+        if (multicastLock != null) {
+            multicastLock.release();
+            multicastLock = null;
         }
     }
 }

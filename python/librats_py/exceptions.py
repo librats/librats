@@ -1,109 +1,85 @@
 """
-Exception classes for librats Python bindings.
+Exceptions of the librats Python bindings, one per ``rats_error_t`` code.
 
-Exceptions are keyed off the C ABI ``rats_error_t`` codes (see :class:`RatsError`
-in ``enums.py``). Use :func:`check_error` to turn a returned code into an
-exception.
+:func:`check_error` turns a returned code into the matching exception.
 """
 
 from .enums import RatsError as ErrorCode
 
 
 class RatsError(Exception):
-    """Base exception for librats errors.
+    """Base of every librats exception; ``error_code`` is the ``rats_error_t``."""
 
-    ``error_code`` is the originating :class:`~librats_py.enums.RatsError`
-    (``rats_error_t``) value when the error came from the C library.
-    """
+    code = ErrorCode.INTERNAL   # what a subclass raised without an explicit code carries
 
-    def __init__(self, message: str, error_code: ErrorCode = ErrorCode.INTERNAL):
+    def __init__(self, message: str, error_code: ErrorCode = None):
         super().__init__(message)
-        self.error_code = error_code
+        self.error_code = self.code if error_code is None else error_code
         self.message = message
 
     def __str__(self):
-        return f"{self.message} (error code: {self.error_code.name})"
+        return f"{self.message} ({self.error_code.name})"
 
 
 class RatsInvalidArgError(RatsError):
-    """RATS_ERR_INVALID_ARG — null/malformed argument."""
-
-    def __init__(self, message: str = "Invalid argument"):
-        super().__init__(message, ErrorCode.INVALID_ARG)
+    """A NULL or malformed argument: bad peer id, bad JSON, impossible config."""
+    code = ErrorCode.INVALID_ARG
 
 
 class RatsNotStartedError(RatsError):
-    """RATS_ERR_NOT_STARTED — operation requires a started node."""
-
-    def __init__(self, message: str = "Node is not started"):
-        super().__init__(message, ErrorCode.NOT_STARTED)
+    """The call needs a started node."""
+    code = ErrorCode.NOT_STARTED
 
 
 class RatsAlreadyStartedError(RatsError):
-    """RATS_ERR_ALREADY_STARTED — enable/attach called after start()."""
-
-    def __init__(self, message: str = "Node is already started"):
-        super().__init__(message, ErrorCode.ALREADY_STARTED)
+    """The call is only allowed before start()."""
+    code = ErrorCode.ALREADY_STARTED
 
 
 class RatsNotEnabledError(RatsError):
-    """RATS_ERR_NOT_ENABLED — subsystem not enabled."""
-
-    def __init__(self, message: str = "Subsystem is not enabled"):
-        super().__init__(message, ErrorCode.NOT_ENABLED)
+    """The subsystem was not enabled with its enable_*()."""
+    code = ErrorCode.NOT_ENABLED
 
 
 class RatsNoSuchPeerError(RatsError):
-    """RATS_ERR_NO_SUCH_PEER — peer not connected or transfer id not found."""
+    """The peer is not connected."""
+    code = ErrorCode.NO_SUCH_PEER
 
-    def __init__(self, message: str = "No such peer or transfer"):
-        super().__init__(message, ErrorCode.NO_SUCH_PEER)
+
+class RatsNotFoundError(RatsError):
+    """No such transfer."""
+    code = ErrorCode.NOT_FOUND
+
+
+class RatsDeclinedError(RatsError):
+    """Nothing to do or nothing to try with: the peer is already connected, an
+    attempt is running or cooling down, or no peer can help."""
+    code = ErrorCode.DECLINED
 
 
 class RatsBindError(RatsError):
-    """RATS_ERR_BIND — listen/bind failed during start()."""
-
-    def __init__(self, message: str = "Failed to bind listen socket"):
-        super().__init__(message, ErrorCode.BIND)
+    """start() could not open its sockets (the listen port is taken)."""
+    code = ErrorCode.BIND
 
 
-class RatsConnectionError(RatsError):
-    """Raised when a connection attempt fails."""
-
-    def __init__(self, message: str = "Connection failed",
-                 error_code: ErrorCode = ErrorCode.INTERNAL):
-        super().__init__(message, error_code)
-
-
-# Map error codes to their dedicated exception type.
 _ERROR_MAP = {
     ErrorCode.INVALID_ARG: RatsInvalidArgError,
     ErrorCode.NOT_STARTED: RatsNotStartedError,
     ErrorCode.ALREADY_STARTED: RatsAlreadyStartedError,
     ErrorCode.NOT_ENABLED: RatsNotEnabledError,
     ErrorCode.NO_SUCH_PEER: RatsNoSuchPeerError,
+    ErrorCode.NOT_FOUND: RatsNotFoundError,
+    ErrorCode.DECLINED: RatsDeclinedError,
     ErrorCode.BIND: RatsBindError,
 }
 
 
-def check_error(error_code: int, operation: str = "Operation") -> None:
-    """Raise the appropriate exception for a non-OK ``rats_error_t`` value.
-
-    Args:
-        error_code: The integer ``rats_error_t`` returned by a C function.
-        operation: Human-readable description used in the exception message.
-    """
+def check_error(error_code: int, operation: str) -> None:
+    """Raise the exception matching a non-OK ``rats_error_t``."""
     if error_code == ErrorCode.OK:
         return
-
     try:
-        error_enum = ErrorCode(error_code)
+        code = ErrorCode(error_code)
     except ValueError:
-        raise RatsError(f"{operation} failed (unknown error {error_code})",
-                        ErrorCode.INTERNAL)
-
-    message = f"{operation} failed"
-    exc_type = _ERROR_MAP.get(error_enum)
-    if exc_type is not None:
-        raise exc_type(message)
-    raise RatsError(message, error_enum)
+        raise RatsError(f"{operation} failed (unknown error {error_code})")
+    raise _ERROR_MAP.get(code, RatsError)(f"{operation} failed", code)

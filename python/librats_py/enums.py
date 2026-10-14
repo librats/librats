@@ -1,80 +1,95 @@
 """
-Enumerations and constants for librats Python bindings.
+Enumerations, constants and value types of the librats Python bindings.
 
-These mirror the enums declared in the C ABI (``src/librats/bindings/rats.h``).
+The enums mirror the C ABI (``src/librats/bindings/rats.h``) value for value.
 """
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 
 
 class RatsError(IntEnum):
-    """``rats_error_t`` result codes returned by fallible C functions.
-
-    ``OK`` is 0; any non-zero value is an error.
-    """
+    """``rats_error_t``. ``OK`` is 0; anything else is an error."""
     OK = 0
-    INVALID_ARG = 1     # null/malformed argument (bad peer id, null ptr, bad json)
-    NOT_STARTED = 2     # operation requires a started node
-    ALREADY_STARTED = 3  # enable/attach called after start()
-    NOT_ENABLED = 4     # subsystem not enabled — call the matching enable_*()
-    NO_SUCH_PEER = 5    # peer not connected, or transfer id not found
-    BIND = 6            # listen/bind failed during start()
-    INTERNAL = 7
+    INVALID_ARG = 1      # NULL or malformed argument (bad peer id, bad JSON, …)
+    NOT_STARTED = 2      # the call needs a started node
+    ALREADY_STARTED = 3  # only allowed before start()
+    NOT_ENABLED = 4      # the subsystem was not enabled
+    NO_SUCH_PEER = 5     # the peer is not connected
+    NOT_FOUND = 6        # no such transfer
+    DECLINED = 7         # nothing to do or nothing to try with
+    BIND = 8             # start() could not open its sockets
+    INTERNAL = 9
 
 
 class Security(IntEnum):
-    """``rats_security_t`` — transport security mode."""
-    NOISE = 0      # Noise XX, encrypted + authenticated (default)
-    PLAINTEXT = 1  # unencrypted, ids exchanged in the clear
+    """``rats_security_t``."""
+    NOISE = 0      # Noise XX: encrypted and authenticated (default)
+    PLAINTEXT = 1  # no encryption; ids exchanged in the clear
 
 
 class Transport(IntEnum):
     """``rats_transport_t`` — which wire a peer connection runs on.
 
-    TCP and UDP carry the identical protocol and the identical encrypted
-    handshake; they differ only in how the ordered, reliable byte stream
-    underneath is obtained. RELAY is that same stream one hop further away,
-    carried inside another peer's connection; it is never dialed, so it has no
-    bit in :class:`TransportMask`.
+    UDP and TCP carry the same protocol under the same encrypted handshake.
+    RELAY is only ever reported (see :meth:`RatsNode.peer_info`), never chosen:
+    a relay is not something a dial can try.
     """
-    TCP = 0    # one kernel socket per peer
-    UDP = 1    # reliable stream over the shared UDP socket
-    RELAY = 2  # carried through a third node (see enable_relay)
+    UDP = 0    # the library's own transport on one shared UDP socket
+    TCP = 1    # one kernel socket per peer
+    RELAY = 2  # carried through another peer's connection
 
 
-class Congestion(IntEnum):
-    """``rats_congestion_t`` — congestion controller of every UDP stream.
-
-    BBR holds its rate on links that lose packets for reasons other than
-    congestion (Wi-Fi, mobile, long hops) and keeps the queue it builds at the
-    bottleneck short; Reno backs off on every loss. TCP ignores this.
-    """
-    BBR = 0   # BBRv3 (default)
-    RENO = 1  # NewReno with HyStart++
-
-
-class TransportMask(IntEnum):
-    """Bitmask flags used by :attr:`RatsNode.transports` and friends."""
+class TransportMask(IntFlag):
+    """Bitmask of transports (``RATS_TRANSPORT_MASK_*``)."""
+    NONE = 0
     TCP = 0x1
     UDP = 0x2
 
 
-class NatMapping(IntEnum):
-    """``RATS_NAT_*`` — what the mesh has shown about this node's own NAT.
+class Congestion(IntEnum):
+    """``rats_congestion_t`` — congestion controller of every UDP connection.
 
-    Derived from the endpoints datagram peers report observing this node's
-    shared UDP socket at: two peers agreeing means one external port for every
-    peer (punchable), two disagreeing means a fresh mapping per peer.
+    TCP is the kernel's and ignores it.
     """
+    BBR = 0   # BBRv3 (default): holds its rate through loss that is not congestion
+    RENO = 1  # NewReno with HyStart++: backs off on every loss
+
+
+class Direction(IntEnum):
+    """``rats_direction_t`` — who opened a connection (or who sends a file)."""
+    OUTBOUND = 0  # we dialed it / we send
+    INBOUND = 1   # it dialed us / we receive
+
+
+class CloseReason(IntEnum):
+    """``rats_close_reason_t`` — why a peer connection ended."""
+    LOCAL = 0              # we disconnected it
+    PEER_CLOSED = 1        # the peer closed cleanly
+    PEER_RESET = 2         # connection reset / socket error
+    CONNECT_FAILED = 3     # the dial never completed
+    HANDSHAKE_FAILED = 4   # secure handshake failed or timed out
+    PROTOCOL_ERROR = 5     # malformed frame or decryption failure
+    # We kept sending while the peer's queue was already past its limit — the one
+    # reason the application causes and can prevent (see RatsNode.peer_writable).
+    SLOW_CONSUMER = 6
+    SHUTDOWN = 7           # the node is stopping
+    DUPLICATE = 8          # replaced by another connection to the same peer
+    PEER_LIMIT = 9         # inbound refused: max_peers reached
+    IDLE_TIMEOUT = 10      # a UDP connection went silent
+    DIAL_SUPERSEDED = 11   # a dial racing over the other transport won
+
+
+class NatMapping(IntEnum):
+    """``rats_nat_mapping_t`` — what the mesh has shown about this node's NAT."""
     UNKNOWN = 0               # not enough independent observations yet
     OPEN = 1                  # no NAT in the path
-    ENDPOINT_INDEPENDENT = 2  # one external port for every peer — punchable
-    ENDPOINT_DEPENDENT = 3    # a fresh mapping per peer (symmetric) — not punchable
+    ENDPOINT_INDEPENDENT = 2  # one external port for every peer: punchable
+    ENDPOINT_DEPENDENT = 3    # a new mapping per peer (symmetric): not punchable
 
 
 class LogLevel(IntEnum):
-    """``rats_log_level_t`` — process-global logging verbosity."""
+    """``rats_log_level_t``."""
     DEBUG = 0
     INFO = 1
     WARN = 2
@@ -82,11 +97,8 @@ class LogLevel(IntEnum):
 
 
 class FileTransferStatus(IntEnum):
-    """File-transfer status reported by the progress callback.
-
-    Mirrors ``FileTransfer::Status`` in the C++ core.
-    """
-    PENDING = 0
+    """``rats_file_status_t``."""
+    PENDING = 0    # offered, not answered yet
     ACTIVE = 1
     PAUSED = 2
     COMPLETED = 3
@@ -94,44 +106,76 @@ class FileTransferStatus(IntEnum):
     CANCELLED = 5
 
 
+class BtEncryption(IntEnum):
+    """``rats_bt_encryption_t`` — BitTorrent MSE/PE policy."""
+    ENABLED = 0   # obfuscate first, fall back to plaintext (default)
+    FORCED = 1    # obfuscated connections only
+    DISABLED = 2  # plaintext only
+
+
+# ``transport_fallback_ms`` value that never races the second transport.
+FALLBACK_NEVER = 0xFFFFFFFF
+# Limits of a live message (``lifetime_ms`` > 0). A longer lifetime is cut to
+# the maximum; a larger payload is refused.
+LIVE_MAX_LIFETIME_MS = 30000
+LIVE_MAX_PAYLOAD = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class PeerInfo:
+    """What the node knows about one connected peer (``rats_peer_info_t``)."""
+    transport: Transport          # the wire this connection runs on
+    transports: TransportMask     # what the peer says it accepts; NONE = it did not say
+    direction: Direction
+    address: str                  # where it can be dialed, "ip:port"; "" until known
+
+
 @dataclass(frozen=True)
 class PathStats:
     """What the transport knows about the path to one peer (``rats_path_stats_t``).
 
-    For a sender that sizes its own output to the path — a live encoder — rather
-    than letting the queue find the limit. Rates are bits per second. Anything
-    past ``bandwidth_bps`` waits in ``queued_bytes``; divided by
-    ``bandwidth_bps`` that is the wait in seconds.
+    For a sender that sizes its output to the path, such as a live encoder.
+    Rates are bits per second. A new message waits behind ``queued_bytes``;
+    ``queued_bytes * 8 / bandwidth_bps`` is that wait in seconds. Over TCP the
+    path figures are the kernel's and exist on Linux only; elsewhere, and over a
+    relay, only ``queued_bytes`` and the live counters are filled.
     """
-    bandwidth_bps: int     # the congestion controller's estimate; 0 = none yet
-    app_limited: bool      # the sender was not filling the path: the estimate is a floor
-    pacing_bps: int        # current release rate; 0 = unpaced
-    srtt_us: int           # smoothed round trip
-    min_rtt_us: int        # lowest round trip seen: the path without queues
-    queued_bytes: int      # accepted for the peer, not yet sent
-    bytes_in_flight: int   # sent, not yet acknowledged
-    loss: float            # share of bytes lost over the last sample interval, 0..1
-    bytes_delivered: int   # acknowledged since the connection opened
-    bytes_lost: int        # declared lost since the connection opened
-    live_sent: int = 0     # live messages (lifetime_ms > 0) sent since it opened
-    live_expired: int = 0  # of those, dropped because their lifetime ran out
-    live_repair_bytes: int = 0  # repair symbols (FEC) sent with them on a lossy path
+    bandwidth_bps: int      # the congestion controller's estimate; 0 = none yet
+    app_limited: bool       # the sender was not filling the path: the estimate is a floor
+    pacing_bps: int         # current release rate; 0 = unpaced
+    srtt_us: int            # smoothed round trip
+    min_rtt_us: int         # lowest round trip seen: the path without queues
+    queued_bytes: int       # accepted for the peer, not yet sent
+    bytes_in_flight: int    # sent, not yet acknowledged
+    loss: float             # share of bytes lost over the last interval, 0..1
+    bytes_delivered: int    # acknowledged since the connection opened
+    bytes_lost: int         # declared lost since the connection opened
+    live_sent: int          # live messages sent since the connection opened
+    live_expired: int       # of those, dropped because their lifetime ran out
+    live_repair_bytes: int  # forward-error-correction bytes sent with live messages
 
 
+@dataclass(frozen=True)
+class FileProgress:
+    """One progress report of a file transfer (``rats_file_progress_t``)."""
+    transfer_id: int
+    peer_id: str
+    direction: Direction        # OUTBOUND = we send, INBOUND = we receive
+    status: FileTransferStatus
+    bytes_transferred: int
+    total_bytes: int
+    files_completed: int
+    total_files: int
+    rate_bytes_per_sec: float   # recent, smoothed
+
+
+@dataclass(frozen=True)
 class VersionInfo:
-    """Library version information container."""
-
-    def __init__(self, major: int, minor: int, patch: int, build: int):
-        self.major = major
-        self.minor = minor
-        self.patch = patch
-        self.build = build
+    """Library version components."""
+    major: int
+    minor: int
+    patch: int
+    build: int
 
     def __str__(self) -> str:
         return f"{self.major}.{self.minor}.{self.patch}.{self.build}"
-
-    def __repr__(self) -> str:
-        return (
-            f"VersionInfo(major={self.major}, minor={self.minor}, "
-            f"patch={self.patch}, build={self.build})"
-        )

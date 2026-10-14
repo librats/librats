@@ -1,250 +1,251 @@
 # librats — Python bindings
 
-Python bindings for [librats](../README.md), a C++17 peer-to-peer networking
-library. They drive the C ABI (`src/librats/bindings/rats.h`) through `ctypes`
-and expose a high-level `RatsNode`.
+Python bindings for [librats](../README.md). They call the library's C ABI
+(`src/librats/bindings/rats.h`) through `ctypes`, so there is nothing to compile
+on the Python side — only the librats shared library itself.
 
 ## The model
 
-A `RatsNode` is one librats node. On its own it gives you secure transport
-(Noise XX over TCP **or** the library's reliable stream over UDP, both on the
-same port), a self-certifying peer id, manual dialing, and raw messaging on named
-channels — nothing else. Discovery (DHT/mDNS), pub/sub, typed JSON messaging,
-file transfer, NAT port mapping, hole punching, RTT probing and reconnection are
-**opt-in subsystems**: you pay only for what you turn on.
+A `RatsNode` is one librats node. On its own it gives you an encrypted
+connection to any peer you dial (Noise XX, over UDP or TCP on the same port), a
+peer id derived from the node's key, and raw messages on named channels.
+Discovery, NAT traversal, pub/sub, JSON messages, file transfer, ping and
+reconnection are subsystems you switch on one by one.
 
-Two rules follow from that:
+Three rules follow:
 
 - **Enable subsystems and register callbacks before `start()`.** Enabling after
-  start raises `RatsAlreadyStartedError`; using a subsystem before its enable
-  raises `RatsNotEnabledError`.
-- **Callbacks fire on an internal reactor thread.** Keep them short and
-  non-blocking. An exception raised inside one is logged, never propagated into C.
-
-Fallible calls raise a `RatsError` subclass; pure getters are properties. Peer
-ids are 64-character lowercase hex strings.
+  start raises `RatsAlreadyStartedError`; registering a peer or channel callback
+  after start does too. Using a subsystem you did not enable raises
+  `RatsNotEnabledError`.
+- **Callbacks run on a librats thread.** Keep them short. An exception raised in
+  one is printed to stderr; it never reaches the library.
+- **Errors are exceptions.** Each `rats_error_t` code has its own `RatsError`
+  subclass (table below). Peer ids are 64-character lowercase hex strings.
 
 ## Installing
 
-Python 3.7+. The bindings need the librats **shared** library.
+Python 3.8 or newer, and the librats **shared** library:
 
 ```bash
 cd python
-pip install -e .                  # development install
-python build.py --build-native    # CMake -DRATS_SHARED_LIBRARY=ON, copied next to the package
+python build.py --build-native    # CMake, -DRATS_SHARED_LIBRARY=ON, into build/python,
+                                  # then copies the library next to the package
+pip install -e .
 ```
 
-The loader looks next to the package, in `../build` (`build/lib`, `build/bin`),
-the system library paths, and `LD_LIBRARY_PATH` / `PATH`. Names are
-`rats.dll`/`librats.dll` (Windows), `librats.dylib` (macOS), `librats.so` (Linux).
+The loader tries, in order: the directories in `LIBRATS_LIBRARY_PATH`, the
+package directory, `build/lib`, `build/bin` and `build/` of the repository, and
+finally the system loader by bare name. The file is `rats.dll` or `librats.dll`
+on Windows, `librats.dylib` on macOS, `librats.so` elsewhere. A MinGW build of
+the DLL also needs `libstdc++-6.dll`, `libgcc_s_seh-1.dll` and
+`libwinpthread-1.dll` beside it: Python does not search `PATH` for a DLL's
+dependencies.
 
 ## Quick start
 
 ```python
 from librats_py import RatsNode
 
-with RatsNode(8080, data_dir="./state") as node:
-    # Everything below happens before start().
+with RatsNode(8080, protocol="myapp/1.0", data_dir="./state") as node:
     node.on_peer_connected(lambda peer: print("+", peer))
-    node.on("chat", lambda peer, data: print(peer, data.decode()))
-    node.enable_dht()          # find peers on the mainline DHT
-    node.enable_mdns()         # …and on the local network
+    node.on_peer_disconnected(lambda peer, why: print("-", peer, why.name))
+    node.on("chat", lambda peer, data: print(peer[:8], data.decode()))
+    node.enable_mdns()                       # find peers on the local network
 
     node.start()
-    print("local id:", node.local_id, "port:", node.listen_port)
-
-    node.connect("192.168.1.100", 8081)
-    node.broadcast("chat", b"Hello, P2P world!")
-    input("Press Enter to exit...")
+    print("id", node.local_id, "port", node.listen_port)
+    node.connect("192.168.1.100", 8081)      # or wait for discovery
+    node.broadcast("chat", b"hello")
+    input("Enter to quit\n")
 ```
 
-### Configured node
+`with` destroys the node on exit. Without it, call `destroy()` (or let the
+garbage collector do it).
+
+## Configuration
+
+Every keyword of `RatsNode(...)` maps to a field of `rats_config_t`; leave one
+out and the library default applies.
+
+| Keyword | Default | Meaning |
+| --- | --- | --- |
+| `listen_port` | 0 | port both transports listen on; 0 picks a free one |
+| `protocol` | `"librats/1.0"` | app id bound into the handshake; peers with a different one cannot connect |
+| `data_dir` | none | keeps the identity (and DHT table, reconnect list) across runs; without it the id is new every run |
+| `security` | `Security.NOISE` | `Security.PLAINTEXT` turns encryption off |
+| `bind_address` | `"::"` | interface to listen on (dual-stack by default) |
+| `dial_only` | `False` | no listener at all |
+| `max_peers` | 0 | cap on established peers, enforced on inbound; 0 = none. Also a settable property |
+| `transports` | both | `TransportMask.TCP`, `TransportMask.UDP`, or both |
+| `preferred_transport` | `Transport.UDP` | which one a dial tries first |
+| `transport_fallback_ms` | 1200 | how long the first transport dials alone before the other joins; `FALLBACK_NEVER` disables it |
+| `send_queue_limit` | 8 MiB | bytes a peer's queue may hold before a sender that keeps going loses the peer (see Backpressure) |
+| `path_sample_ms` | off | how often `path_stats()` is refreshed; an `on_peer_path` callback turns it on at 100 ms |
+| `congestion_control` | `Congestion.BBR` | `Congestion.RENO` for a loss-based controller (UDP only) |
+| `udp_receive_window` | 16 MiB | ceiling of one UDP connection's flow-control window |
+| `udp_receive_budget` | 64 MiB | out-of-order bytes all UDP connections together may hold |
+| `udp_offload` | `True` | kernel UDP segmentation offload where available |
+| `reactor_threads` | 1 | I/O threads |
+| `network_monitor` | `True` | watch the host for interface and address changes |
+
+An impossible combination — no transport, or a preferred transport you turned
+off — raises `RatsInvalidArgError` from the constructor.
+
+## Messages
 
 ```python
-from librats_py import RatsNode, Security, Transport
-
-node = RatsNode(
-    listen_port=8080,
-    security=Security.NOISE,        # or Security.PLAINTEXT
-    data_dir="./state",             # persistent identity + subsystem state
-    protocol="myapp/1.0",           # handshake app id; peers must match
-    max_peers=50,
-    preferred_transport=Transport.UDP,
-    transport_fallback_ms=1200,     # 0 disables the TCP fallback race
-)
+node.send(peer_id, "chat", b"hi")              # one peer
+node.broadcast("chat", b"hi everyone")         # every connected peer
+node.send(peer_id, "video", frame, lifetime_ms=150)
 ```
 
-### Pub/sub (GossipSub)
+A send returns once the message is queued; it does not wait for delivery.
+Without `lifetime_ms` a message is reliable and arrives in order with
+everything else the node sends on its channels. With `lifetime_ms` it is a
+**live** message: it is worth delivering only within that many milliseconds, is
+repaired while it can still make it, and is dropped whole once it cannot. Live
+messages are never delivered partly or twice and are not ordered, so number them
+if order matters. They are meant for audio and video frames; the limits are
+`LIVE_MAX_LIFETIME_MS` (30 s) and `LIVE_MAX_PAYLOAD` (1 MiB). The receiving
+`on()` handler is the same for both kinds.
+
+### Backpressure
+
+`send()` accepts a message of any size, but a peer whose queue is already past
+`send_queue_limit` when you send more is dropped with
+`CloseReason.SLOW_CONSUMER`. To avoid that when sending in bulk:
 
 ```python
-with RatsNode(8080) as node:
-    node.enable_pubsub()
-    node.subscribe("room", lambda peer, topic, data: print(topic, data))
-    node.start()
-    node.publish("room", b"Hello everyone!")
+node.send(peer_id, "bulk", chunk)
+if not node.peer_writable(peer_id):
+    # stop here; resume when on_peer_writable(peer_id) fires
+    ...
 ```
 
-### Typed JSON messaging
+### Path statistics
 
-Payloads are JSON-encoded on the way out and parsed on the way in.
+For a sender that sizes its output to the link (a live encoder),
+`path_stats(peer_id)` returns a `PathStats`: the congestion controller's
+`bandwidth_bps`, `srtt_us`, `queued_bytes`, `loss`, and counts of live messages
+sent and expired. Over TCP most figures come from the kernel and exist only on
+Linux. `on_peer_path(cb)` delivers the same samples periodically.
+
+## Peers
 
 ```python
-with RatsNode(8080) as node:
-    node.enable_json()
-    node.on_json("greeting", lambda peer, payload: print(peer, payload["hi"]))
-    node.start()
-    node.broadcast_json("greeting", {"hi": "there"})
+node.peer_count, node.peer_ids
+info = node.peer_info(peer_id)      # None if not connected
+info.transport                      # Transport.UDP / TCP / RELAY
+info.direction                      # Direction.OUTBOUND / INBOUND
+info.address                        # "203.0.113.5:8080", "" until known
+info.transports                     # what the peer says it accepts
+node.disconnect(peer_id)
+node.on_dial_failed(lambda address: print("unreachable", address))
 ```
 
-### File transfer (push model)
+`on_peer_disconnected` passes a `CloseReason`. A peer that left can be redialed;
+`SLOW_CONSUMER` means this node sent faster than the link drained, and redialing
+only repeats that.
 
-```python
-with RatsNode(8080) as node:
-    node.enable_file_transfer(temp_dir="./tmp")   # in-progress downloads live here
+## Subsystems
 
-    node.on_file_offer(lambda peer, tid, name, size, is_dir:
-                       node.accept_file(peer, tid, f"./downloads/{name}"))
-    node.on_file_progress(lambda tid, peer, done, total, status:
-                          print(tid, done, total, status))
-    node.on_file_complete(lambda tid, ok, path: print(tid, ok, path))
-    node.start()
-
-    transfer_id = node.send_file(peer_id, "/path/to/file.txt")   # 0 on failure
-    # transfer_id = node.send_directory(peer_id, "/path/to/dir")
-```
-
-### NAT traversal
-
-Port forwarding is the easy path; hole punching covers the networks where it
-fails. Punching needs peers that relay the rendezvous — a mesh in which nobody
-relays cannot punch at all.
-
-```python
-from librats_py import NatMapping
-
-with RatsNode(8080) as node:
-    node.enable_port_mapping()          # UPnP IGD + NAT-PMP
-    node.enable_hole_punch()            # relays other peers' rendezvous by default
-    node.enable_relay()                 # last resort, for pairs a punch cannot reach
-    node.start()
-
-    node.punch_peer(peer_id)            # success arrives as on_peer_connected
-    if node.nat_mapping is NatMapping.ENDPOINT_DEPENDENT:
-        print("symmetric NAT — punching cannot work, but a relay still can")
-```
-
-`enable_relay()` routes the connection itself through a node both ends already
-reach, which is the only way through a symmetric NAT. It stays encrypted end to
-end — the relay moves ciphertext — and the peer behaves like any other, except
-that :meth:`peer_transport` reports ``Transport.RELAY``. With both enabled the
-ladder runs itself: a punch that cannot work falls back to a relay, and a relayed
-peer keeps trying to become a direct one. Pass ``serve_as_relay=True`` to also
-carry OTHER peers' connections, which spends real bandwidth and is off by default.
-
-### Liveness and reconnection
-
-```python
-with RatsNode(8080) as node:
-    node.enable_ping()
-    node.enable_reconnect()
-    node.start()
-
-    node.add_reconnect("192.168.1.100", 8081)
-    rtt = node.peer_rtt_ms(peer_id)     # -1 if unknown
-```
-
-## API reference
-
-### Construction
-
-```python
-RatsNode(listen_port=0, *, enable_listen=True, bind_address=None,
-         security=Security.NOISE, data_dir=None, protocol=None, max_peers=0,
-         enable_tcp=True, enable_udp=True,
-         preferred_transport=Transport.UDP, transport_fallback_ms=1200)
-```
-
-### Lifecycle
-
-`start()` · `stop()` · `destroy()` · `is_running() -> bool` · context manager
-(`with RatsNode(...) as node:` releases the node on exit)
-
-### Properties
-
-| Property | Description |
-| --- | --- |
-| `local_id -> str` | our 64-hex self-certifying peer id |
-| `listen_port -> int` | the bound port (resolved when 0 was requested) |
-| `protocol -> str` | handshake app id, e.g. `"librats/1.0"` |
-| `transports -> int` | `TransportMask` bitmask of what is actually running |
-| `peer_count -> int` | currently-connected peers |
-| `peer_ids -> list[str]` | their hex ids |
-| `max_peers -> int` | established-peer cap (0 = unlimited); settable |
-| `nat_mapping -> NatMapping` | what the mesh has shown about our own NAT |
-
-### Connections
-
-`connect(host, port)` · `peer_transport(peer_id) -> Transport | None` ·
-`peer_transports(peer_id) -> int | None`
-
-### Raw channel messaging
-
-`send(peer_id, channel, data: bytes)` · `broadcast(channel, data: bytes)` ·
-`on(channel, cb)` where `cb(peer_id: str, data: bytes)`
-
-### Peer events
-
-`on_peer_connected(cb)` · `on_peer_writable(cb)` where `cb(peer_id: str)` ·
-`on_peer_disconnected(cb)` where `cb(peer_id: str, reason: str)` — `reason` is a
-name like `"RATS_CLOSE_SLOW_CONSUMER"`, which means *you* were sending faster
-than the link drained. `peer_writable(peer_id) -> bool` asks the same thing
-without sending; `False` means pause until `on_peer_writable` fires.
-
-### Subsystems (enable before start)
+All of these are enabled before `start()`.
 
 | Subsystem | Enable | Then |
 | --- | --- | --- |
-| DHT discovery | `enable_dht(dht_port=0, discovery_key=None)` | — |
+| DHT discovery | `enable_dht(dht_port=0, discovery_key=None)` | peers found are dialed automatically |
 | mDNS discovery | `enable_mdns()` | — |
-| NAT port mapping | `enable_port_mapping(enable_upnp=True, enable_natpmp=True)` | — |
-| Hole punching | `enable_hole_punch(serve_as_relay=True)` | `punch_peer(peer_id)`, `nat_mapping` |
-| Relaying | `enable_relay(serve_as_relay=False)` | `connect_via_relay(peer_id)` |
+| Peer exchange | `enable_peer_exchange()` | peers share the addresses of peers they hold |
+| Port mapping | `enable_port_mapping(upnp=True, natpmp=True)` | — |
+| Hole punching | `enable_hole_punch(serve_rendezvous=True)` | `punch_peer(peer_id)`, `nat_mapping`, `observed_addresses` |
+| Relaying | `enable_relay(serve=False)` | `connect_via_relay(peer_id)` |
 | Pub/sub | `enable_pubsub()` | `subscribe(topic, cb)`, `unsubscribe(topic)`, `publish(topic, data)` |
-| Typed JSON | `enable_json()` | `on_json(type, cb)`, `once_json(type, cb)`, `off_json(type)`, `send_json(peer, type, payload)`, `broadcast_json(type, payload)` |
-| File transfer | `enable_file_transfer(temp_dir=None)` | `on_file_offer/on_file_progress/on_file_complete`, `send_file`, `send_directory`, `accept_file`, `reject_file`, `cancel_file`, `pause_file`, `resume_file` |
-| Liveness | `enable_ping()` | `peer_rtt_ms(peer_id)` — ms, or -1 if unknown |
+| JSON messages | `enable_json()` | `on_json`, `once_json`, `off_json`, `send_json`, `broadcast_json` |
+| File transfer | `enable_file_transfer(temp_dir=None)` | see below |
+| Ping | `enable_ping()` | `peer_rtt_ms(peer_id)` — `None` until measured |
 | Reconnection | `enable_reconnect()` | `add_reconnect(host, port)`, `remove_reconnect(host, port)` |
+| BitTorrent | `enable_bittorrent(...)` | `bt_add_magnet`, `bt_add_torrent_file`, `bt_remove_torrent` — only in libraries built with `RATS_SEARCH_FEATURES` |
 
-File-transfer callback signatures:
+### NAT traversal
 
-* offer: `(peer_id, transfer_id, name, size, is_directory)`
-* progress: `(transfer_id, peer_id, bytes_transferred, total_bytes, status)`
-  where `status` is a `FileTransferStatus`
-* complete: `(transfer_id, success, path)`
+```python
+node.enable_port_mapping()       # ask the router first
+node.enable_hole_punch()         # punch through a peer both sides share
+node.enable_relay()              # last resort: route through such a peer
+node.start()
+...
+node.punch_peer(peer_id)         # success arrives as on_peer_connected
+```
 
-### Module-level helpers
+Hole punching needs every node involved to have it enabled, and some node in
+the mesh to pass rendezvous messages along (`serve_rendezvous=True`, the
+default). It cannot work from behind a symmetric NAT
+(`node.nat_mapping == NatMapping.ENDPOINT_DEPENDENT`); a relay can. A relayed
+peer stays encrypted end to end and `peer_info()` reports `Transport.RELAY`.
+With both enabled, a punch that cannot work falls back to a relay, and a relayed
+peer is moved to a direct connection when a later punch succeeds.
+`enable_relay(serve=True)` also carries other peers' connections, which costs
+this node their bandwidth; nobody does it unless asked.
 
-These need no node: `set_log_level(LogLevel)`, `set_log_file(path | None)`,
-`version() -> str`, `version_info() -> VersionInfo`, `git_describe() -> str`,
-`abi() -> int`, `error_str(code) -> str`.
+`punch_peer` and `connect_via_relay` raise `RatsDeclinedError` when there is
+nothing to do or nothing to try with (already connected, already trying, no peer
+to help).
 
-### Enums
+### JSON messages
 
-* `Security` — `NOISE`, `PLAINTEXT`
-* `Transport` — `TCP`, `UDP`
-* `TransportMask` — `TCP` (0x1), `UDP` (0x2)
-* `NatMapping` — `UNKNOWN`, `OPEN`, `ENDPOINT_INDEPENDENT`, `ENDPOINT_DEPENDENT`
-* `LogLevel` — `DEBUG`, `INFO`, `WARN`, `ERROR`
-* `FileTransferStatus` — `PENDING`, `ACTIVE`, `PAUSED`, `COMPLETED`, `FAILED`, `CANCELLED`
-* `ErrorCode` (`rats_error_t`) — `OK`, `INVALID_ARG`, `NOT_STARTED`,
-  `ALREADY_STARTED`, `NOT_ENABLED`, `NO_SUCH_PEER`, `BIND`, `INTERNAL`
+```python
+node.enable_json()
+node.on_json("greeting", lambda peer, value: print(value["hi"]))
+node.start()
+node.broadcast_json("greeting", {"hi": "there"})
+```
 
-### Exceptions
+Values are encoded with `json.dumps` and handed to handlers parsed. `on_json`
+adds a handler and may be called while running; `once_json` removes it after
+its first message.
 
-`RatsError` (base) with subclasses keyed off `rats_error_t`:
-`RatsInvalidArgError`, `RatsNotStartedError`, `RatsAlreadyStartedError`,
-`RatsNotEnabledError`, `RatsNoSuchPeerError`, `RatsBindError`,
-`RatsConnectionError`.
+### File transfer
+
+The sender offers, the receiver accepts or rejects.
+
+```python
+node.enable_file_transfer(temp_dir="./partial")
+node.on_file_offer(lambda peer, tid, name, size, is_dir:
+                   node.accept_file(peer, tid, f"./downloads/{name}"))
+node.on_file_progress(lambda p: print(p.transfer_id, p.bytes_transferred, p.total_bytes,
+                                      p.status.name))
+node.on_file_complete(lambda peer, tid, ok, path: print(tid, ok, path))
+node.start()
+
+tid = node.send_file(peer_id, "report.pdf")          # or send_directory()
+node.pause_file(peer_id, tid); node.resume_file(peer_id, tid); node.cancel_file(peer_id, tid)
+```
+
+A transfer is named by the pair (peer, transfer id). The offer, progress and
+complete callbacks are one each; registering again replaces the previous one.
+`on_file_progress` receives a `FileProgress` with direction, status, byte and
+file counts and a smoothed rate.
+
+## Module functions
+
+`set_log_level(LogLevel)`, `set_log_file(path or None)`, `version()`,
+`version_info()`, `git_describe()`, `abi()`, `error_str(code)`.
+
+## Errors
+
+| Exception | `ErrorCode` | Raised when |
+| --- | --- | --- |
+| `RatsInvalidArgError` | `INVALID_ARG` | malformed peer id, bad JSON, impossible config |
+| `RatsNotStartedError` | `NOT_STARTED` | `connect()` before `start()` |
+| `RatsAlreadyStartedError` | `ALREADY_STARTED` | enabling or registering a callback after `start()` |
+| `RatsNotEnabledError` | `NOT_ENABLED` | using a subsystem that was not enabled |
+| `RatsNoSuchPeerError` | `NO_SUCH_PEER` | the peer is not connected |
+| `RatsNotFoundError` | `NOT_FOUND` | no such file transfer, or a file to offer that cannot be read |
+| `RatsDeclinedError` | `DECLINED` | a punch or relay attempt has nothing to do |
+| `RatsBindError` | `BIND` | `start()` could not open its sockets |
+
+All derive from `RatsError`, whose `error_code` holds the code.
 
 ## Examples
 
@@ -254,14 +255,15 @@ python -m librats_py.examples.file_transfer 8080 ./downloads
 python -m librats_py.examples.gossipsub_chat 8080 alice general
 ```
 
-## Testing
+## Tests
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest librats_py/tests/
+pip install pytest
+python -m pytest librats_py/tests
 ```
 
-The suites skip themselves when the native shared library cannot be loaded.
+Tests that need the shared library are marked `native` and skipped when it
+cannot be loaded.
 
 ## License
 

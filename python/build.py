@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 """
-Build script for librats Python bindings.
+Build helper for the librats Python bindings.
 
-The bindings load the librats shared library (built from the C++ core plus the
-C ABI in ``src/librats/bindings/rats.cpp``) via ctypes. The recommended way to build it
-is CMake with ``-DRATS_SHARED_LIBRARY=ON`` (``--build-native`` below), which
-compiles the full ``LIBRARY_SOURCES`` list — including ``src/librats/bindings/rats.cpp``
-(gated by ``RATS_BINDINGS``, ON by default) — and links the platform libraries
-(ws2_32/iphlpapi/bcrypt on Windows, pthread elsewhere).
-
-``--compile-direct`` offers a CMake-free fallback that mirrors the CMake
-``LIBRARY_SOURCES`` set and the version.h generation, for environments without
-CMake. Both paths drop the resulting shared library next to the package so
-ctypes can find it.
+The bindings load the librats shared library through ctypes. ``--build-native``
+configures and builds it with CMake (``-DRATS_SHARED_LIBRARY=ON``) in
+``build/python`` and copies it next to the package, where the loader finds it.
 """
 
 import os
@@ -23,51 +15,6 @@ import shutil
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-# SRC_ROOT is the include root (headers resolve as "librats/<subdir>/<name>.h");
-# SRC is where the translation units actually live.
-SRC_ROOT = PROJECT_ROOT / "src"
-SRC = SRC_ROOT / "librats"
-
-# Mirrors the .cpp/.c translation units in CMakeLists.txt LIBRARY_SOURCES
-# (headers omitted). Keep in sync with the CMake list. RATS_SEARCH_FEATURES /
-# RATS_STORAGE sources are excluded (those options default OFF).
-LIBRARY_SOURCES = [
-    # core/
-    "core/socket.cpp", "core/receive_buffer.cpp", "core/chained_send_buffer.cpp",
-    "core/io_poller.cpp", "core/types.cpp",
-    # util/
-    "util/network_utils.cpp", "util/network_monitor.cpp", "util/os.cpp",
-    "util/fs.cpp", "util/logger.cpp", "util/version.cpp",
-    # wire/
-    "wire/frame.cpp", "wire/message_router.cpp",
-    # transport/
-    "transport/connection.cpp", "transport/reactor.cpp",
-    # peer/
-    "peer/peer_id.cpp", "peer/peer_table.cpp", "peer/peer_book.cpp",
-    # security/
-    "security/noise_security.cpp",
-    # node/
-    "node/node.cpp", "node/identify.cpp",
-    # subsystems/
-    "subsystems/ping_service.cpp", "subsystems/pubsub.cpp",
-    "subsystems/message_json.cpp", "subsystems/file_transfer.cpp",
-    "subsystems/dht_discovery.cpp", "subsystems/mdns_discovery.cpp",
-    "subsystems/reconnection.cpp", "subsystems/peer_exchange.cpp",
-    "subsystems/port_mapping_service.cpp",
-    # dht/ + bencode
-    "dht/dht.cpp", "dht/krpc.cpp", "bittorrent/bencode.cpp",
-    # mdns/
-    "mdns/mdns.cpp",
-    # crypto/
-    "crypto/sha1.cpp", "crypto/crc32.cpp", "crypto/curve25519.c",
-    "crypto/chacha.c", "crypto/poly1305.c", "crypto/chachapoly.c",
-    "crypto/sha256.c", "crypto/sha512.c", "crypto/hkdf.c",
-    "crypto/blake2s.c", "crypto/blake2b.c", "crypto/noise.cpp",
-    # nat/
-    "nat/stun.cpp", "nat/upnp.cpp", "nat/natpmp.cpp",
-    # bindings/ — the C ABI these Python bindings target
-    "bindings/rats.cpp",
-]
 
 
 def run_command(cmd, cwd=None, check=True):
@@ -85,7 +32,7 @@ def run_command(cmd, cwd=None, check=True):
 
 def _shared_lib_name():
     if os.name == 'nt':
-        return ['rats.dll']
+        return ['rats.dll', 'librats.dll']   # MSVC / MinGW naming
     elif sys.platform == 'darwin':
         return ['librats.dylib']
     return ['librats.so']
@@ -106,80 +53,16 @@ def _copy_built_library(build_dir: Path):
 
 
 def build_native_library():
-    """Build the native librats shared library via CMake.
-
-    CMake compiles the full LIBRARY_SOURCES set (including src/librats/bindings/rats.cpp
-    via RATS_BINDINGS) and links ws2_32/iphlpapi/bcrypt on Windows / pthread
-    elsewhere.
-    """
-    build_dir = PROJECT_ROOT / "build"
-
-    print("Building native librats library (CMake)...")
-    build_dir.mkdir(exist_ok=True)
-
-    run_command(["cmake", "-DRATS_SHARED_LIBRARY=ON",
-                 "-DRATS_BUILD_TESTS=OFF", "-DRATS_BUILD_CLIENT=OFF",
-                 "-DRATS_BUILD_EXAMPLES=OFF", ".."],
-                cwd=build_dir)
-
-    if os.name == 'nt':
-        run_command(["cmake", "--build", ".", "--config", "Release"], cwd=build_dir)
-    else:
-        run_command(["cmake", "--build", ".", "-j4"], cwd=build_dir)
-
+    """Build the librats shared library with CMake and copy it next to the package."""
+    build_dir = PROJECT_ROOT / "build" / "python"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    print("Building the librats shared library (CMake)...")
+    run_command(["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir),
+                 "-DCMAKE_BUILD_TYPE=Release", "-DRATS_SHARED_LIBRARY=ON",
+                 "-DRATS_STATIC_LIBRARY=OFF", "-DRATS_BUILD_TESTS=OFF",
+                 "-DRATS_BUILD_CLIENT=OFF", "-DRATS_BUILD_EXAMPLES=OFF"])
+    run_command(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel"])
     _copy_built_library(build_dir)
-    print("Native library built successfully")
-
-
-def compile_direct():
-    """CMake-free fallback: compile LIBRARY_SOURCES into a shared library.
-
-    Generates version.h from the template, compiles every source in
-    LIBRARY_SOURCES with -I src (the include root, so headers resolve as
-    "librats/<subdir>/<name>.h") and -I <generated version dir>, and links the
-    platform libraries. Mirrors the CMake build for environments without CMake.
-    """
-    import sysconfig  # noqa: F401  (kept for parity / future use)
-
-    out_dir = PROJECT_ROOT / "build" / "direct"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate version.h from version.h.in (best-effort defaults).
-    version_in = SRC / "util" / "version.h.in"
-    version_out_dir = out_dir / "src" / "librats" / "util"
-    version_out_dir.mkdir(parents=True, exist_ok=True)
-    version_h = version_out_dir / "version.h"
-    if version_in.exists():
-        text = version_in.read_text(encoding="utf-8")
-        repl = {
-            "VERSION_MAJOR": "1", "VERSION_MINOR": "0", "VERSION_PATCH": "0",
-            "VERSION_BUILD": "0", "VERSION_STRING": "1.0.0.0",
-            "GIT_DESCRIBE": "unknown",
-        }
-        for key, val in repl.items():
-            text = text.replace(f"@{key}@", val)
-        version_h.write_text(text, encoding="utf-8")
-
-    includes = ["-I", str(SRC_ROOT), "-I", str(out_dir / "src")]
-
-    is_windows = os.name == 'nt'
-    cxx = os.environ.get("CXX", "cl" if is_windows else "g++")
-    cc = os.environ.get("CC", "cl" if is_windows else "gcc")
-
-    if is_windows:
-        platform_libs = ["ws2_32.lib", "iphlpapi.lib", "bcrypt.lib"]
-        out_lib = out_dir / "rats.dll"
-    else:
-        platform_libs = ["-lpthread"]
-        out_lib = out_dir / "librats.so"
-
-    print("Direct compile is a reference fallback. On non-Windows (g++):")
-    print(f"  {cxx} -shared -fPIC -std=c++17 -DRATS_EXPORT_DLL \\")
-    print("    " + " ".join(includes) + " \\")
-    for s in LIBRARY_SOURCES:
-        print(f"    {SRC / s} \\")
-    print(f"    -o {out_lib} " + " ".join(platform_libs))
-    print("\n(Use --build-native / CMake for a real, supported build.)")
 
 
 def install_python_package(development=True):
@@ -271,8 +154,6 @@ def main():
     parser = argparse.ArgumentParser(description="Build script for librats Python bindings")
     parser.add_argument("--build-native", action="store_true",
                        help="Build the native librats library via CMake")
-    parser.add_argument("--compile-direct", action="store_true",
-                       help="Print a CMake-free compile recipe mirroring LIBRARY_SOURCES")
     parser.add_argument("--install", action="store_true",
                        help="Install the Python package")
     parser.add_argument("--install-release", action="store_true",
@@ -302,9 +183,6 @@ def main():
         else:
             if args.build_native:
                 build_native_library()
-
-            if args.compile_direct:
-                compile_direct()
 
             if args.install:
                 install_python_package(development=True)

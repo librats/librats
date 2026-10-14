@@ -1,41 +1,8 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Rules for minifying this library module itself. Apps that depend on it get
+# consumer-rules.pro, which carries the same keeps.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
-
-# Keep the public LibRats API and native bridge.
--keep public class com.librats.** { *; }
-
-# Native methods are resolved by name from librats_jni.cpp.
--keepclasseswithmembernames class com.librats.RatsNode {
-    native <methods>;
-}
-
-# Callback interfaces are invoked from native code via GetMethodID (onPeer /
-# onPeerPath / onMessage / onTopicMessage / onJsonMessage / onFileOffer /
-# onFileProgress / onFileComplete), so their method names must survive
-# obfuscation. PathStats is constructed from native code too (kept above).
--keep interface com.librats.*Callback { *; }
-
-# FileTransferStatus.fromValue(int) is called from native code via
-# GetStaticMethodID to build the value handed to FileProgressCallback.
--keep class com.librats.FileTransferStatus {
-    public static com.librats.FileTransferStatus fromValue(int);
-}
+# librats_jni.cpp reaches com.librats by name: the native methods of RatsNode,
+# the fields of RatsNode$Config, the constructors of PathStats, PeerInfo and
+# FileTransferProgress, CloseReason.fromValue, and the method of every
+# *Callback interface. Keeping the whole (small) package keeps all of them.
+-keep class com.librats.** { *; }

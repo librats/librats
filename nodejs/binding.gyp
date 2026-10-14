@@ -10,11 +10,11 @@
         "<!@(node -p \"require('node-addon-api').include\")",
         # librats headers. "librats/bindings/rats.h" is the canonical C ABI; it
         # pulls in librats/util/rats_export.h. These paths are the include ROOT
-        # (the parent of librats/), matching CMakeLists.txt. native-src/src is
-        # used when the package is installed from npm (sources bundled there);
-        # ../src in dev.
-        "native-src/src",
+        # (the parent of librats/), matching CMakeLists.txt. ../src is the
+        # repository's own tree and comes first, so a stale native-src/ snapshot
+        # can never shadow it; native-src/src is what an npm install has.
         "../src",
+        "native-src/src",
         # Generated headers (version.h, features.h) produced by the CMake build into
         # build-native/src/. Mirrors PROJECT_BINARY_DIR/src in CMakeLists.txt.
         "build-native/src"

@@ -1,188 +1,150 @@
-"""
-Unit tests for :class:`RatsNode` against the librats C ABI.
+"""Single-node tests of RatsNode against the librats shared library."""
 
-They need the native shared library built and loadable; the whole module skips
-itself when it is not.
-"""
+import pytest
 
-import os
-import sys
-import threading
-import unittest
+from librats_py import (
+    RatsNode, RatsError, RatsInvalidArgError, RatsNotEnabledError, RatsNotStartedError,
+    RatsAlreadyStartedError, RatsNotFoundError, RatsDeclinedError, ErrorCode, LogLevel,
+    Security, Transport, TransportMask, NatMapping, CloseReason, Direction,
+    FALLBACK_NEVER, version, version_info, abi, git_describe, error_str, set_log_level,
+    set_log_file,
+)
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-try:
-    from librats_py import (
-        RatsNode, RatsError, LogLevel, Security, TransportMask, NatMapping,
-        version, version_info, abi, git_describe, set_log_level, set_log_file,
-    )
-    from librats_py.exceptions import (
-        RatsNotEnabledError, RatsAlreadyStartedError,
-    )
-except ImportError as e:  # native lib not built yet
-    print(f"Warning: could not import librats_py: {e}")
-    RatsNode = None
+native = pytest.mark.native
 
 
-@unittest.skipIf(RatsNode is None, "librats_py not available")
-class TestRatsNode(unittest.TestCase):
-    def setUp(self):
-        self.node = None
-        self.events = []
-        self.lock = threading.Lock()
-
-    def tearDown(self):
-        if self.node:
-            self.node.destroy()
-
-    def recorder(self, tag):
-        def cb(*args):
-            with self.lock:
-                self.events.append((tag, args))
-        return cb
-
-    # ---- construction ----
-
-    def test_create(self):
-        self.node = RatsNode(0)
-        self.assertIsNotNone(self.node)
-
-    def test_create_with_config(self):
-        self.node = RatsNode(
-            0, security=Security.PLAINTEXT, protocol="myapp/2.0", max_peers=10)
-        self.assertEqual(self.node.protocol, "myapp/2.0")
-        self.assertEqual(self.node.max_peers, 10)
-
-    def test_context_manager_releases_the_node(self):
-        with RatsNode(0) as node:
-            self.assertFalse(node.is_running())
-            node.start()
-        with self.assertRaises(RatsError):
-            node.listen_port
-
-    # ---- lifecycle ----
-
-    def test_start_stop(self):
-        self.node = RatsNode(0)
-        self.assertFalse(self.node.is_running())
-        self.node.start()
-        self.assertTrue(self.node.is_running())
-        self.node.stop()
-        self.assertFalse(self.node.is_running())
-
-    def test_destroy_is_idempotent_and_leaves_the_node_inert(self):
-        node = RatsNode(0)
-        node.destroy()
-        node.destroy()
-        with self.assertRaises(RatsError):
-            node.local_id
-
-    # ---- identity / info ----
-
-    def test_local_id_is_hex(self):
-        self.node = RatsNode(0)
-        local_id = self.node.local_id
-        self.assertIsInstance(local_id, str)
-        self.assertEqual(len(local_id), 64)
-        int(local_id, 16)  # raises if not hex
-
-    def test_transports_reported_after_start(self):
-        self.node = RatsNode(0)
-        self.assertEqual(self.node.transports, 0)
-        self.node.start()
-        self.assertTrue(self.node.transports & (TransportMask.TCP | TransportMask.UDP))
-
-    def test_peer_count_zero(self):
-        self.node = RatsNode(0)
-        self.assertEqual(self.node.peer_count, 0)
-        self.assertEqual(self.node.peer_ids, [])
-
-    def test_max_peers_is_settable(self):
-        self.node = RatsNode(0)
-        self.node.max_peers = 20
-        self.assertEqual(self.node.max_peers, 20)
-
-    def test_transport_of_unconnected_peer_is_none(self):
-        self.node = RatsNode(0)
-        self.node.start()
-        self.assertIsNone(self.node.peer_transport("0" * 64))
-        self.assertIsNone(self.node.peer_transports("0" * 64))
-
-    # ---- the before-start contract ----
-
-    def test_register_callbacks_before_start(self):
-        self.node = RatsNode(0)
-        self.node.on_peer_connected(self.recorder("connected"))
-        self.node.on_peer_disconnected(self.recorder("disconnected"))
-        self.node.on("chat", self.recorder("msg"))
-        self.node.start()
-
-    def test_enable_subsystems_before_start(self):
-        self.node = RatsNode(0)
-        self.node.enable_pubsub()
-        self.node.enable_json()
-        self.node.enable_file_transfer()
-        self.node.enable_ping()
-        self.node.enable_reconnect()
-        self.node.enable_mdns()
-        self.node.enable_hole_punch()
-        self.node.start()
-        self.assertEqual(self.node.nat_mapping, NatMapping.UNKNOWN)
-
-    def test_subsystem_before_enable_raises(self):
-        self.node = RatsNode(0)
-        self.node.start()
-        with self.assertRaises(RatsNotEnabledError):
-            self.node.publish("topic", b"data")
-
-    def test_enable_after_start_raises(self):
-        self.node = RatsNode(0)
-        self.node.start()
-        with self.assertRaises(RatsAlreadyStartedError):
-            self.node.enable_pubsub()
+@pytest.fixture
+def node():
+    n = RatsNode(bind_address="127.0.0.1")
+    yield n
+    n.destroy()
 
 
-@unittest.skipIf(RatsNode is None, "librats_py not available")
-class TestModuleHelpers(unittest.TestCase):
-    def test_library_info(self):
-        self.assertIsInstance(version(), str)
-        self.assertIsInstance(git_describe(), str)
-        self.assertIsInstance(abi(), int)
-        self.assertGreaterEqual(version_info().major, 0)
-
-    def test_logging(self):
-        set_log_level(LogLevel.INFO)
-        set_log_level(LogLevel.DEBUG)
-        set_log_file(None)
-
-
-class TestEnumsAndExceptions(unittest.TestCase):
-    def test_log_level(self):
-        from librats_py import LogLevel
-        self.assertEqual((LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR),
-                         (0, 1, 2, 3))
-
-    def test_transport_masks(self):
-        from librats_py import Transport, TransportMask
-        self.assertEqual((Transport.TCP, Transport.UDP), (0, 1))
-        self.assertEqual((TransportMask.TCP, TransportMask.UDP), (0x1, 0x2))
-
-    def test_nat_mapping(self):
-        from librats_py import NatMapping
-        self.assertEqual(NatMapping.UNKNOWN, 0)
-        self.assertEqual(NatMapping.ENDPOINT_DEPENDENT, 3)
-
-    def test_error_codes(self):
-        from librats_py import ErrorCode
-        self.assertEqual(ErrorCode.OK, 0)
-        self.assertEqual(ErrorCode.NOT_ENABLED, 4)
-
-    def test_exception_str(self):
-        from librats_py import RatsError, ErrorCode
-        err = RatsError("boom", ErrorCode.INVALID_ARG)
-        self.assertIn("INVALID_ARG", str(err))
+@native
+def test_defaults(node):
+    assert len(node.local_id) == 64
+    int(node.local_id, 16)
+    assert node.protocol == "librats/1.0"
+    assert node.transports == TransportMask.NONE
+    assert node.listen_port == 0
+    node.start()
+    assert node.running
+    assert node.listen_port != 0
+    assert node.transports == TransportMask.TCP | TransportMask.UDP
+    assert node.peer_count == 0 and node.peer_ids == []
+    assert node.nat_mapping == NatMapping.UNKNOWN
+    assert node.observed_addresses == []
+    node.stop()
+    node.stop()
+    assert not node.running
+    assert node.transports == TransportMask.NONE
 
 
-if __name__ == "__main__":
-    unittest.main()
+@native
+def test_config_keywords_reach_the_node():
+    with RatsNode(security=Security.PLAINTEXT, protocol="myapp/2.0", max_peers=10,
+                  transports=TransportMask.TCP, transport_fallback_ms=FALLBACK_NEVER,
+                  udp_offload=False, reactor_threads=2, network_monitor=False) as n:
+        assert n.protocol == "myapp/2.0"
+        assert n.max_peers == 10
+        n.start()
+        assert n.transports == TransportMask.TCP
+
+
+@native
+def test_impossible_config_is_refused():
+    with pytest.raises(RatsInvalidArgError):
+        RatsNode(transports=TransportMask.UDP, preferred_transport=Transport.TCP)
+    with pytest.raises(RatsInvalidArgError):
+        RatsNode(preferred_transport=Transport.RELAY)
+
+
+@native
+def test_destroyed_node_is_inert():
+    with RatsNode() as n:
+        n.start()
+    with pytest.raises(RatsError):
+        n.local_id
+    n.destroy()   # idempotent
+
+
+@native
+def test_lifecycle_rules(node):
+    with pytest.raises(RatsNotStartedError):
+        node.connect("127.0.0.1", 1)
+    node.start()
+    with pytest.raises(RatsAlreadyStartedError):
+        node.start()
+    with pytest.raises(RatsAlreadyStartedError):
+        node.enable_pubsub()
+    with pytest.raises(RatsAlreadyStartedError):
+        node.on_peer_connected(lambda peer: None)
+    with pytest.raises(RatsNotEnabledError):
+        node.publish("topic", b"data")
+
+
+@native
+def test_unknown_peer(node):
+    node.start()
+    other = "0" * 64
+    assert node.peer_info(other) is None
+    assert node.path_stats(other) is None
+    assert node.peer_writable(other) is False
+    assert node.peer_rtt_ms(other) is None
+    with pytest.raises(RatsInvalidArgError):
+        node.peer_info("not-hex")
+    with pytest.raises(RatsError) as e:
+        node.send(other, "chat", b"x")
+    assert e.value.error_code == ErrorCode.NO_SUCH_PEER
+
+
+@native
+def test_every_subsystem_enables_before_start(node):
+    node.enable_dht()
+    node.enable_mdns()
+    node.enable_peer_exchange()
+    node.enable_port_mapping(upnp=False, natpmp=False)
+    node.enable_hole_punch()
+    node.enable_relay()
+    node.enable_pubsub()
+    node.enable_json()
+    node.enable_file_transfer()
+    node.enable_ping()
+    node.enable_reconnect()
+    node.enable_pubsub()   # idempotent
+    node.start()
+    with pytest.raises(RatsDeclinedError):
+        node.punch_peer("0" * 64)
+    with pytest.raises(RatsNotFoundError):
+        node.cancel_file(node.local_id, 999999)
+
+
+@native
+def test_max_peers_is_settable(node):
+    node.max_peers = 20
+    assert node.max_peers == 20
+
+
+@native
+def test_library_info_and_logging():
+    assert version()
+    assert isinstance(git_describe(), str)
+    info = version_info()
+    assert abi() == (info.major << 16) | (info.minor << 8) | info.patch
+    assert error_str(ErrorCode.DECLINED) == "RATS_ERR_DECLINED"
+    set_log_level(LogLevel.WARN)
+    set_log_file(None)
+
+
+def test_enums_mirror_the_c_abi():
+    assert (Transport.UDP, Transport.TCP, Transport.RELAY) == (0, 1, 2)
+    assert (TransportMask.TCP, TransportMask.UDP) == (0x1, 0x2)
+    assert (Direction.OUTBOUND, Direction.INBOUND) == (0, 1)
+    assert CloseReason.SLOW_CONSUMER == 6 and CloseReason.DIAL_SUPERSEDED == 11
+    assert (ErrorCode.NOT_FOUND, ErrorCode.DECLINED, ErrorCode.BIND, ErrorCode.INTERNAL) == (6, 7, 8, 9)
+    assert NatMapping.ENDPOINT_DEPENDENT == 3
+
+
+def test_exception_carries_its_code():
+    assert RatsNotFoundError("x").error_code == ErrorCode.NOT_FOUND
+    assert "INVALID_ARG" in str(RatsError("boom", ErrorCode.INVALID_ARG))

@@ -19,15 +19,9 @@ commands:
   connect <host> <port>  dial a peer
   send <peer_id> <msg>   send on the 'chat' channel to one peer
   broadcast <msg>        send on 'chat' to every peer
-  peers                  list connected peers
+  peers                  list connected peers, with wire and address
   quit                   exit
 """
-
-
-def describe(mask: int) -> str:
-    names = [n for n, bit in (("tcp", TransportMask.TCP), ("udp", TransportMask.UDP))
-             if mask & bit]
-    return "+".join(names) or "none"
 
 
 def main() -> None:
@@ -43,7 +37,8 @@ def main() -> None:
     with RatsNode(listen_port) as node:
         # All of this happens before start().
         node.on_peer_connected(lambda peer: print(f"+ {peer}"))
-        node.on_peer_disconnected(lambda peer, why: print(f"- {peer} ({why})"))
+        node.on_peer_disconnected(lambda peer, why: print(f"- {peer} ({why.name})"))
+        node.on_dial_failed(lambda address: print(f"could not reach {address}"))
 
         def on_chat(peer_id: str, data: bytes) -> None:
             print(f"\n[{peer_id[:16]}…] {data.decode('utf-8', 'replace')}")
@@ -54,7 +49,8 @@ def main() -> None:
         node.start()
         print(f"peer id      {node.local_id}")
         print(f"listening on {node.listen_port}")
-        print(f"transports   {describe(node.transports)}")
+        running = [t for t in ("TCP", "UDP") if node.transports & TransportMask[t]]
+        print(f"transports   {'+'.join(running) or 'none'}")
         print(COMMANDS)
 
         while True:
@@ -77,7 +73,13 @@ def main() -> None:
                 elif cmd == "broadcast" and args:
                     node.broadcast(CHANNEL, " ".join(args).encode())
                 elif cmd == "peers":
-                    print("\n".join(node.peer_ids) or "(none)")
+                    for peer in node.peer_ids:
+                        info = node.peer_info(peer)
+                        if info:
+                            print(f"{peer}  {info.transport.name} {info.direction.name} "
+                                  f"{info.address or '?'}")
+                    if not node.peer_count:
+                        print("(none)")
                 else:
                     print(f"unknown command: {' '.join(parts)}")
             except RatsError as exc:

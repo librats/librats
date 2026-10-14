@@ -1,8 +1,7 @@
 /**
  * Topic-based chat over the pub/sub (GossipSub) subsystem.
  *
- * enablePubsub() and every subscribe() happen BEFORE start() — a topic cannot be
- * subscribed once the node is running.
+ * enablePubsub() goes in before start(); topics can be subscribed at any time.
  *
  *   node gossipsub_chat.js [listenPort] [username] [topic] [connectHost] [connectPort]
  */
@@ -14,7 +13,7 @@ const [portArg, userArg, topicArg, host, peerPortArg] = process.argv.slice(2);
 const username = userArg || `user_${Math.random().toString(36).slice(2, 8)}`;
 const topic = topicArg || 'lobby';
 
-const node = new RatsNode(portArg ? Number(portArg) : 8080);
+const node = new RatsNode({ listenPort: portArg ? Number(portArg) : 8080 });
 
 node.onPeerConnected((peerId) => console.log(`+ peer ${peerId}`));
 node.onPeerDisconnected((peerId, reason) => console.log(`- peer ${peerId} (${reason})`));
@@ -89,10 +88,7 @@ rl.on('line', (line) => {
   rl.prompt();
 });
 
-rl.on('close', () => {
-  node.stop();
-  process.exit(0);
-});
+rl.on('close', () => node.destroy());
 
 function publish(fields) {
   node.publish(topic, JSON.stringify({ username, at: Date.now(), ...fields }));
