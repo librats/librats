@@ -767,8 +767,8 @@ TEST(UdpPacingTest, NoReleasePutsMoreThanOneBurstOnTheWire) {
         };
         sim.on_step = [&] { worst = (std::max)(worst, step); step = 0; };
         sim.run(3s);
-        // A burst of repairs is not paced, but a burst is still bounded by what the
-        // window lets out; new data is.
+        // Repairs included: they are paced like new data (and an outage's are
+        // AnOutagesRepairsDoNotLeaveAsOneBurst).
         EXPECT_LE(worst, 2 * (udp::Recovery::kPaceMaxBurst + udp::kMaxDatagram))
             << to_string(algo) << " put " << worst << " bytes on the wire at once";
     }
@@ -1359,8 +1359,8 @@ TEST(BbrTest, TheEstimateFollowsTheLinkDownUnderASourceItCannotCarry) {
 
 // After an outage the first acknowledgement says the path is back. The window goes
 // back to what the model holds then, instead of doubling up from one packet over
-// five or six round trips of a path that is idle — for as long as the repairs of
-// what the outage lost take to go out, which with a backlog behind them is long.
+// five or six round trips of a path that is idle — and it does so while the
+// repairs of what the outage lost are still going out, not once they are done.
 TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
     Sim sim(10, 40ms, 41);
     Flow& f = sim.add(CongestionAlgorithm::Bbr);
@@ -1372,13 +1372,50 @@ TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
     sim.path.blackout = true;
     video.play(1s);
     sim.path.blackout = false;
-    const size_t delivered = f.delivered();
-    while (f.delivered() == delivered && !f.sender().dead()) video.play(1ms);
-    video.play(2 * sim.rtt);
+    const uint64_t acked = f.sender().recovery().largest_acked();
+    while (f.sender().recovery().largest_acked() == acked && !f.sender().dead()) video.play(250us);
     EXPECT_TRUE(f.sender().recovery().in_recovery()) << "nothing left to repair: not the case meant";
+    EXPECT_GT(f.sender().recovery().cwnd(), before / 2)
+        << "on the first acknowledgement after the outage the window is "
+        << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
+
+    video.play(2 * sim.rtt);
     EXPECT_GT(f.sender().recovery().cwnd(), before / 2)
         << "two round trips after the path answered the window is "
         << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
+}
+
+// What an outage writes off comes back as repairs, and the window the first
+// acknowledgement restores lets all of them go at once. They are paced like new
+// data: unpaced, that window left as one line-rate train — on this path over four
+// hundred datagrams into a queue of 120, most of them lost again.
+TEST(UdpPacingTest, AnOutagesRepairsDoNotLeaveAsOneBurst) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        SCOPED_TRACE(to_string(algo));
+        Sim sim(100, 40ms, 120);
+        Flow& f = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(6s);
+
+        sim.path.blackout = true;
+        sim.run(1500ms);
+        sim.path.blackout = false;
+        const size_t drops  = sim.path.fwd().drops;
+        const size_t before = f.delivered();
+        size_t step = 0, worst = 0;
+        sim.path.hook = [&](Bytes& datagram, const Address&, bool forward) {
+            if (forward) step += datagram.size();
+            return false;
+        };
+        sim.on_step = [&] { worst = (std::max)(worst, step); step = 0; };
+        sim.run(1s);
+
+        EXPECT_LE(worst, 2 * (udp::Recovery::kPaceMaxBurst + udp::kMaxDatagram))
+            << worst / udp::kMaxDatagram << " datagrams on the wire at once after the outage";
+        EXPECT_LT(sim.path.fwd().drops - drops, 120u) << "the restart overflowed the bottleneck queue";
+        EXPECT_GT(f.delivered(), before) << "nothing delivered after the path came back";
+        EXPECT_FALSE(f.sender().dead());
+    }
 }
 
 // One outage is one congestion signal, whenever it falls. Live data waiting

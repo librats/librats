@@ -1395,9 +1395,12 @@ void UdpConnection::pump(Clock::time_point now) {
             if (!recovery_.cwnd_allows(size)) {
                 window_stopped = true;
                 with_data      = false;
-            } else if (!has_repairs() && !recovery_.pace_allows(size)) {
-                // Repairs are not held by the pacer: what the peer is missing holds
-                // up everything behind it.
+            } else if (!recovery_.pace_allows(size)) {
+                // Repairs are paced like everything else (RFC 9002 7.7). They go
+                // first within the packets the pacer releases, which is all the
+                // head start a hole needs; let past it, a timeout's write-off came
+                // back as the whole restored window at line rate — on a 100 Mbit/s
+                // path four hundred datagrams at once, most of them dropped again.
                 recovery_.hold_for_pacer(now, size);
                 with_data = false;
             }
