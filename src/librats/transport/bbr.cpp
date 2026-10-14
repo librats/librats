@@ -213,9 +213,10 @@ void BbrController::on_ack(const AckEvent& ack) {
     // which set_cwnd() applies — instead of rebuilding from one packet. A window
     // grown back by acknowledgements doubles per round trip, which after an outage
     // is five or six round trips of a path that is back, idling; and it guards
-    // against a burst nothing here produces, since every packet is paced at the
-    // model's rate. (Linux restores the same window once the whole flight lost to
-    // the timeout is repaired — later, by as long as that takes.)
+    // against a burst nothing here produces, since the flight's repairs are paced
+    // at the model's rate like everything else (UdpConnection::repairs_go_at_once).
+    // (Linux restores the same window once the whole flight lost to the timeout is
+    // repaired — later, by as long as that takes.)
     if (timed_out_ && newly_acked_ > 0) {
         timed_out_ = false;
         cwnd_      = (std::max)(cwnd_, prior_cwnd_);

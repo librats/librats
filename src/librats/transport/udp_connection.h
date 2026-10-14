@@ -443,6 +443,8 @@ private:
     bool   has_control() const noexcept;
     bool   has_sendable_data() const noexcept;
     bool   has_repairs() const noexcept;
+    /// Repairs are owed, few enough to send without asking the pacer.
+    bool   repairs_go_at_once() const noexcept;
     uint64_t new_data_budget() const noexcept;
     bool   amplification_allows(size_t bytes) const noexcept;
     /// The largest packet an unproven dialer has earned (kMaxDatagram once proven).

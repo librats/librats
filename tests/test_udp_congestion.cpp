@@ -767,10 +767,46 @@ TEST(UdpPacingTest, NoReleasePutsMoreThanOneBurstOnTheWire) {
         };
         sim.on_step = [&] { worst = (std::max)(worst, step); step = 0; };
         sim.run(3s);
-        // A burst of repairs is not paced, but a burst is still bounded by what the
-        // window lets out; new data is.
+        // One release of the pacer, and at most one more of repairs, which a few
+        // of go without asking it.
         EXPECT_LE(worst, 2 * (udp::Recovery::kPaceMaxBurst + udp::kMaxDatagram))
             << to_string(algo) << " put " << worst << " bytes on the wire at once";
+    }
+}
+
+// The same bound when the path comes back from an outage. The timeout writes off
+// the whole flight, so everything that goes out next is a repair, and BBR hands
+// back its window on the first acknowledgement. With repairs let past the pacer
+// that window — hundreds of datagrams — left in one step, and a shallow queue
+// dropped most of it: a second loss round, on a path that had only just answered.
+TEST(UdpPacingTest, AnOutageEndsWithoutABurst) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        Sim sim(100, 40ms, 120);   // a buffer of about a third of the BDP
+        Flow& f   = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(6s);
+
+        sim.path.blackout = true;
+        sim.run(1500ms);
+        sim.path.blackout = false;
+
+        size_t step = 0, worst = 0;
+        sim.path.hook = [&](Bytes& datagram, const Address&, bool forward) {
+            if (forward) step += datagram.size();
+            return false;
+        };
+        sim.on_step = [&] { worst = (std::max)(worst, step); step = 0; };
+        const size_t drops = sim.path.fwd().drops;
+        const size_t start = f.delivered();
+        sim.run(1s);
+
+        EXPECT_LE(worst, 2 * (udp::Recovery::kPaceMaxBurst + udp::kMaxDatagram))
+            << to_string(algo) << " put " << worst << " bytes on the wire at once after the outage";
+        EXPECT_LT(sim.path.fwd().drops - drops, 100u)
+            << to_string(algo) << ": the queue dropped " << sim.path.fwd().drops - drops
+            << " datagrams in the second after the path came back";
+        EXPECT_FALSE(f.sender().dead());
+        EXPECT_GT(f.delivered(), start) << to_string(algo) << " delivered nothing after the outage";
     }
 }
 
@@ -1359,8 +1395,9 @@ TEST(BbrTest, TheEstimateFollowsTheLinkDownUnderASourceItCannotCarry) {
 
 // After an outage the first acknowledgement says the path is back. The window goes
 // back to what the model holds then, instead of doubling up from one packet over
-// five or six round trips of a path that is idle — for as long as the repairs of
-// what the outage lost take to go out, which with a backlog behind them is long.
+// five or six round trips of a path that is idle — not only once the repairs of
+// what the outage lost are through, which with a backlog behind them is long.
+// (The repairs are paced: UdpPacingTest.AnOutageEndsWithoutABurst.)
 TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
     Sim sim(10, 40ms, 41);
     Flow& f = sim.add(CongestionAlgorithm::Bbr);
@@ -1372,10 +1409,16 @@ TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
     sim.path.blackout = true;
     video.play(1s);
     sim.path.blackout = false;
-    const size_t delivered = f.delivered();
-    while (f.delivered() == delivered && !f.sender().dead()) video.play(1ms);
+    // Nothing was acknowledged through the outage, so the first acknowledgement
+    // after it is the one that moves this.
+    const uint64_t acked = f.sender().recovery().largest_acked();
+    while (f.sender().recovery().largest_acked() == acked && !f.sender().dead()) sim.run(250us);
+    ASSERT_TRUE(f.sender().recovery().in_recovery()) << "nothing left to repair: not the case meant";
+    EXPECT_GT(f.sender().recovery().cwnd(), before / 2)
+        << "on the first acknowledgement after the outage the window is "
+        << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
+
     video.play(2 * sim.rtt);
-    EXPECT_TRUE(f.sender().recovery().in_recovery()) << "nothing left to repair: not the case meant";
     EXPECT_GT(f.sender().recovery().cwnd(), before / 2)
         << "two round trips after the path answered the window is "
         << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
