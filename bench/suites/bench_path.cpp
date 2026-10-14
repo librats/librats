@@ -78,6 +78,7 @@
 #include "librats/transport/udp_wire.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -87,6 +88,7 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <string>
@@ -203,11 +205,13 @@ public:
 
     /// Queue one live message of `bytes`, worth delivering until `deadline`, whose
     /// first four bytes are `tag` — delivery is in no order and not certain, so the
-    /// far end needs to know which one it got. Always taken.
+    /// far end needs to know which one it got. Taken unless it is larger than a
+    /// live message may be (SendOptions::kMaxLivePayload), as the API refuses it.
     bool write_live(size_t bytes, uint32_t tag, Clock::time_point deadline, Clock::time_point now) {
         if (!conn_ || !conn_->established()) return false;
-        static std::vector<uint8_t> payload(1 << 20, 0xAB);
-        bytes = (std::max)(sizeof(tag), (std::min)(bytes, payload.size()));
+        static std::vector<uint8_t> payload(SendOptions::kMaxLivePayload, 0xAB);
+        if (bytes > payload.size()) return false;
+        bytes = (std::max)(sizeof(tag), bytes);
         std::memcpy(payload.data(), &tag, sizeof(tag));
         if (!conn_->send_live(FrameHeader{MessageType::App, 0, kLiveChannel},
                               ByteView(payload.data(), bytes), deadline))
@@ -306,7 +310,17 @@ public:
         } else if (d.loss > 0 && unit_(rng_) < d.loss) { ++d.drops; return; }
 
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
-        d.wire.push_back(InFlight{d.busy_until + d.delay, to, from, Bytes(data, data + len)});
+        Clock::time_point arrive = d.busy_until + d.delay;
+        if (late_.share == 0) {
+            d.wire.push_back(InFlight{arrive, to, from, Bytes(data, data + len)});
+            return;
+        }
+        if (unit_(rng_) < late_.share) arrive += late_.by;
+        if (!late_.reorders && !d.wire.empty()) arrive = (std::max)(arrive, d.wire.back().arrive);
+        // In arrival order: one held back is overtaken by those behind it.
+        auto at = d.wire.end();
+        while (at != d.wire.begin() && std::prev(at)->arrive > arrive) --at;
+        d.wire.insert(at, InFlight{arrive, to, from, Bytes(data, data + len)});
     }
 
     /// Advance the model to `now`, delivering everything that has arrived.
@@ -341,6 +355,12 @@ public:
         move_to_   = outside;
         move_at_   = at;
     }
+    /// Hold back a `share` of the datagrams, both ways, `by` past their turn — not
+    /// in the queue, which they leave on time: a radio's retries, a host's late
+    /// timer. One held back holds back those behind it too, as a Wi-Fi receiver's
+    /// block-ack window does — delay without reordering — unless `reorders`, when
+    /// those behind overtake it.
+    void   hold_back(double share, Clock::duration by, bool reorders) { late_ = Late{share, by, reorders}; }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -371,6 +391,12 @@ private:
     Address           move_from_, move_to_;
     Clock::time_point move_at_{};
     size_t       drop_burst_ = 0;
+    struct Late {
+        double          share = 0;
+        Clock::duration by{};
+        bool            reorders = false;
+    };
+    Late         late_;
     std::mt19937 rng_;
     std::uniform_real_distribution<double> unit_{0.0, 1.0};
 };
@@ -714,8 +740,17 @@ struct Scene {
     Besides besides = Besides::Nothing;
     int     outage_ms = 0;
     Profile profile = kSteady;
+    int     fps = 30;               ///< a keyframe every 2 s whatever the rate
+    double  late = 0;               ///< share of datagrams held back late_ms, both ways
+    int     late_ms = 0;
+    bool    late_reorders = false;  ///< overtaken by those behind, or holding them back too
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
+    Scene& over(double mbps, int ms) { link = mbps; rtt = ms; return *this; }
+    Scene& sending(double mbps, int frames_per_s) { video = mbps; fps = frames_per_s; return *this; }
+    Scene& jittery(double share, int ms, bool reorder = false) {
+        late = share; late_ms = ms; late_reorders = reorder; return *this;
+    }
     Scene& lossy(double share, int burst = 0) { loss = share; burst_ms = burst; return *this; }
     Scene& buffer(double bdp) { buffer_bdp = bdp; return *this; }
     Scene& adaptive(double ceiling = 8) { source = Source::Adaptive; video = ceiling; return *this; }
@@ -742,11 +777,13 @@ struct RealtimeResult {
     double recover;         ///< ms from the event's end to a second of on-time frames; <0 no event, inf never
     double video;           ///< Mbit/s the encoder produced
     double fec;             ///< repair symbols sent, % of the video
+    double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; <0 none did
 };
 
-/// One live source and the player at the far end of its connection: 30 frames a
-/// second, each sent as one message the moment it is captured, sized by the
-/// scene's profile. A frame is complete once its message has been delivered.
+/// One live source and the player at the far end of its connection: the scene's
+/// frames a second (30 unless it says otherwise), each sent as one message the
+/// moment it is captured, sized by the scene's profile, with a GOP of 2 s. A
+/// frame is complete once its message has been delivered.
 ///
 /// Each frame is a live message whose deadline is the player's: captured + the
 /// one-way delay (half the minimum round trip the connection has measured, which
@@ -760,28 +797,29 @@ struct RealtimeResult {
 /// half second, as a VBV buffer would — so rows with the same target produce the
 /// same video rate and differ only in how it is spread.
 struct Video {
-    static constexpr int kFps = 30, kGop = 60;
     /// The player's patience: how far past the one-way delay a frame may land.
     static constexpr auto kJitterBudget = ms(100);
 
     struct Frame {
         Clock::time_point captured;
         size_t            bytes;
+        bool              key = false;
         bool              arrived = false;
         Clock::time_point arrived_at{};
     };
 
     Video(Peer& tx, Peer& rx, const Scene& scene)
-        : tx(tx), rx(rx), scene(scene), rng(1) {
+        : tx(tx), rx(rx), scene(scene), fps(scene.fps), gop(2 * scene.fps), rng(1) {
         target = scene.video * 1e6;
         if (scene.source == Source::Adaptive) target = (std::min)(target, 1e6);   // calls start low
         encoder_rate = target;
-        for (int n = 0; n < kGop; ++n) gop_weight += weight(n);
+        for (int n = 0; n < gop; ++n) gop_weight += weight(n);
     }
 
+    bool is_key(int n) const { return scene.profile.key_weight > 0 && n % gop == 0; }
     /// The encoder's view of a frame: its share of the GOP before noise.
     double weight(int n) const {
-        if (scene.profile.key_weight > 0 && n % kGop == 0) return scene.profile.key_weight;
+        if (is_key(n)) return scene.profile.key_weight;
         return scene.profile.layers == 3 && n % 4 == 0 ? 2.0 : 1.0;
     }
     // Fixed seed and raw draws: std's distributions are not the same on every
@@ -794,19 +832,19 @@ struct Video {
         if (now < next_frame) return;
         const Profile& p = scene.profile;
         if (p.lag_s > 0)
-            encoder_rate += (target - encoder_rate) * (1 - std::exp(-1.0 / kFps / p.lag_s));
+            encoder_rate += (target - encoder_rate) * (1 - std::exp(-1.0 / fps / p.lag_s));
         else
             encoder_rate = target;
-        const double budget = encoder_rate / 8 * kGop / kFps / gop_weight * weight(frame_no);
+        const double budget = encoder_rate / 8 * gop / fps / gop_weight * weight(frame_no);
         double factor = 1 + p.noise * (2 * uniform() - 1);
         if (p.scene_every > 0 && uniform() * p.scene_every < 1) factor *= 4;
         const double size = (std::max)(budget * factor - debt / 15, budget * 0.25);
         debt += size - budget;
         const size_t bytes = static_cast<size_t>(size);
-        frames.push_back(Frame{next_frame, bytes});
+        frames.push_back(Frame{next_frame, bytes, is_key(frame_no)});
         video_bytes += bytes;
         ++frame_no;
-        next_frame += std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / kFps;
+        next_frame += std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / fps;
     }
 
     /// Frames go to the connection as soon as it takes them, oldest first.
@@ -866,6 +904,7 @@ struct Video {
     Peer&             tx;
     Peer&             rx;
     const Scene&      scene;
+    const int         fps, gop;          // frames a second, and per keyframe
     std::mt19937      rng;
     std::vector<Frame> frames;           // every frame captured, by number
     size_t            fed = 0;           // frames handed to the connection
@@ -907,6 +946,7 @@ RealtimeResult realtime(const Scene& sc) {
     fwd.burst = ms(sc.burst_ms);
     Direction rev = fwd;
     Path path(fwd, rev);
+    path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
 
     const auto event     = std::chrono::seconds(10);
     const bool dark      = sc.besides == Besides::Outage || sc.besides == Besides::Roam;
@@ -975,19 +1015,20 @@ RealtimeResult realtime(const Scene& sc) {
     // A frame that never arrived — dropped, or still undelivered when the run
     // ends — was not in time either.
     // Latency is of the frames that arrived; "late" counts the rest too.
-    std::vector<double> latency;
+    std::vector<double> latency, key_latency;
     size_t missing = 0, late_frames = 0;
     for (const Video::Frame& f : video.frames) {
         if (f.arrived) latency.push_back(to_ms(f.arrived_at - f.captured));
         else           ++missing;
         if (!on_time(f)) ++late_frames;
+        if (f.key && f.arrived) key_latency.push_back(to_ms(f.arrived_at - f.captured));
     }
     if (latency.empty()) latency.push_back(2000);
 
     // The player: each frame shown at its deadline, or on arrival when later; a
     // frame that never came is never shown.
     const Clock::duration frame_every =
-        std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / Video::kFps;
+        std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / sc.fps;
     const Clock::duration freeze_at = (std::max)(frame_every * 3, frame_every + ms(150));
     double freeze_max = 0, frozen = 0;
     Clock::time_point shown_prev{};
@@ -1007,7 +1048,7 @@ RealtimeResult realtime(const Scene& sc) {
     double recover = -1;
     if (sc.has_event()) {
         recover = std::numeric_limits<double>::infinity();
-        constexpr size_t kSettled = Video::kFps;
+        const size_t kSettled = static_cast<size_t>(sc.fps);
         const auto from = Clock::time_point{} + event_end;
         size_t run = 0;
         for (size_t i = 0; i < video.frames.size(); ++i) {
@@ -1027,8 +1068,10 @@ RealtimeResult realtime(const Scene& sc) {
     const double late   = late_frames * 100.0 / frames;
     const double secs   = std::chrono::duration<double>(finish - start).count();
     const double fec = video.video_bytes ? fv.tx.path_stats().live_repair_bytes * 100.0 / video.video_bytes : 0;
+    std::sort(key_latency.begin(), key_latency.end());
+    const double key_median = key_latency.empty() ? -1 : key_latency[(key_latency.size() - 1) / 2] - base;
     return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
-            recover, video.video_bytes * 8.0 / secs / 1e6, fec};
+            recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median};
 }
 
 /// A share of frames late, as a column: green within what a call shrugs off,
@@ -1065,6 +1108,134 @@ void profile_row(const Profile& p) {
     std::printf("  %-30s", p.name);
     for (double c : cells) std::printf(" %s", late_cell(c).c_str());
     std::printf("\n");
+}
+
+// ── realtime by class ───────────────────────────────────────────────────────
+
+/// What a kind of video asks of the path: its rate, its frame rate, and how it
+/// spreads the rate over frames. Resolution and codec reach the transport only
+/// through these — a 4K60 call is a 40 Mbit/s source with a frame every 17 ms
+/// and a keyframe of a few hundred KB.
+struct VideoClass {
+    const char* name;
+    double      mbps;
+    int         fps;
+    Profile     profile;
+};
+/// A screen: mostly still, a slide change now and then, a large keyframe.
+constexpr Profile kScreen{"screen", 20, 0.5, 30, 0, 1};
+const VideoClass kVideoClasses[] = {
+    {"call 720p30, 2.5 Mbit",         2.5, 30, kSteady},
+    {"1080p30, 6 Mbit",               6,   30, kSteady},
+    {"1080p60 game, 12 Mbit",         12,  60, kSteady},
+    {"4K60, 40 Mbit",                 40,  60, kSteady},
+    {"8K60 / near-lossless, 120",     120, 60, kSteady},
+    {"screen share, 3 Mbit, 15 fps",  3,   15, kScreen},
+};
+
+/// The paths such video meets, from a phone's to a LAN.
+struct PathClass {
+    const char* name;
+    double      link;      ///< Mbit/s
+    int         rtt;       ///< ms
+    double      loss;      ///< both ways
+    int         burst_ms;  ///< 0 = independent losses
+    double      late;      ///< share of datagrams held back late_ms, both ways
+    int         late_ms;
+};
+const PathClass kPathClasses[] = {
+    {"mobile",   15,   60, 0.01,  20, 0,   0},
+    {"wi-fi",    50,   20, 0.005, 20, 0.2, 8},
+    {"home",     100,  20, 0,     0,  0,   0},
+    {"fiber",    500,  10, 0,     0,  0,   0},
+    {"LAN",      1000,  1, 0,     0,  0,   0},
+    {"far",      100, 200, 0.005, 0,  0,   0},
+};
+
+/// Every class of video over every kind of path, as a fixed-rate live source:
+/// where each class stops fitting, and what of it goes first. A source above
+/// 90% of the link is not run — it cannot fit, whatever the transport does.
+void class_tables() {
+    constexpr size_t kPaths = sizeof(kPathClasses) / sizeof(kPathClasses[0]);
+    struct Cell { bool run; RealtimeResult r; };
+    std::vector<std::array<Cell, kPaths>> grid;
+    for (const VideoClass& v : kVideoClasses) {
+        grid.emplace_back();
+        for (size_t i = 0; i < kPaths; ++i) {
+            const PathClass& p = kPathClasses[i];
+            Cell& c = grid.back()[i];
+            c.run = v.mbps <= 0.9 * p.link;
+            if (!c.run) continue;
+            c.r = realtime(Scene{}.over(p.link, p.rtt).lossy(p.loss, p.burst_ms)
+                               .jittery(p.late, p.late_ms).sending(v.mbps, v.fps).shaped(v.profile));
+        }
+    }
+    const auto table = [&](const char* title, auto cell) {
+        std::vector<const char*> names;
+        for (const PathClass& p : kPathClasses) names.push_back(p.name);
+        std::printf("\n%s%s%s\n  %-30s", col("\x1b[1m"), title, col("\x1b[0m"), "");
+        for (const char* n : names) std::printf(" %9s", n);
+        std::printf("\n  %-30s", "------------------------------");
+        for (size_t i = 0; i < kPaths; ++i) std::printf(" %9s", "---------");
+        std::printf("\n");
+        for (size_t row = 0; row < grid.size(); ++row) {
+            std::printf("  %-30s", kVideoClasses[row].name);
+            for (const Cell& c : grid[row]) {
+                if (!c.run) std::printf(" %9s", "-");
+                else        std::printf(" %s", cell(c.r).c_str());
+            }
+            std::printf("\n");
+        }
+    };
+    table(g_reliable_video ? "realtime by class — % of frames late (fixed-rate source, every frame reliable)"
+                           : "realtime by class — % of frames late (fixed-rate live source)",
+          [](const RealtimeResult& r) { return late_cell(r.late); });
+    table("realtime by class — keyframe latency over one-way delay, median ms",
+          [](const RealtimeResult& r) {
+              char s[32];
+              if (r.key_median < 0) std::snprintf(s, sizeof(s), "%9s", "never");
+              else                  std::snprintf(s, sizeof(s), "%9.1f", r.key_median);
+              return std::string(s);
+          });
+    std::printf("  (paths: mobile 15 Mbit/60 ms, 1%% loss in 20 ms bursts; wi-fi 50 Mbit/20 ms,\n"
+                "   0.5%% in bursts, a fifth of the datagrams 8 ms late (holding back those\n"
+                "   behind them, as Wi-Fi's block-ack does: no reordering); home 100 Mbit/20 ms;\n"
+                "   fiber 500 Mbit/10 ms; LAN 1 Gbit/1 ms; far 100 Mbit/200 ms, 0.5%% loss.\n"
+                "   Buffers 1 BDP, 8 packets at least. Classes: GOP 2 s, keyframe 5x a frame\n"
+                "   (the screen 20x, mostly still, a slide change every 2 s). \"-\": the source\n"
+                "   is above 90%% of the link. A frame is due 100 ms after the one-way delay, as\n"
+                "   above. A frame past SendOptions::kMaxLivePayload (1 MiB) is refused by the\n"
+                "   API and never arrives — the 8K row's keyframes, in this model. The lossy\n"
+                "   cells are one draw each (RATS_SEED for another).)\n");
+
+    // Reordering, which the wi-fi column above does not do: a datagram held back
+    // there holds back those behind it, as a block-ack window does.
+    const double shares[] = {0.001, 0.01, 0.05};
+    std::printf("\n%srealtime by class — %% of frames late, 50 Mbit/20 ms, a share of the datagrams overtaken by 8 ms%s\n  %-30s",
+                col("\x1b[1m"), col("\x1b[0m"), "");
+    std::printf(" %9s", "none");
+    for (double sh : shares) {
+        char h[16];
+        std::snprintf(h, sizeof(h), "%g%%", sh * 100);
+        std::printf(" %9s", h);
+    }
+    std::printf("\n  %-30s", "------------------------------");
+    for (int i = 0; i < 4; ++i) std::printf(" %9s", "---------");
+    std::printf("\n");
+    for (const VideoClass& v : kVideoClasses) {
+        if (v.mbps > 45) continue;
+        const Scene base = Scene{}.over(50, 20).sending(v.mbps, v.fps).shaped(v.profile);
+        std::printf("  %-30s %s", v.name, late_cell(realtime(base).late).c_str());
+        for (double sh : shares)
+            std::printf(" %s", late_cell(realtime(Scene{base}.jittery(sh, 8, true)).late).c_str());
+        std::printf("\n");
+    }
+    std::printf("  (a datagram 8 ms late on this path is overtaken by every one sent in those\n"
+                "   8 ms — at 40 Mbit/s some thirty. Loss detection reads three packets acked\n"
+                "   past a hole as a loss, so each is taken for one: sent again, counted\n"
+                "   against the path's loss rate, and paid for in FEC and in the window. With\n"
+                "   headroom that costs bandwidth only; a source near the link's rate pays in\n"
+                "   frames.)\n");
 }
 
 } // namespace
@@ -1256,9 +1427,12 @@ int main(int argc, char** argv) {
                 "   needed by nothing — but here a dropped frame of any layer costs the same, so\n"
                 "   they only reshape.)\n");
 
-    std::printf("\nnote: no reordering, no ack compression, no competing traffic, no variable\n"
-                "delay. These are not predictions about a real network — they are a comparison\n"
-                "between builds, and only useful read that way. For \"does it survive a hostile\n"
-                "network at all\", put tools/badnet.sh in front of bench_transport instead.\n");
+    class_tables();
+
+    std::printf("\nnote: no ack compression; reordering, variable delay and competing traffic only\n"
+                "in the rows that say so. These are not predictions about a real network — they\n"
+                "are a comparison between builds, and only useful read that way. For \"does it\n"
+                "survive a hostile network at all\", put tools/badnet.sh in front of\n"
+                "bench_transport instead.\n");
     return 0;
 }
