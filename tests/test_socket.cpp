@@ -550,8 +550,19 @@ TEST_F(SocketTest, UdpSegmentedSendArrivesAsTheSameDatagramsEitherWay) {
         ASSERT_EQ(got.size(), kCount);
         for (size_t i = 0; i < kCount; ++i)
             ASSERT_EQ(got[i], numbered(i, i + 1 < kCount ? 1000 : 123)) << "datagram " << i;
-        if (coalesced) EXPECT_GE(runs, 1u) << "nothing arrived coalesced; the split went untested";
-        else           EXPECT_EQ(runs, 0u);
+        if (!coalesced) {
+            EXPECT_EQ(runs, 0u);
+            continue;
+        }
+#ifdef __linux__
+        // Linux GRO always merges a segmented send on loopback.
+        EXPECT_GE(runs, 1u) << "nothing arrived coalesced; the split went untested";
+#else
+        // Windows takes the URO option and may still never merge loopback
+        // datagrams (the arm64 runners do not): what arrived is right, but
+        // the split was not exercised.
+        if (runs == 0) GTEST_SKIP() << "the stack accepted coalesced receive but merged nothing";
+#endif
     }
 }
 
