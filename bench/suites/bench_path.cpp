@@ -1223,8 +1223,9 @@ void class_tables() {
         std::snprintf(h, sizeof(h), "%g%%", sh * 100);
         std::printf(" %9s", h);
     }
+    std::printf(" %9s", "1%+loss");
     std::printf("\n  %-30s", "------------------------------");
-    for (int i = 0; i < 4; ++i) std::printf(" %9s", "---------");
+    for (int i = 0; i < 5; ++i) std::printf(" %9s", "---------");
     std::printf("\n");
     for (const VideoClass& v : kVideoClasses) {
         if (v.mbps > 45) continue;
@@ -1232,6 +1233,7 @@ void class_tables() {
         std::printf("  %-30s %s", v.name, late_cell(realtime(base).late).c_str());
         for (double sh : shares)
             std::printf(" %s", late_cell(realtime(Scene{base}.jittery(sh, 8, true)).late).c_str());
+        std::printf(" %s", late_cell(realtime(Scene{base}.jittery(0.01, 8, true).lossy(0.005)).late).c_str());
         std::printf("\n");
     }
     std::printf("  (a datagram 8 ms late on this path is overtaken by every one sent in those\n"
@@ -1239,7 +1241,8 @@ void class_tables() {
                 "   past a hole as a loss, and while a frame is outstanding keeps doing so: a\n"
                 "   piece sent twice costs a packet, one waited for the frame. What turns up\n"
                 "   after all is no loss rate, so FEC does not pay for it; bulk traffic waits\n"
-                "   it out instead — see the \"overtaken\" rows of bulk.)\n");
+                "   it out instead — see the \"overtaken\" rows of bulk. \"1%%+loss\": 1%%\n"
+                "   overtaken and 0.5%% lost as well, so FEC and repairs have real work.)\n");
 }
 
 } // namespace
@@ -1284,11 +1287,18 @@ int main(int argc, char** argv) {
     bulk("50 Mbit,  20 ms, 1% overtaken", 50, 20, 0.0,    104, 20, 0.01);
     bulk("50 Mbit,  20 ms, 5% overtaken", 50, 20, 0.0,    104, 20, 0.05);
     bulk("100 Mbit, 50 ms, 1% overtaken",100, 50, 0.0,    520, 20, 0.01);
+    bulk("50 Mbit,  20 ms, 1% loss",     50, 20, 0.01,   104, 20);
+    bulk("50 Mbit,  20 ms, 1% loss+ovt", 50, 20, 0.01,   104, 20, 0.01);
+    bulk("100 Mbit, 50 ms, 0.1% loss",  100, 50, 0.001,  520, 20);
+    bulk("100 Mbit, 50 ms, 0.1% loss+ovt",100, 50, 0.001, 520, 20, 0.01);
     std::printf("  (a low utilisation with FEW reductions is a sender that never found the "
                 "path;\n   a low one with MANY is a sender that keeps losing it. The two want "
                 "opposite fixes.)\n"
                 "  (\"overtaken\": that share of the datagrams 8 ms late and overtaken by those\n"
-                "   behind, nothing lost — what a sender that takes reordering for loss pays.)\n");
+                "   behind, nothing lost — what a sender that takes reordering for loss pays.\n"
+                "   \"loss+ovt\": the row above it with 1%% overtaken as well. Once a path has\n"
+                "   reordered, a loss is found by time alone, not by three packets past it:\n"
+                "   what that later detection costs where both happen.)\n");
 
     heading("idle — 5 s of transfer, 10 s of silence, then transfer again",
             "cwnd grown", "on resume", "dropped", "retrans", "");
