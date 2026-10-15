@@ -404,7 +404,7 @@ export interface RatsNode
    * it is a live message, worth delivering only within that many ms (30000 at
    * most): repaired while it can still arrive in time, dropped whole once it
    * cannot, never delivered partly or twice, and ordered with nothing — number
-   * them if order matters. Made for audio and video frames; at most 1 MiB. The
+   * them if order matters. Made for audio and video frames; at most 4 MiB. The
    * receiver needs nothing special.
    *
    * False means the peer is not connected or its queue is out of room — in the

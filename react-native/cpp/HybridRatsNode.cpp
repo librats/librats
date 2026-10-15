@@ -84,7 +84,7 @@ rats::SendOptions send_options(std::optional<double> lifetime_ms, size_t size) {
     options.lifetime = std::chrono::milliseconds(to_u32(*lifetime_ms, "lifetimeMs"));
   }
   if (options.live() && size > rats::SendOptions::kMaxLivePayload) {
-    throw std::invalid_argument("a live message carries at most 1 MiB");
+    throw std::invalid_argument("a live message carries at most 4 MiB");
   }
   return options;
 }

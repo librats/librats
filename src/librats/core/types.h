@@ -109,10 +109,11 @@ struct SendOptions {
     /// Longest lifetime a live message may have; a longer one is shortened to it.
     /// Past this a message is not live, it is late.
     static constexpr std::chrono::milliseconds kMaxLifetime{30000};
-    /// Largest payload a live message may carry — a 4K keyframe with room to
-    /// spare. A message is only ever delivered whole, so the receiver holds all
-    /// of one until its last piece is in, and this bounds that.
-    static constexpr size_t kMaxLivePayload = 1024 * 1024;
+    /// Largest payload a live message may carry — an 8K keyframe at a high
+    /// rate. A message is only ever delivered whole, so the receiver holds all
+    /// of one until its last piece is in, and this bounds that. Half the send
+    /// queue's high-water mark, so one leaves room for the frames behind it.
+    static constexpr size_t kMaxLivePayload = 4 * 1024 * 1024;
 
     /// Zero (or less): reliable. Otherwise live, for this long from the call.
     std::chrono::milliseconds lifetime{0};

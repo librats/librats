@@ -1208,9 +1208,9 @@ void class_tables() {
                 "   Buffers 1 BDP, 8 packets at least. Classes: GOP 2 s, keyframe 5x a frame\n"
                 "   (the screen 20x, mostly still, a slide change every 2 s). \"-\": the source\n"
                 "   is above 90%% of the link. A frame is due 100 ms after the one-way delay, as\n"
-                "   above. A frame past SendOptions::kMaxLivePayload (1 MiB) is refused by the\n"
-                "   API and never arrives — the 8K row's keyframes, in this model. The lossy\n"
-                "   cells are one draw each (RATS_SEED for another).)\n");
+                "   above. A frame past SendOptions::kMaxLivePayload (4 MiB) is refused by the\n"
+                "   API and never arrives. The lossy cells are one draw each (RATS_SEED for\n"
+                "   another).)\n");
 
     // Reordering, which the wi-fi column above does not do: a datagram held back
     // there holds back those behind it, as a block-ack window does.

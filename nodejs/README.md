@@ -81,7 +81,7 @@ node.onPeerWritable(pump);
 A non-zero `lifetimeMs` makes a **live** message: delivered within that many
 ms or dropped whole, never partly or twice, and not ordered with anything.
 That suits audio and video frames. The limits are `LIVE_MAX_LIFETIME_MS`
-(30 s) and `LIVE_MAX_PAYLOAD` (1 MiB). An encoder can size itself to the path
+(30 s) and `LIVE_MAX_PAYLOAD` (4 MiB). An encoder can size itself to the path
 with `pathStats(peerId)` (bandwidth estimate, round trip, loss, queued bytes,
 expired live messages) or with `onPeerPath`.
 

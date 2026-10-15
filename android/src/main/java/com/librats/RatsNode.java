@@ -53,7 +53,7 @@ public class RatsNode implements AutoCloseable {
     /** Longest lifetime a live message may have; a longer one is cut to this. */
     public static final int LIVE_MAX_LIFETIME_MS = 30000;
     /** Largest payload a live message may carry. */
-    public static final int LIVE_MAX_PAYLOAD = 1024 * 1024;
+    public static final int LIVE_MAX_PAYLOAD = 4 * 1024 * 1024;
 
     /**
      * Node configuration ({@code rats_config_t}). Every setter returns

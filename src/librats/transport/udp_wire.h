@@ -2,7 +2,7 @@
 
 /**
  * @file udp_wire.h
- * @brief Wire format of the datagram transport (v5): packets, frames, varints.
+ * @brief Wire format of the datagram transport (v6): packets, frames, varints.
  *
  * The shape is QUIC's (RFC 9000), cut down to what a peer-to-peer node on Noise
  * needs. It is not QUIC on the wire — there is no TLS, no version negotiation
@@ -103,8 +103,9 @@ namespace udp {
 /// 4: LIVE frames, which a v3 peer would take for a protocol error; 5: LIVE_REPAIR,
 /// likewise for a v4 one. PATH_CHALLENGE / PATH_RESPONSE came later without a
 /// bump: they go only to a peer whose address has changed, which a connection to
-/// a peer without them never survived anyway.
-constexpr uint32_t kVersion = 5;
+/// a peer without them never survived anyway. 6: live messages up to 4 MiB, past
+/// the size a v5 peer takes a LIVE frame for a protocol error at.
+constexpr uint32_t kVersion = 6;
 
 /// Largest datagram this transport sends, and every Initial's size. 1220 keeps it
 /// inside IPv6's 1280-byte minimum MTU with room for a tunnel header, so nothing

@@ -365,6 +365,8 @@ size_t rats_max_peers(rats_t node) { return node->node->max_peers(); }
 
 /* ─── Messaging ───────────────────────────────────────────────────────────── */
 
+static_assert(RATS_LIVE_MAX_PAYLOAD == SendOptions::kMaxLivePayload, "the C limit is the node's");
+
 rats_error_t rats_send(rats_t node, const char* peer_id, const char* channel,
                        const void* data, size_t len, uint32_t lifetime_ms) {
     auto id = parse_peer(peer_id);

@@ -107,7 +107,7 @@ everything else the node sends on its channels. With `lifetime_ms` it is a
 repaired while it can still make it, and is dropped whole once it cannot. Live
 messages are never delivered partly or twice and are not ordered, so number them
 if order matters. They are meant for audio and video frames; the limits are
-`LIVE_MAX_LIFETIME_MS` (30 s) and `LIVE_MAX_PAYLOAD` (1 MiB). The receiving
+`LIVE_MAX_LIFETIME_MS` (30 s) and `LIVE_MAX_PAYLOAD` (4 MiB). The receiving
 `on()` handler is the same for both kinds.
 
 ### Backpressure

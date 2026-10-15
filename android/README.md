@@ -95,7 +95,7 @@ A message with a lifetime is *live*: it is repaired while it can still arrive in
 time and dropped whole once it cannot, never arrives partly or twice, and is
 ordered with nothing. It is meant for audio and video frames; the lifetime is at
 most `RatsNode.LIVE_MAX_LIFETIME_MS` (30 s) and the payload at most
-`RatsNode.LIVE_MAX_PAYLOAD` (1 MiB). The receiver needs nothing special.
+`RatsNode.LIVE_MAX_PAYLOAD` (4 MiB). The receiver needs nothing special.
 
 `send` returning means the message was queued, not delivered. If you send in
 bulk, check `peerWritable(peerId)` after each send; when it says false, stop

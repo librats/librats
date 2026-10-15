@@ -118,7 +118,7 @@ FALLBACK_NEVER = 0xFFFFFFFF
 # Limits of a live message (``lifetime_ms`` > 0). A longer lifetime is cut to
 # the maximum; a larger payload is refused.
 LIVE_MAX_LIFETIME_MS = 30000
-LIVE_MAX_PAYLOAD = 1024 * 1024
+LIVE_MAX_PAYLOAD = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)

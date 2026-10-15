@@ -111,7 +111,7 @@ once it cannot, and it is ordered with nothing — number your frames if order
 matters. The receiver's `onMessage` gets it like any other.
 
 ```ts
-node.send(peerId, 'video', frame, 150)     // at most 30000 ms, at most 1 MiB
+node.send(peerId, 'video', frame, 150)     // at most 30000 ms, at most 4 MiB
 ```
 
 For a sender that sizes itself to the path, `pathStats(peerId)` returns what the

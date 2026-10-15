@@ -281,7 +281,7 @@ RATS_API size_t rats_max_peers(rats_t node);
 /* Limits of a live message (lifetime_ms > 0). A longer lifetime is cut to the
  * maximum; a larger payload is refused. */
 #define RATS_LIVE_MAX_LIFETIME_MS 30000u
-#define RATS_LIVE_MAX_PAYLOAD     (1024u * 1024u)
+#define RATS_LIVE_MAX_PAYLOAD     (4u * 1024u * 1024u)
 
 /** Queue bytes for one peer on a named channel. RATS_ERR_NO_SUCH_PEER if the
  *  peer is not connected.

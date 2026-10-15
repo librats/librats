@@ -268,8 +268,9 @@ public:
 
     static constexpr uint64_t kWindow = LiveSender::kWindow;
     /// Bytes of messages still being put together that one connection may hold:
-    /// a few of the largest at once, whatever the shared budget has left.
-    static constexpr size_t kMaxAssembling = 4 * kMaxLiveMessage;
+    /// two of the largest at once (a keyframe and the frames behind it), whatever
+    /// the shared budget has left.
+    static constexpr size_t kMaxAssembling = 2 * kMaxLiveMessage;
 
     enum class Result {
         Taken,     ///< kept, delivered, or already had

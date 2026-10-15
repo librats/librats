@@ -594,6 +594,34 @@ TEST(UdpLiveTest, ArriveWholeWhateverTheirSize) {
     EXPECT_EQ(st.live_expired, 0u);
 }
 
+// Two keyframes of the largest size a live message may have, frames behind
+// them, and a path losing one packet in fifty: a receiver puts both together at
+// once (LiveReceiver::kMaxAssembling) and delivers every one whole. Lifetimes
+// long enough for the rate a fresh connection starts at: by that, what has not
+// started could not leave in time and would be shed (LiveSender::shed).
+TEST(UdpLiveTest, TheLargestMessagesArriveWholeWithFramesBehindThem) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    size_t packets = 0, dropped = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr() || !carries_live(d) || ++packets % 50 != 0) return false;
+        ++dropped;
+        return true;
+    };
+    const std::string key1(SendOptions::kMaxLivePayload, '1'), key2(SendOptions::kMaxLivePayload, '2');
+    send_live(p, key1, 20s);
+    send_live(p, key2, 20s);
+    for (int i = 0; i < 4; ++i) send_live(p, "frame " + std::to_string(i), 20s);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 6; }, 20s));
+    EXPECT_GT(dropped, 0u);
+    EXPECT_EQ(count(p.b.messages, key1), 1u);
+    EXPECT_EQ(count(p.b.messages, key2), 1u);
+    p.run(200ms);
+    EXPECT_EQ(p.a.conn->path_stats().live_expired, 0u);
+    EXPECT_EQ(p.b.conn->buffered_bytes(), 0u);
+    EXPECT_EQ(p.b.conn->held_bytes(), 0u);
+}
+
 // The lost tail of a message has nothing behind it to reveal the loss: a probe
 // does, and repeats what is still worth repeating.
 TEST(UdpLiveTest, ALostPieceIsRepairedWhileTheMessageCanStillMakeIt) {

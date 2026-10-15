@@ -59,7 +59,7 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
 
     it('exposes the live message limits', function () {
       assert.strictEqual(LIVE_MAX_LIFETIME_MS, 30000);
-      assert.strictEqual(LIVE_MAX_PAYLOAD, 1024 * 1024);
+      assert.strictEqual(LIVE_MAX_PAYLOAD, 4 * 1024 * 1024);
     });
 
     it('rejects an unknown log level', function () {

@@ -272,8 +272,16 @@ TEST(UdpWireTest, MalformedFramesAreErrors) {
         << "a piece reaching past the end of its message";
     EXPECT_TRUE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x08, 0x09, 0x00}))
         << "a piece starting past the end of its message";
-    EXPECT_TRUE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x80, 0x20, 0x00, 0x00, 0x00, 0x01, 'a'}))
-        << "a live message past the size limit";
+    // A one-byte piece at offset 0 of a message `size` bytes long.
+    const auto piece_of = [](uint64_t size) {
+        std::vector<uint8_t> bytes{kLive | kLivePieceBit, 0x01, 0x05};
+        uint8_t buf[8];
+        bytes.insert(bytes.end(), buf, put_varint(buf, size));
+        bytes.insert(bytes.end(), {0x00, 0x01, 'a'});
+        return bytes;
+    };
+    EXPECT_TRUE(rejects(piece_of(kMaxLiveMessage + 1))) << "a live message past the size limit";
+    EXPECT_FALSE(rejects(piece_of(kMaxLiveMessage)))    << "a live message at the size limit";
     EXPECT_FALSE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x08, 0x05, 0x03, 'a', 'b', 'c'}));
     EXPECT_FALSE(rejects({kPadding, kPadding, kPing}));
 }
