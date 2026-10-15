@@ -332,7 +332,7 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
         timeout_recovery_ = false;
         rearm(now);
     }
-    retire_front();
+    retire_front(now);
     return true;
 }
 
@@ -364,6 +364,7 @@ void Recovery::on_newly_acked(uint64_t pn, SentPacket& pkt, Clock::time_point no
         rack_sent_at_ = pkt.tx.sent_at;
         rack_rtt_     = now - pkt.tx.sent_at;
     }
+    if (pkt.rack_lost) on_spurious_loss(pkt, now);
     if (pkt.frame_count) hand_over(pkt, true, sink);
 }
 
@@ -371,24 +372,18 @@ bool Recovery::detect_losses(Clock::time_point now, FrameSink& sink) {
     reorder_deadline_ = kNever;
     if (!have_largest_acked_ || sent_.empty()) return false;
 
-    // The reordering a path is allowed before a packet counts as lost: a quarter of
-    // the minimum round trip (RFC 8985's default), at least a millisecond, never
-    // more than a round trip.
-    Clock::duration reo_wnd = std::chrono::milliseconds(1);
-    if (rtt_.have_rtt) {
-        reo_wnd = (std::max)(reo_wnd, Clock::duration(rtt_.min_rtt / 4));
-        reo_wnd = (std::min)(reo_wnd, rtt_.srtt);
-    }
+    const Clock::duration reo_wnd  = reorder_window();
+    const bool            by_count = counts_packets();
 
     // RACK (RFC 8985): a packet sent before the newest one delivered is lost once
     // that delivery's round trip and the reordering window have passed since it
-    // left — or at once when three packets behind it have arrived. Numbers rise
-    // with send time, so both tests become true of later packets only later: the
-    // scan resumes where it last stopped and ends at the first packet still in
-    // good standing, and if that one only needs time, the reorder timer is set for
-    // when it will have had it. Without the timer the last packets of a burst,
-    // sent too close to the delivered one for the window to tell, would wait for a
-    // probe timeout.
+    // left — or at once when three packets behind it have arrived, while that
+    // still says anything (counts_packets()). Numbers rise with send time, so both
+    // tests become true of later packets only later: the scan resumes where it
+    // last stopped and ends at the first packet still in good standing, and if
+    // that one only needs time, the reorder timer is set for when it will have
+    // had it. Without the timer the last packets of a burst, sent too close to
+    // the delivered one for the window to tell, would wait for a probe timeout.
     if (loss_scan_ < log_base_) loss_scan_ = log_base_;
     bool     lost_any    = false;
     uint64_t newest_lost = 0;
@@ -397,14 +392,14 @@ bool Recovery::detect_losses(Clock::time_point now, FrameSink& sink) {
         if (!pkt) break;
         if (!pkt->in_flight) continue;   // acknowledged, given up on, or a bare ACK
 
-        if (largest_acked_ - loss_scan_ < kReorderThreshold) {
+        if (!by_count || largest_acked_ - loss_scan_ < kReorderThreshold) {
             const auto due = pkt->tx.sent_at + rack_rtt_ + reo_wnd;
             if (now < due) {
                 reorder_deadline_ = due;
                 break;
             }
         }
-        mark_lost(*pkt, now, sink);
+        mark_lost(*pkt, now, sink, true);
         lost_any    = true;
         newest_lost = loss_scan_;
     }
@@ -412,11 +407,11 @@ bool Recovery::detect_losses(Clock::time_point now, FrameSink& sink) {
     return lost_any;
 }
 
-void Recovery::mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink) {
+void Recovery::mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink, bool rack) {
     // Off the path: it stops counting against the window, which is what lets its
     // data go out again under that window rather than past it.
     pkt.in_flight  = false;
-    pkt.lost       = true;
+    pkt.rack_lost  = rack;
     flight_bytes_ -= pkt.bytes;
     --in_flight_packets_;
     ++lost_packets_;
@@ -434,6 +429,32 @@ void Recovery::mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink
     if (pkt.frame_count) hand_over(pkt, false, sink);
 }
 
+void Recovery::on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept {
+    // It was overtaken, not lost, and came `late` past the round trip of the
+    // newest delivery — the reference RACK measures from. From now on the window
+    // covers that and the count no longer decides, so the same reordering is not
+    // taken for loss again: sent twice, cutting the window, counted into the loss
+    // rate FEC and BBR go by. One overtaken by more than a round trip is past what
+    // a window may wait for (RFC 8985 caps it there).
+    pkt.rack_lost    = false;
+    spurious_       += pkt.bytes;
+    reordering_seen_ = true;
+    episodes_since_reorder_ = 0;
+    const Clock::duration late = (now - pkt.tx.sent_at) - rack_rtt_;
+    if (late > reorder_late_) reorder_late_ = late;
+}
+
+Clock::duration Recovery::reorder_window() const noexcept {
+    // The reordering a path is allowed before a packet counts as lost: a quarter of
+    // the minimum round trip (RFC 8985's default), plus however late a packet given
+    // up on has turned up; at least a millisecond, never more than a round trip.
+    const Clock::duration floor = std::chrono::milliseconds(1);
+    if (!rtt_.have_rtt) return floor;
+    const Clock::duration late = impatient_ ? Clock::duration::zero() : reorder_late_;
+    const Clock::duration wnd  = Clock::duration(rtt_.min_rtt / 4) + late;
+    return (std::max)(floor, (std::min)(wnd, rtt_.srtt));
+}
+
 void Recovery::congestion_event(Clock::time_point now, uint64_t newest_lost) {
     // One reduction per episode, not one per packet and not one per ACK that
     // reports a loss — several arrive per round trip, and halving on each would
@@ -447,6 +468,11 @@ void Recovery::congestion_event(Clock::time_point now, uint64_t newest_lost) {
     // and begins an ordinary one (RFC 9002 §7.3.2: a recovery period ends when a
     // packet sent during it is acknowledged or lost).
     if (in_recovery_ && !(timeout_episode_ && newest_lost > episode_start_pn_)) return;
+    if (++episodes_since_reorder_ >= kReorderMemory) {
+        reordering_seen_        = false;
+        reorder_late_           = Clock::duration::zero();
+        episodes_since_reorder_ = 0;
+    }
     timeout_episode_   = false;
     in_recovery_       = true;
     had_episode_       = true;
@@ -468,16 +494,31 @@ void Recovery::hand_over(const SentPacket& pkt, bool acked, FrameSink& sink) {
     else       sink.frames_lost(frames_, first, pkt.frame_count);
 }
 
-void Recovery::retire_front() noexcept {
+void Recovery::retire_front(Clock::time_point now) noexcept {
     // A packet leaves the log once nothing more can be learnt from it: delivered,
-    // given up on, or a bare ACK nobody acknowledges. Its frames go with it.
+    // written off, or a bare ACK nobody acknowledges. One RACK gave up on stays
+    // while an acknowledgement could still say it was only late — its round trip
+    // plus the most a window waits (a round trip), with an ack delay to spare.
+    const Clock::duration keep = 2 * rtt_.srtt + std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
     while (!sent_.empty() && !sent_.front().in_flight) {
-        const SentPacket& front = sent_.front();
-        for (uint16_t i = 0; i < front.frame_count; ++i) frames_.pop_front();
-        frames_base_ += front.frame_count;
-        sent_.pop_front();
-        ++log_base_;
+        if (sent_.front().rack_lost && now - sent_.front().tx.sent_at < keep) break;
+        pop_front();
     }
+}
+
+void Recovery::pop_front() noexcept {
+    const SentPacket& front = sent_.front();
+    for (uint16_t i = 0; i < front.frame_count; ++i) frames_.pop_front();
+    frames_base_ += front.frame_count;
+    sent_.pop_front();
+    ++log_base_;
+}
+
+void Recovery::release_memory() noexcept {
+    if (in_flight_packets_ > 0) return;
+    while (!sent_.empty()) pop_front();
+    sent_.release();
+    frames_.release();
 }
 
 void Recovery::sample_rtt(Clock::duration rtt, Clock::duration ack_delay) {
@@ -578,7 +619,7 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     // A packet RACK was giving time to has had it: its data goes out again on the
     // caller's next send. The loss timer then measures from what is left.
     if (reorder_deadline_ != kNever && now >= reorder_deadline_ && detect_losses(now, sink)) {
-        retire_front();
+        retire_front(now);
         rearm(now);
     }
     // A pacer release that has come due is the caller's to send, and the hold is
@@ -632,7 +673,7 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     const uint64_t reported = lost_since_ack_;
     written_off_ += flight_bytes_;
     for (size_t i = 0; i < sent_.size(); ++i)
-        if (sent_[i].in_flight) mark_lost(sent_[i], now, sink);
+        if (sent_[i].in_flight) mark_lost(sent_[i], now, sink, false);
     lost_since_ack_  = reported;
     recovery_credit_ = 0;
     recover_fs_      = 0;   // what follows is slow start, not PRR
@@ -641,7 +682,7 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     // unless what is waiting will not keep (set_impatient).
     rtt_.rto = clamp_duration(rtt_.rto * 2, kMinRto, kMaxRto);
     arm_loss_timer(now);
-    retire_front();
+    retire_front(now);
     return Timeout::Collapsed;
 }
 
@@ -670,8 +711,8 @@ void Recovery::on_new_path(Clock::time_point now, FrameSink& sink) {
     // nothing left in flight the whole log retires.
     written_off_ += flight_bytes_;
     for (size_t i = 0; i < sent_.size(); ++i)
-        if (sent_[i].in_flight) mark_lost(sent_[i], now, sink);
-    retire_front();
+        if (sent_[i].in_flight) mark_lost(sent_[i], now, sink, false);
+    while (!sent_.empty()) pop_front();
     lost_since_ack_ = 0;
     cwnd_limited_   = false;
 
@@ -680,6 +721,9 @@ void Recovery::on_new_path(Clock::time_point now, FrameSink& sink) {
     rack_sent_at_     = Clock::time_point{};
     rack_rtt_         = Clock::duration::zero();
     reorder_deadline_ = kNever;
+    reordering_seen_        = false;
+    reorder_late_           = Clock::duration::zero();
+    episodes_since_reorder_ = 0;
 
     in_recovery_      = false;
     had_episode_      = false;

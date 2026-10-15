@@ -28,7 +28,11 @@
  *   - Loss detection (RFC 8985 RACK): lost once three later packets have arrived,
  *     or once a round trip and a reordering window have passed since it left with
  *     a later one delivered — on a timer of its own, so the last packets of a
- *     burst do not wait for a probe.
+ *     burst do not wait for a probe. A packet given up on whose acknowledgement
+ *     still comes was only overtaken: from then on the count is no evidence and
+ *     the window covers how late it was (RFC 8985 §6.2) — for traffic that can
+ *     wait (see counts_packets()). Such a loss is no loss rate either:
+ *     path_lost() leaves it out.
  *   - Congestion episodes: one reduction per episode, however many packets it
  *     loses; it ends once what it lost has been delivered again — its last repair
  *     acknowledged, nothing still owed: NewReno's recovery point in packet
@@ -115,8 +119,13 @@ public:
     /// before the peer is declared gone. Doubling to the 6 s cap, about a minute.
     static constexpr int kMaxTimeouts = 12;
     /// Packets that must arrive behind one before it counts as lost — the classic
-    /// duplicate-ack threshold (RFC 9002 kPacketThreshold).
+    /// duplicate-ack threshold (RFC 9002 kPacketThreshold) — until the path is
+    /// seen to reorder.
     static constexpr uint64_t kReorderThreshold = 3;
+    /// Loss episodes with no packet turning up after it was given up on, before
+    /// the reordering learnt is forgotten (RFC 8985 §6.2's 16 recoveries): what a
+    /// path did once costs every later loss a slower detection.
+    static constexpr int kReorderMemory = 16;
 
     // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
     //
@@ -227,6 +236,7 @@ public:
     /// a one-second outage unnoticed for up to as long again — every live message
     /// in that time lost for nothing. Such a timeout does not count towards giving
     /// up; the connection's idle timeout still ends a path that never answers.
+    /// Loss is judged by the default reordering bars meanwhile (counts_packets()).
     void set_impatient(bool impatient) noexcept;
 
     /// Frames of the newest packet still in flight that carried data — what
@@ -253,6 +263,23 @@ public:
     /// Bytes of the losses in sampler() that timeouts wrote off: what outages
     /// took, as opposed to the loss rate of a path that answers.
     uint64_t written_off() const noexcept { return written_off_; }
+    /// Bytes of the losses in sampler() acknowledged after all: reordered, not lost.
+    uint64_t spurious() const noexcept { return spurious_; }
+    /// The losses in sampler() that the path's own loss rate is made of: less
+    /// what outages took and what was only reordered.
+    uint64_t path_lost() const noexcept { return sampler_.lost() - written_off_ - spurious_; }
+    /// How long after a later packet's round trip one is still given to arrive
+    /// before it counts as lost.
+    Clock::duration reorder_window() const noexcept;
+    /// Whether kReorderThreshold later packets acknowledged make one lost, before
+    /// its window is up. Not once a path has overtaken a packet by more: what it
+    /// overtakes it by follows the sending rate, so a count learnt at one rate is
+    /// beaten at the next (as Linux and RFC 8985 do, only the window judges then).
+    /// What the path has shown of its reordering is waited out only by traffic
+    /// that can wait: while a live message is outstanding (set_impatient) the
+    /// default bars hold — a piece sent twice costs a packet, one waited for past
+    /// its deadline the whole frame.
+    bool counts_packets() const noexcept { return impatient_ || !reordering_seen_; }
     /// Times the controller was told about congestion: once per loss episode, plus
     /// once per retransmission timeout.
     uint32_t congestion_events() const noexcept { return congestion_events_; }
@@ -268,8 +295,9 @@ public:
 
     /// Forget everything outstanding (the connection is gone).
     void clear() noexcept;
-    /// Give back the logs' memory if they are empty.
-    void release_memory() noexcept { sent_.release(); frames_.release(); }
+    /// Give back the logs' memory if nothing is outstanding. Losses kept to see
+    /// whether they were only late have had their chance by now.
+    void release_memory() noexcept;
 
 private:
     struct SentPacket {
@@ -281,7 +309,10 @@ private:
         bool        ack_eliciting = false;
         bool        in_flight = false;
         bool        acked = false;
-        bool        lost = false;
+        /// Declared lost by RACK rather than written off by a timeout: kept in the
+        /// log a while, since an acknowledgement that still comes says the path
+        /// reordered it (see on_spurious_loss).
+        bool        rack_lost = false;
     };
 
     SentPacket* at(uint64_t pn) noexcept;
@@ -291,10 +322,14 @@ private:
     void   on_newly_acked(uint64_t pn, SentPacket& pkt, Clock::time_point now, FrameSink& sink);
     /// True if it declared anything lost.
     bool   detect_losses(Clock::time_point now, FrameSink& sink);
-    void   mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink);
+    /// `rack`: declared by RACK, not written off — see SentPacket::rack_lost.
+    void   mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink, bool rack);
+    /// A packet declared lost has been acknowledged after all.
+    void   on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept;
     /// `newest_lost`: the latest packet number among those just declared lost.
     void   congestion_event(Clock::time_point now, uint64_t newest_lost);
-    void   retire_front() noexcept;
+    void   retire_front(Clock::time_point now) noexcept;
+    void   pop_front() noexcept;
     void   hand_over(const SentPacket& pkt, bool acked, FrameSink& sink);
 
     uint64_t prr_share(uint64_t delivered) const noexcept;
@@ -338,6 +373,12 @@ private:
     Clock::time_point reorder_deadline_{};
     /// Everything below this has been judged; the scan resumes here.
     uint64_t          loss_scan_ = 0;
+    /// The latest past RACK's reference a packet given up on has turned up, and
+    /// whether any has.
+    Clock::duration   reorder_late_{};
+    uint64_t          spurious_ = 0;
+    int               episodes_since_reorder_ = 0;
+    bool              reordering_seen_ = false;
 
     // — episodes —
     bool     in_recovery_      = false;

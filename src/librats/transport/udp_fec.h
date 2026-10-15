@@ -87,7 +87,8 @@ bool recover(const Layout& layout, uint32_t block, uint8_t* data, const uint8_t*
 uint32_t rows_for(uint32_t columns, double loss, double target) noexcept;
 
 /// The share of what a connection sends that the path loses, smoothed over a few
-/// hundred packets: fed the running totals of bytes delivered and declared lost.
+/// hundred packets: fed the running totals of bytes delivered and declared lost
+/// (a total that a late acknowledgement may take back).
 class LossEstimate {
 public:
     /// Bytes resolved per sample: about 64 full packets, so one sample can tell

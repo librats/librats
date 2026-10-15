@@ -183,7 +183,9 @@ uint32_t rows_for(uint32_t columns, double loss, double target) noexcept {
 }
 
 void LossEstimate::update(uint64_t delivered, uint64_t lost) noexcept {
-    const uint64_t d = delivered - delivered_, l = lost - lost_;
+    // The loss total can shrink: a packet given up on and acknowledged after all
+    // was only reordered, and comes off it again (Recovery::path_lost).
+    const uint64_t d = delivered - delivered_, l = lost > lost_ ? lost - lost_ : 0;
     if (d + l < kInterval) return;
     // A long gap between updates is several samples' worth, weighed as such.
     const double sample = double(l) / double(d + l);

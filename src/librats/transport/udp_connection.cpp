@@ -793,7 +793,7 @@ void UdpConnection::path_timer(Clock::time_point now) {
 
 void UdpConnection::restart_path(Clock::time_point now) {
     recovery_.on_new_path(now, *this);
-    live_loss_.restart(recovery_.sampler().delivered(), recovery_.sampler().lost() - recovery_.written_off());
+    live_loss_.restart(recovery_.sampler().delivered(), recovery_.path_lost());
 }
 
 void UdpConnection::note_data_gap(Clock::duration gap, Clock::time_point now) {
@@ -1314,7 +1314,7 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     if (!config_.live_fec) return 0;
     // What an outage wrote off is no loss rate: repair symbols could not have
     // stood in for any of it.
-    live_loss_.update(recovery_.sampler().delivered(), recovery_.sampler().lost() - recovery_.written_off());
+    live_loss_.update(recovery_.sampler().delivered(), recovery_.path_lost());
     const cc::RttEstimate& rtt = recovery_.rtt();
     if (!rtt.have_rtt || live_loss_.rate() <= 0) return 0;
     // Whether a piece lost now could still be sent again in time: the message
