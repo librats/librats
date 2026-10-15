@@ -41,11 +41,22 @@
 extern "C" {
 #endif
 
+/* C lets an enum hold any int, and a binding passes whatever int it has. C++
+ * gives an enum without a fixed underlying type only the range of its
+ * enumerators, so there loading another value — the very one a check exists to
+ * refuse — would be undefined. In C++ these enums are therefore int-based: the
+ * same size and calling convention as in C. */
+#ifdef __cplusplus
+#define RATS_ENUM_BASE : int
+#else
+#define RATS_ENUM_BASE
+#endif
+
 typedef struct rats_node* rats_t;
 
 /* ─── Results ─────────────────────────────────────────────────────────────── */
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_OK                  = 0,
     RATS_ERR_INVALID_ARG     = 1,  /* NULL or malformed argument (bad peer id, bad JSON, …) */
     RATS_ERR_NOT_STARTED     = 2,  /* the call needs a started node */
@@ -65,14 +76,14 @@ RATS_API const char* rats_error_str(rats_error_t err);
 
 /* ─── Enumerations ────────────────────────────────────────────────────────── */
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_SECURITY_NOISE     = 0,  /* Noise XX: encrypted and authenticated (default) */
     RATS_SECURITY_PLAINTEXT = 1   /* no encryption; ids exchanged in the clear */
 } rats_security_t;
 
 /* Which wire a peer connection runs on. UDP and TCP carry the same protocol
  * under the same encrypted handshake. */
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_TRANSPORT_UDP   = 0,  /* the library's own transport on one shared UDP socket */
     RATS_TRANSPORT_TCP   = 1,  /* one kernel socket per peer */
     /* Carried through another peer's connection (rats_enable_relay). Only ever
@@ -87,19 +98,19 @@ typedef enum {
 
 /* Congestion controller of every UDP connection. TCP is the kernel's and
  * ignores it. */
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_CONGESTION_BBR  = 0,  /* BBRv3 (default): holds its rate through loss that is
                                 * not congestion (Wi-Fi, mobile, long paths) */
     RATS_CONGESTION_RENO = 1   /* NewReno with HyStart++: backs off on every loss */
 } rats_congestion_t;
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_DIRECTION_OUTBOUND = 0,  /* we dialed it */
     RATS_DIRECTION_INBOUND  = 1   /* it dialed us */
 } rats_direction_t;
 
 /* Why a peer connection ended (rats_on_peer_disconnected). */
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_CLOSE_LOCAL            = 0,  /* we disconnected it */
     RATS_CLOSE_PEER_CLOSED      = 1,  /* the peer closed cleanly */
     RATS_CLOSE_PEER_RESET       = 2,  /* connection reset / socket error */
@@ -122,14 +133,14 @@ typedef enum {
 RATS_API const char* rats_close_reason_str(rats_close_reason_t reason);
 
 /* What the mesh has shown about this node's own NAT (rats_nat_mapping). */
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_NAT_UNKNOWN              = 0,  /* not enough independent observations yet */
     RATS_NAT_OPEN                 = 1,  /* no NAT in the path */
     RATS_NAT_ENDPOINT_INDEPENDENT = 2,  /* one external port for every peer: punchable */
     RATS_NAT_ENDPOINT_DEPENDENT   = 3   /* a new mapping per peer (symmetric): not punchable */
 } rats_nat_mapping_t;
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_LOG_DEBUG = 0,
     RATS_LOG_INFO  = 1,
     RATS_LOG_WARN  = 2,
@@ -431,7 +442,7 @@ RATS_API rats_error_t rats_broadcast_json(rats_t node, const char* type, const c
 
 /* ─── File transfer (push: the sender offers, the receiver accepts) ──────── */
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_FILE_PENDING   = 0,  /* offered, not answered yet */
     RATS_FILE_ACTIVE    = 1,
     RATS_FILE_PAUSED    = 2,
@@ -510,7 +521,7 @@ RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint1
  * returns RATS_ERR_NOT_ENABLED. The client runs its own sockets; enable the DHT
  * first and it shares the node's. */
 
-typedef enum {
+typedef enum RATS_ENUM_BASE {
     RATS_BT_ENC_ENABLED  = 0,  /* obfuscate (MSE/PE) first, fall back to plaintext (default) */
     RATS_BT_ENC_FORCED   = 1,  /* obfuscated connections only */
     RATS_BT_ENC_DISABLED = 2   /* plaintext only */
@@ -553,6 +564,8 @@ RATS_API uint32_t    rats_abi(void);
 
 /** Free an array from rats_peer_ids() / rats_observed_addresses(). NULL is a no-op. */
 RATS_API void rats_strings_free(char** strings, size_t count);
+
+#undef RATS_ENUM_BASE
 
 #ifdef __cplusplus
 }
