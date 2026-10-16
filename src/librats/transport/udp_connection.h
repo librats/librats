@@ -492,6 +492,9 @@ private:
     void frames_acked(const RingBuffer<udp::SentFrame>& log, size_t first, size_t count) override;
     void frames_lost(const RingBuffer<udp::SentFrame>& log, size_t first, size_t count) override;
     bool repairs_pending() const override { return has_repairs(); }
+    bool has_deadlines() const override { return !live_send_.empty(); }
+    std::optional<Clock::time_point> deadline(const RingBuffer<udp::SentFrame>& log, size_t first,
+                                              size_t count) const override;
 
     void die(CloseReason reason, bool keep_inbox = false);
     void raise(uint32_t events) noexcept { events_ |= events; }

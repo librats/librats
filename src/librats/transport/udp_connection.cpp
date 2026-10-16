@@ -1724,6 +1724,17 @@ void UdpConnection::frames_lost(const RingBuffer<SentFrame>& log, size_t first, 
     }
 }
 
+std::optional<Clock::time_point> UdpConnection::deadline(const RingBuffer<SentFrame>& log, size_t first,
+                                                        size_t count) const {
+    std::optional<Clock::time_point> due;
+    for (size_t i = 0; i < count; ++i) {
+        const SentFrame& f = log[first + i];
+        if (f.kind != SentFrame::Live && f.kind != SentFrame::LiveRepair) continue;
+        if (const auto d = live_send_.deadline(f.offset); d && (!due || *d < *due)) due = d;
+    }
+    return due;
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 void UdpConnection::die(CloseReason reason, bool keep_inbox) {

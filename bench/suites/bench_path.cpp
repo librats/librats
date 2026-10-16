@@ -1270,11 +1270,13 @@ void class_tables() {
                 "   in those 8 ms — at 40 Mbit/s some thirty. \"0-10 ms\": every datagram late\n"
                 "   by its own draw from 0-10 ms, as over a path that keeps no order (per-packet\n"
                 "   jitter, a bonded link): overtaken all the time. \"+loss\": 0.5%% lost as\n"
-                "   well, so FEC and repairs have real work. Loss detection reads three\n"
-                "   packets acked past a hole as a loss, and while a frame is outstanding\n"
-                "   keeps doing so: a piece sent twice costs a packet, one waited for the\n"
-                "   frame. What turns up after all is no loss rate, so FEC does not pay for\n"
-                "   it; bulk traffic waits it out instead — see the \"overtaken\" rows of bulk.)\n");
+                "   well, so FEC and repairs have real work. Once a path has shown that it\n"
+                "   reorders, a packet is given up on only when that no longer explains it —\n"
+                "   unless the frame it carries would then have no time left for a copy: then\n"
+                "   it goes again sooner, at once on a path that loses packets, at the last\n"
+                "   moment on one that mostly overtakes them. Either way that is a loss for\n"
+                "   the controller and the loss rate only once the path's reordering no\n"
+                "   longer explains it, so reordering neither cuts the estimate nor buys FEC.)\n");
 }
 
 } // namespace

@@ -154,6 +154,13 @@ public:
     void on_parity_acked(uint64_t id, uint32_t index);
     void on_parity_lost(uint64_t id, uint32_t index);
 
+    /// The deadline of message `id` while it is still held: neither delivered, as
+    /// far as the sender can tell, nor given up on.
+    std::optional<Clock::time_point> deadline(uint64_t id) const noexcept {
+        const Message* m = find(id);
+        return m ? std::optional<Clock::time_point>(m->deadline) : std::nullopt;
+    }
+
     /// Bytes never sent, and bytes waiting to be sent again, of messages still
     /// held: what a new message would wait behind.
     uint64_t unsent()     const noexcept { return unsent_; }

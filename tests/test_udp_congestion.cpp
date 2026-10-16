@@ -29,6 +29,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -58,6 +59,9 @@ struct Direction {
     /// queue, which they leave on time: a host's timer, a radio's retries.
     double               late       = 0;
     Clock::duration      late_by{};
+    /// Every datagram late by its own draw from [0, jitter]: a path whose packets
+    /// do not keep to one queue, so they overtake one another.
+    Clock::duration      jitter{};
     Clock::time_point    busy_until{};
     std::deque<InFlight> wire;
     size_t               sent  = 0;   ///< datagrams that entered the queue
@@ -102,6 +106,8 @@ public:
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
         Clock::time_point arrive = d.busy_until + d.delay;
         if (d.late > 0 && unit_(rng_) < d.late) arrive += d.late_by;
+        if (d.jitter > Clock::duration::zero())
+            arrive += std::chrono::duration_cast<Clock::duration>(d.jitter * unit_(rng_));
         // Held back past the ones behind it: in arrival order, so it is overtaken.
         auto at = std::upper_bound(d.wire.begin(), d.wire.end(), arrive,
                                    [](Clock::time_point t, const InFlight& f) { return t < f.arrive; });
@@ -661,10 +667,17 @@ namespace {
 /// A Recovery driven by hand: packets sent and acknowledged one at a time, each
 /// acknowledgement naming that packet alone.
 struct HandDriven {
-    struct NullSink final : udp::FrameSink {
+    /// Every live frame's data is due by `due`, if it is set.
+    struct Sink final : udp::FrameSink {
         void frames_acked(const RingBuffer<udp::SentFrame>&, size_t, size_t) override {}
         void frames_lost(const RingBuffer<udp::SentFrame>&, size_t, size_t) override {}
         bool repairs_pending() const override { return false; }
+        bool has_deadlines() const override { return due.has_value(); }
+        std::optional<Clock::time_point> deadline(const RingBuffer<udp::SentFrame>&, size_t,
+                                                  size_t) const override {
+            return due;
+        }
+        std::optional<Clock::time_point> due;
     } sink;
     Clock::time_point now = Clock::time_point{} + 1h;
     udp::Recovery     r{CongestionAlgorithm::Reno, now, 1};
@@ -673,6 +686,27 @@ struct HandDriven {
         const uint64_t pn = r.next_pn();
         r.on_packet_sent(now, 1000, /*ack_eliciting=*/true, /*data=*/true, false, false);
         return pn;
+    }
+    /// A packet carrying a piece of a live message.
+    uint64_t send_live() {
+        udp::SentFrame f;
+        f.kind   = udp::SentFrame::Live;
+        f.length = 1000;
+        r.add_frame(f);
+        return send();
+    }
+    /// Show the path overtaking one packet by `late` past the round trip that
+    /// gave it up — from then on, its window covers that.
+    void learn_reordering(Clock::duration late) {
+        const uint64_t first = send(), overtaken = send();
+        for (int i = 0; i < 3; ++i) send();
+        now += 60ms;
+        ack(first);
+        for (uint64_t p = overtaken + 1; p < overtaken + 4; ++p) ack(p);
+        ASSERT_EQ(r.retransmits(), 1u);
+        now += late;
+        ack(overtaken);
+        ASSERT_FALSE(r.counts_packets());
     }
     void ack(uint64_t pn) {
         udp::AckFrame a;
@@ -686,8 +720,7 @@ struct HandDriven {
 // A packet given up on whose acknowledgement still comes was overtaken, not
 // lost. From then on three packets acknowledged past one prove nothing — how
 // many overtake it follows the sending rate — and the window it is given covers
-// how late the overtaken one was. It is no loss rate either. A live message
-// outstanding would rather send a piece twice than wait: the count holds again.
+// how late the overtaken one was. It is no loss rate either.
 TEST(UdpLossRecoveryTest, APacketAcknowledgedAfterItWasGivenUpOnWidensTheReorderWindow) {
     HandDriven h;
     std::vector<uint64_t> pn;
@@ -720,12 +753,93 @@ TEST(UdpLossRecoveryTest, APacketAcknowledgedAfterItWasGivenUpOnWidensTheReorder
     h.now += 60ms;
     for (int i = 1; i <= 5; ++i) h.ack(next[i]);
     EXPECT_EQ(h.r.retransmits(), 1u) << "the count still decided";
+}
 
-    h.r.set_impatient(true);
-    EXPECT_TRUE(h.r.counts_packets());
-    EXPECT_EQ(h.r.reorder_window(), base_window);
-    h.ack(next[6]);
-    EXPECT_EQ(h.r.retransmits(), 2u) << "a live message waited out the path's reordering";
+// Data with a deadline cannot always wait out a path's reordering: the window is
+// time a piece that was really lost then lacks to go again. A packet the default
+// bars give up on goes again sooner when the path's would leave its deadline no
+// time — and only then. That is no news to the controller: a loss is still what
+// the path's bars say, and one acknowledged before they do never was.
+TEST(UdpLossRecoveryTest, DataWithADeadlineGoesAgainSoonerButIsNoLossUntilThePathSaysSo) {
+    HandDriven h;
+    h.learn_reordering(14ms);
+    const Clock::duration window = h.r.reorder_window();
+    const uint32_t        events = h.r.congestion_events();
+
+    // A deadline far enough off: the path's window is waited out as for anything.
+    h.sink.due = h.now + 1s;
+    std::vector<uint64_t> pn;
+    for (int i = 0; i < 5; ++i) pn.push_back(h.send_live());
+    h.now += 60ms;
+    for (int i = 1; i < 5; ++i) h.ack(pn[i]);
+    EXPECT_EQ(h.r.retransmits(), 1u) << "given up on while the path's window still had time";
+    h.now += 1ms;
+    h.ack(pn[0]);
+
+    // One that waiting would miss goes as soon as the default bars say so — on a
+    // path that has lost as many packets as it overtook (see the next test).
+    h.sink.due = h.now + 70ms;
+    pn.clear();
+    for (int i = 0; i < 5; ++i) pn.push_back(h.send_live());
+    h.now += 60ms;
+    for (int i = 1; i < 5; ++i) h.ack(pn[i]);
+    EXPECT_EQ(h.r.retransmits(), 2u) << "waited past its deadline for the path's reordering";
+    EXPECT_EQ(h.r.congestion_events(), events) << "a loss before the path's bars said so";
+    EXPECT_EQ(h.r.path_lost(), 0u);
+
+    // It turns up after all: it was never lost, and there is nothing to take back.
+    h.now += 5ms;
+    h.ack(pn[0]);
+    EXPECT_EQ(h.r.congestion_events(), events);
+    EXPECT_EQ(h.r.path_lost(), 0u);
+
+    // One that does not is a loss once the path's window has passed.
+    h.sink.due = h.now + 70ms;
+    pn.clear();
+    for (int i = 0; i < 5; ++i) pn.push_back(h.send_live());
+    h.now += 60ms;
+    for (int i = 1; i < 5; ++i) h.ack(pn[i]);
+    EXPECT_EQ(h.r.retransmits(), 3u);
+    EXPECT_EQ(h.r.congestion_events(), events);
+    h.now += window;
+    h.r.on_timer(h.now, h.sink);
+    EXPECT_EQ(h.r.congestion_events(), events + 1) << "a loss the path's bars confirm was not reported";
+    EXPECT_EQ(h.r.path_lost(), 1000u);
+}
+
+// How much sooner is a bet on what the path does to such packets. One that has
+// overtaken many times more of them than it lost lets a packet wait until the
+// last moment that still leaves its copy time — the later, the likelier its own
+// acknowledgement comes first; any other path sends it at once.
+TEST(UdpLossRecoveryTest, APathThatMostlyOvertakesIsWaitedOutToTheLastMoment) {
+    HandDriven h;
+    h.learn_reordering(14ms);
+    // Fifty packets acknowledged with three later ones ahead of them.
+    std::vector<uint64_t> pn;
+    for (int i = 0; i < 50; ++i) pn.push_back(h.send());
+    h.now += 60ms;
+    h.ack(pn.back());
+    for (int i = 0; i < 49; ++i) h.ack(pn[static_cast<size_t>(i)]);
+    const uint32_t resent = h.r.retransmits();
+
+    // The copy's trip is three quarters of a round trip: the last moment is 15 ms
+    // after the default bars give the packet up.
+    const Clock::duration trip = h.r.rtt().srtt / 2 + h.r.rtt().srtt / 4;
+    h.sink.due = h.now + 60ms + trip + 15ms;
+    pn.clear();
+    for (int i = 0; i < 5; ++i) pn.push_back(h.send_live());
+    h.now += 60ms;
+    for (int i = 1; i < 5; ++i) h.ack(pn[static_cast<size_t>(i)]);
+    EXPECT_EQ(h.r.retransmits(), resent) << "gone again long before its last moment";
+    // A millisecond either way: the round trip moves a little with every sample.
+    h.now += 14ms;
+    h.r.on_timer(h.now, h.sink);
+    EXPECT_EQ(h.r.retransmits(), resent) << "gone again before its last moment";
+    ASSERT_TRUE(h.r.deadline().has_value());
+    EXPECT_LE(*h.r.deadline(), h.now + 2ms);
+    h.now += 2ms;
+    h.r.on_timer(h.now, h.sink);
+    EXPECT_EQ(h.r.retransmits(), resent + 1) << "not sent again at its last moment";
 }
 
 // What a path did once is forgotten after kReorderMemory loss episodes with no
@@ -812,6 +926,44 @@ TEST(UdpLossRecoveryTest, ReorderingBuysALiveStreamNoRepairSymbols) {
     EXPECT_GT(f.sender().recovery().spurious(), 0u) << "nothing was overtaken: the test tests nothing";
     EXPECT_EQ(st.live_expired, 0u);
     EXPECT_LT(st.live_repair_bytes, 15000u) << "repair symbols for a path that loses nothing";
+}
+
+// A path whose every datagram takes its own time — per-packet jitter, a bonded
+// link — overtakes packets all the time and loses none. A live stream over it
+// must neither have that taken for congestion (BBR's estimate cut below the
+// stream every round trip, the frames dropped for it: two in three at 10 ms of
+// jitter) nor send a share of itself twice to stay on time.
+TEST(UdpLossRecoveryTest, ALiveStreamOverAPathThatKeepsNoOrderKeepsItsRate) {
+    Sim sim(50, 40ms, 200);
+    sim.path.fwd().jitter = 10ms;
+    sim.path.rev().jitter = 10ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(200ms);
+    ASSERT_TRUE(f.tx.established());
+
+    const std::string frame(16000, 'v');   // 60 a second: 7.7 Mbit/s
+    Clock::time_point next = sim.now;
+    sim.on_step = [&] {
+        if (sim.now < next) return;
+        next += 16ms;
+        ASSERT_TRUE(f.tx.send_live(MessageType::App, frame, sim.now + 130ms));
+        f.tx.conn->flush(sim.now);
+    };
+    // How a live flow starts is a question of its own; this one is about what
+    // follows.
+    sim.run(1s);
+    const udp::Recovery& r       = f.sender().recovery();
+    const PathStats      started = f.sender().path_stats();
+    const uint64_t       pn      = r.next_pn();
+    const uint32_t       resent  = r.retransmits();
+    sim.run(9s);
+    const PathStats st = f.sender().path_stats();
+
+    EXPECT_GT(r.spurious() + r.retransmits(), 0u) << "nothing was overtaken: the test tests nothing";
+    EXPECT_LT(st.live_expired - started.live_expired, (st.live_sent - started.live_sent) / 100)
+        << "frames dropped on a path that loses nothing";
+    EXPECT_GT(st.bandwidth_bps, 15u * 1000 * 1000) << "reordering taken for congestion";
+    EXPECT_LT(r.retransmits() - resent, (r.next_pn() - pn) / 20) << "the stream sent much of itself twice";
 }
 
 // ── Flow control ────────────────────────────────────────────────────────────

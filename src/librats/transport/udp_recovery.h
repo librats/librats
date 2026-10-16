@@ -30,9 +30,11 @@
  *     a later one delivered — on a timer of its own, so the last packets of a
  *     burst do not wait for a probe. A packet given up on whose acknowledgement
  *     still comes was only overtaken: from then on the count is no evidence and
- *     the window covers how late it was (RFC 8985 §6.2) — for traffic that can
- *     wait (see counts_packets()). Such a loss is no loss rate either:
- *     path_lost() leaves it out.
+ *     the window covers how late it was (RFC 8985 §6.2). Such a loss is no loss
+ *     rate either: path_lost() leaves it out. Data with a deadline that waiting
+ *     out the path's reordering would leave no time to send again goes again
+ *     sooner, by the default bars, but that is news to the controller only once
+ *     the path's own bars say it was lost (see detect_losses()).
  *   - Congestion episodes: one reduction per episode, however many packets it
  *     loses; it ends once what it lost has been delivered again — its last repair
  *     acknowledged, nothing still owed: NewReno's recovery point in packet
@@ -99,6 +101,16 @@ public:
     /// Data given up on is still waiting to be sent again: a loss episode is not
     /// over while what it lost is still owed.
     virtual bool repairs_pending() const = 0;
+
+    /// Whether anything outstanding has a deadline: without, deadline() is never asked.
+    virtual bool has_deadlines() const { return false; }
+    /// The earliest moment the data of frames [first, first + count) has to have
+    /// arrived by to be of use, or nullopt if none of it has one that still matters.
+    virtual std::optional<std::chrono::steady_clock::time_point> deadline(
+        const RingBuffer<SentFrame>& log, size_t first, size_t count) const {
+        (void)log, (void)first, (void)count;
+        return std::nullopt;
+    }
 };
 
 class Recovery {
@@ -126,6 +138,10 @@ public:
     /// the reordering learnt is forgotten (RFC 8985 §6.2's 16 recoveries): what a
     /// path did once costs every later loss a slower detection.
     static constexpr int kReorderMemory = 16;
+    /// How many times as often a path must lately have overtaken a packet as lost
+    /// one for data with a deadline to wait for it (see give_up_sooner()): a piece
+    /// sent twice costs a packet, a frame missed for the wait tens of them.
+    static constexpr uint32_t kOvertakenPerLoss = 16;
 
     // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
     //
@@ -236,7 +252,6 @@ public:
     /// a one-second outage unnoticed for up to as long again — every live message
     /// in that time lost for nothing. Such a timeout does not count towards giving
     /// up; the connection's idle timeout still ends a path that never answers.
-    /// Loss is judged by the default reordering bars meanwhile (counts_packets()).
     void set_impatient(bool impatient) noexcept;
 
     /// Frames of the newest packet still in flight that carried data — what
@@ -270,16 +285,15 @@ public:
     uint64_t path_lost() const noexcept { return sampler_.lost() - written_off_ - spurious_; }
     /// How long after a later packet's round trip one is still given to arrive
     /// before it counts as lost.
-    Clock::duration reorder_window() const noexcept;
+    Clock::duration reorder_window() const noexcept { return path_bar().window; }
     /// Whether kReorderThreshold later packets acknowledged make one lost, before
     /// its window is up. Not once a path has overtaken a packet by more: what it
     /// overtakes it by follows the sending rate, so a count learnt at one rate is
     /// beaten at the next (as Linux and RFC 8985 do, only the window judges then).
-    /// What the path has shown of its reordering is waited out only by traffic
-    /// that can wait: while a live message is outstanding (set_impatient) the
-    /// default bars hold — a piece sent twice costs a packet, one waited for past
+    /// Data with a deadline may go again sooner (FrameSink::deadline(), see
+    /// give_up_sooner()): a piece sent twice costs a packet, one waited for past
     /// its deadline the whole frame.
-    bool counts_packets() const noexcept { return impatient_ || !reordering_seen_; }
+    bool counts_packets() const noexcept { return path_bar().count; }
     /// Times the controller was told about congestion: once per loss episode, plus
     /// once per retransmission timeout.
     uint32_t congestion_events() const noexcept { return congestion_events_; }
@@ -313,17 +327,45 @@ private:
         /// log a while, since an acknowledgement that still comes says the path
         /// reordered it (see on_spurious_loss).
         bool        rack_lost = false;
+        /// Given up on sooner than the path's own reordering allows, for a deadline:
+        /// its data went again, but its loss is news to nobody until the path's
+        /// bars say so too — or ever, if it is acknowledged first. Kept in the log
+        /// until then.
+        bool        unreported = false;
     };
+
+    /// What makes a packet lost: kReorderThreshold later ones acknowledged (if
+    /// `count`), or `window` past the round trip of the newest delivery.
+    struct Bar {
+        bool            count;
+        Clock::duration window;
+    };
+    /// RFC 8985's bars, unlearnt: three packets, or a quarter of the minimum round trip.
+    Bar default_bar() const noexcept;
+    /// The bars this path is judged by: the default ones until it has shown its
+    /// reordering, then the window alone, widened by what it showed.
+    Bar path_bar() const noexcept;
+    /// When packet `pn` counts as lost by `bar`: no later than now if it does already.
+    Clock::time_point lost_at(uint64_t pn, const SentPacket& pkt, const Bar& bar) const noexcept;
+    /// The part of detect_losses() for data with a deadline (see there).
+    bool give_up_sooner(Clock::time_point now, FrameSink& sink, const Bar& path);
+    /// Run reorder_deadline_ no later than `t`.
+    void wake_at(Clock::time_point t) noexcept;
+    /// Count a packet the default bars gave up on, or would have, by its fate.
+    void note_fate(bool overtaken) noexcept;
 
     SentPacket* at(uint64_t pn) noexcept;
     /// Position of the first packet at or after `idx` not acknowledged yet, in
     /// amortised constant time (skip pointers with path compression).
     size_t next_unacked(size_t idx) noexcept;
     void   on_newly_acked(uint64_t pn, SentPacket& pkt, Clock::time_point now, FrameSink& sink);
-    /// True if it declared anything lost.
+    /// True if it gave anything up — reported as lost or not yet.
     bool   detect_losses(Clock::time_point now, FrameSink& sink);
     /// `rack`: declared by RACK, not written off — see SentPacket::rack_lost.
-    void   mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink, bool rack);
+    /// `news`: the controller hears of it now, else later or never (unreported).
+    void   mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink, bool rack, bool news = true);
+    /// Tell the controller and the loss counts of a packet given up on.
+    void   report_loss(SentPacket& pkt, Clock::time_point now);
     /// A packet declared lost has been acknowledged after all.
     void   on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept;
     /// `newest_lost`: the latest packet number among those just declared lost.
@@ -373,12 +415,19 @@ private:
     Clock::time_point reorder_deadline_{};
     /// Everything below this has been judged; the scan resumes here.
     uint64_t          loss_scan_ = 0;
+    /// Likewise for the losses not yet reported (SentPacket::unreported).
+    uint64_t          report_scan_ = 0;
     /// The latest past RACK's reference a packet given up on has turned up, and
     /// whether any has.
     Clock::duration   reorder_late_{};
     uint64_t          spurious_ = 0;
     int               episodes_since_reorder_ = 0;
     bool              reordering_seen_ = false;
+    /// What the path did lately to packets the default bars give up on: turned up
+    /// after all with three later ones acknowledged ahead, or were lost (to RACK,
+    /// not to an outage). Halved together, so they describe the last few hundred.
+    uint32_t          overtaken_recent_ = 0;
+    uint32_t          lost_recent_      = 0;
 
     // — episodes —
     bool     in_recovery_      = false;

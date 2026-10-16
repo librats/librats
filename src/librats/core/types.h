@@ -160,7 +160,9 @@ struct PathStats {
     uint64_t queued_bytes    = 0;
     uint64_t bytes_in_flight = 0;   ///< sent and not yet acknowledged
     /// Share of the bytes resolved over the last sampling interval that were
-    /// declared lost, 0..1 (a spurious loss counts too: it is what the sender saw).
+    /// declared lost, 0..1. A spurious loss counts too — it is what the sender saw —
+    /// unless a deadline had its data sent again before the path's own reordering
+    /// stopped explaining it, and it turned up before it did.
     double   loss = 0;
     uint64_t bytes_delivered = 0;   ///< acknowledged since the connection opened
     uint64_t bytes_lost      = 0;   ///< declared lost since the connection opened
