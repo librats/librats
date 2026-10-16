@@ -185,10 +185,18 @@ size_t encode_close(uint8_t* out, Cid dcid, Cid scid, uint64_t error) noexcept {
 
 size_t pn_length(uint64_t pn, uint64_t largest_acked, bool have_acked) noexcept {
     // Twice the distance to what the peer is known to have, so a number is never
-    // read as one half the space away (RFC 9000 §A.2).
+    // read as one half the space away (RFC 9000 §A.2) — and never fewer than two
+    // bytes. The receiver reads a number against the highest it has seen, so one
+    // overtaken by more than half the space is read a whole space off, and the
+    // distance to what was acknowledged says nothing of that: the first packet of
+    // a burst after a quiet spell goes with everything acknowledged, and held back
+    // a little on a path that reorders, the rest of a keyframe overtakes it. With
+    // one byte that is 128 packets: under a cipher it then fails to open — lost —
+    // and in plaintext it is taken for a later packet, which the acknowledgement
+    // then names, never sent or carrying other data. Two bytes hold 32766, for a
+    // byte on packets of a thousand.
     const uint64_t unacked = have_acked ? pn - largest_acked : pn + 1;
     const uint64_t range   = 2 * unacked;
-    if (range < (uint64_t{1} << 8))  return 1;
     if (range < (uint64_t{1} << 16)) return 2;
     if (range < (uint64_t{1} << 24)) return 3;
     return 4;

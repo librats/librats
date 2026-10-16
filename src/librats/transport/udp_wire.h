@@ -235,7 +235,8 @@ size_t encode_close(uint8_t* out, Cid dcid, Cid scid, uint64_t error) noexcept;
 
 /// Bytes of packet number to send `pn` with, given the largest number the peer has
 /// acknowledged (`have_acked` false: none yet). Enough that the receiver, decoding
-/// against the highest number it has seen, cannot mistake it (RFC 9000 §17.1).
+/// against the highest number it has seen, cannot mistake it (RFC 9000 §17.1) —
+/// even overtaken by up to 32766 later packets: never fewer than two.
 size_t pn_length(uint64_t pn, uint64_t largest_acked, bool have_acked) noexcept;
 
 /// The full packet number whose low `len` bytes are `truncated`, closest to

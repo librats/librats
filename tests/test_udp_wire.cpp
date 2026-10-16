@@ -131,8 +131,18 @@ TEST(UdpWireTest, PacketNumbersDecodeAcrossTheirTruncation) {
         EXPECT_EQ(decode_pn(truncated, len, received + 1), pn)
             << "pn " << pn << " acked " << largest_acked << " len " << len;
     }
-    EXPECT_EQ(pn_length(0, 0, false), 1u);
+    EXPECT_EQ(pn_length(0, 0, false), 2u);
     EXPECT_EQ(pn_length(300, 10, true), 2u);
+    EXPECT_EQ(pn_length(70000, 10, true), 3u);
+
+    // Overtaken: sent with everything before it acknowledged, read once up to
+    // 32766 later packets have arrived.
+    for (const uint64_t overtaken : {uint64_t{1}, uint64_t{127}, uint64_t{200}, uint64_t{1000}, uint64_t{32766}}) {
+        const uint64_t pn  = 1000000;
+        const size_t   len = pn_length(pn, pn - 1, true);
+        const uint64_t truncated = pn & ((uint64_t{1} << (8 * len)) - 1);
+        EXPECT_EQ(decode_pn(truncated, len, pn + overtaken + 1), pn) << "overtaken by " << overtaken;
+    }
 }
 
 TEST(UdpWireTest, FramesRoundTrip) {

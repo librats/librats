@@ -450,6 +450,45 @@ TEST(UdpConnectionTest, ADamagedPacketIsDroppedAndRepaired) {
     EXPECT_TRUE(p.b.conn->established()) << "one bad packet broke the connection";
 }
 
+// A packet number travels truncated and is read against the highest one the
+// receiver has seen. The first packet of a burst after a quiet spell — a keyframe's
+// — is sent with everything before it acknowledged; held back on the path while
+// the burst overtakes it, it lands hundreds of numbers behind. It is still itself:
+// under a cipher, not a packet that fails to open; in plaintext, not a later one,
+// whose acknowledgement would then vouch for data that never came (the transfer
+// stalls) or for a packet never sent (a protocol error).
+TEST(UdpConnectionTest, APacketOvertakenByAWholeBurstIsReadAsItself) {
+    for (const bool noise : {true, false}) {
+        SCOPED_TRACE(noise ? "noise" : "plaintext");
+        Pair p(noise, 10ms);
+        ASSERT_TRUE(p.connect());
+        // A window that lets hundreds of packets go at once.
+        p.send(MessageType::App, std::string(4 << 20, 'w'));
+        ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+        p.run(100ms);
+
+        Bytes  held;
+        size_t behind = 0;
+        p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+            if (from != p.a.addr() || !is_short(d)) return false;
+            if (held.empty()) {
+                held = d;
+                return true;
+            }
+            ++behind;
+            return false;
+        };
+        p.send(MessageType::App, std::string(600000, 'k'));
+        ASSERT_TRUE(p.run_until([&] { return behind >= 200; }, 1s));
+        p.net.hook = nullptr;
+        p.net.inject(p.a.addr(), p.b.addr(), held);
+        ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2 || p.a.conn->dead(); }))
+            << "the late packet was taken for another: what that one carried never came";
+        EXPECT_FALSE(p.a.conn->dead()) << "the late packet was acknowledged as one never sent";
+        EXPECT_EQ(p.a.conn->recovery().retransmits(), 0u) << "the late packet was not taken in";
+    }
+}
+
 // Header protection: the packet number a datagram carries is not readable on the
 // path — consecutive packets do not show consecutive numbers.
 TEST(UdpConnectionTest, ThePathCannotReadPacketNumbers) {
