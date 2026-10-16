@@ -41,6 +41,11 @@ constexpr Priority priority_of(MessageType type) noexcept {
         // and both are a handful of bytes.
         case MessageType::Ping:
         case MessageType::Punch:     return Priority::Interactive;
+        // Media frames are live messages and scheduled as such; what is left on
+        // this lane is their control plane — subscriptions and, above all,
+        // keyframe requests, each of which stands between a receiver and a
+        // picture it can decode again. Small, rare and latency-bound.
+        case MessageType::Media:     return Priority::Interactive;
         // A file is the one thing here that is all bulk. Storage stays Normal: its
         // lane carries a store's small requests as well as its snapshots, and the
         // requests must not wait out everything else that is queued.

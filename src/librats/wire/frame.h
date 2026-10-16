@@ -47,6 +47,7 @@ enum class MessageType : uint8_t {
     Pex       = 8,  ///< peer exchange — gossip of known peer addresses (PeerExchange)
     Punch     = 9,  ///< NAT hole-punch rendezvous, relayed peer→peer (HolePunch)
     Relay     = 10, ///< relayed circuits: a peer's connection carried through a third node (Relay)
+    Media     = 11, ///< real-time media: live frames and their control plane (ratcast's MediaService)
 };
 
 /// Fixed header of an inner message.

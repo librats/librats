@@ -341,6 +341,7 @@ here:
 | `Pex` (8) | `PeerExchange` |
 | `Punch` (9) | `HolePunch` (NAT hole-punch rendezvous, relayed peer→peer) |
 | `Relay` (10) | `Relay` (relayed circuits: a peer's connection carried through a third node) |
+| `Media` (11) | reserved for real-time media — live frames and their control plane; not a librats subsystem, claimed by an application such as ratcast's `MediaService` |
 
 **`MessageRouter` (`src/librats/wire/message_router.h`)** does the dispatch. Non-`App`
 frames go to the handler registered for their `MessageType`. `App` frames are
