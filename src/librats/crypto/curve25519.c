@@ -61,6 +61,11 @@ typedef uint8_t u8;
 typedef int32_t s32;
 typedef int64_t limb;
 
+/* Limbs are signed and may be negative. A left shift of a negative value is
+ * undefined in C, so where one can be, the shift is written as a
+ * multiplication by a power of two (or done on the unsigned value): the same
+ * instruction, without the undefined behaviour sanitizers rightly report. */
+
 /* Field element representation:
  *
  * Field elements are written as an array of signed, 64-bit limbs, least
@@ -213,32 +218,32 @@ static void freduce_degree(limb *output) {
    *
    * For output[0..8], the absolute entry value is < 14*2^54 and we add, at
    * most, 19*14*2^54 thus, on exit, |output[0..8]| < 280*2^54. */
-  output[8] += output[18] << 4;
-  output[8] += output[18] << 1;
+  output[8] += output[18] * ((limb)1 << 4);
+  output[8] += output[18] * ((limb)1 << 1);
   output[8] += output[18];
-  output[7] += output[17] << 4;
-  output[7] += output[17] << 1;
+  output[7] += output[17] * ((limb)1 << 4);
+  output[7] += output[17] * ((limb)1 << 1);
   output[7] += output[17];
-  output[6] += output[16] << 4;
-  output[6] += output[16] << 1;
+  output[6] += output[16] * ((limb)1 << 4);
+  output[6] += output[16] * ((limb)1 << 1);
   output[6] += output[16];
-  output[5] += output[15] << 4;
-  output[5] += output[15] << 1;
+  output[5] += output[15] * ((limb)1 << 4);
+  output[5] += output[15] * ((limb)1 << 1);
   output[5] += output[15];
-  output[4] += output[14] << 4;
-  output[4] += output[14] << 1;
+  output[4] += output[14] * ((limb)1 << 4);
+  output[4] += output[14] * ((limb)1 << 1);
   output[4] += output[14];
-  output[3] += output[13] << 4;
-  output[3] += output[13] << 1;
+  output[3] += output[13] * ((limb)1 << 4);
+  output[3] += output[13] * ((limb)1 << 1);
   output[3] += output[13];
-  output[2] += output[12] << 4;
-  output[2] += output[12] << 1;
+  output[2] += output[12] * ((limb)1 << 4);
+  output[2] += output[12] * ((limb)1 << 1);
   output[2] += output[12];
-  output[1] += output[11] << 4;
-  output[1] += output[11] << 1;
+  output[1] += output[11] * ((limb)1 << 4);
+  output[1] += output[11] * ((limb)1 << 1);
   output[1] += output[11];
-  output[0] += output[10] << 4;
-  output[0] += output[10] << 1;
+  output[0] += output[10] * ((limb)1 << 4);
+  output[0] += output[10] * ((limb)1 << 1);
   output[0] += output[10];
 }
 
@@ -292,7 +297,7 @@ static void freduce_coefficients(limb *output) {
      * most, 280*2^28 in the first iteration of this loop. This is added to the
      * next limb and we can approximate the resulting bound of that limb by
      * 281*2^54. */
-    output[i] -= over << 26;
+    output[i] -= over * ((limb)1 << 26);
     output[i+1] += over;
 
     /* For the first iteration, |output[i+1]| < 281*2^54, thus |over| <
@@ -302,12 +307,12 @@ static void freduce_coefficients(limb *output) {
      * For subsequent iterations of the loop, 281*2^54 remains a conservative
      * bound and no overflow occurs. */
     over = div_by_2_25(output[i+1]);
-    output[i+1] -= over << 25;
+    output[i+1] -= over * ((limb)1 << 25);
     output[i+2] += over;
   }
   /* Now |output[10]| < 281*2^29 and all other coefficients are reduced. */
-  output[0] += output[10] << 4;
-  output[0] += output[10] << 1;
+  output[0] += output[10] * ((limb)1 << 4);
+  output[0] += output[10] * ((limb)1 << 1);
   output[0] += output[10];
 
   output[10] = 0;
@@ -316,7 +321,7 @@ static void freduce_coefficients(limb *output) {
    * So |over| will be no more than 2^16. */
   {
     limb over = div_by_2_26(output[0]);
-    output[0] -= over << 26;
+    output[0] -= over * ((limb)1 << 26);
     output[1] += over;
   }
 
@@ -453,11 +458,11 @@ fexpand(limb *output, const u8 *input) {
 /* s32_eq returns 0xffffffff iff a == b and zero otherwise. */
 static s32 s32_eq(s32 a, s32 b) {
   a = ~(a ^ b);
-  a &= a << 16;
-  a &= a << 8;
-  a &= a << 4;
-  a &= a << 2;
-  a &= a << 1;
+  a &= (s32)((uint32_t)a << 16);
+  a &= (s32)((uint32_t)a << 8);
+  a &= (s32)((uint32_t)a << 4);
+  a &= (s32)((uint32_t)a << 2);
+  a &= (s32)((uint32_t)a << 1);
   return a >> 31;
 }
 
@@ -588,14 +593,14 @@ fcontract(u8 *output, limb *input_limbs) {
     }
   }
 
-  input[1] <<= 2;
-  input[2] <<= 3;
-  input[3] <<= 5;
-  input[4] <<= 6;
-  input[6] <<= 1;
-  input[7] <<= 3;
-  input[8] <<= 4;
-  input[9] <<= 6;
+  input[1] = (s32)((uint32_t)input[1] << 2);
+  input[2] = (s32)((uint32_t)input[2] << 3);
+  input[3] = (s32)((uint32_t)input[3] << 5);
+  input[4] = (s32)((uint32_t)input[4] << 6);
+  input[6] = (s32)((uint32_t)input[6] << 1);
+  input[7] = (s32)((uint32_t)input[7] << 3);
+  input[8] = (s32)((uint32_t)input[8] << 4);
+  input[9] = (s32)((uint32_t)input[9] << 6);
 #define F(i, s) \
   output[s+0] |=  input[i] & 0xff; \
   output[s+1]  = (input[i] >> 8) & 0xff; \
