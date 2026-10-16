@@ -30,9 +30,9 @@
  *     a later one delivered — on a timer of its own, so the last packets of a
  *     burst do not wait for a probe. A packet given up on whose acknowledgement
  *     still comes was only overtaken: from then on the count is no evidence and
- *     the window covers how late it was (RFC 8985 §6.2) — for traffic that can
- *     wait (see counts_packets()). Such a loss is no loss rate either:
- *     path_lost() leaves it out.
+ *     the window covers how late it was (RFC 8985 §6.2), for every kind of data
+ *     (see counts_packets()). Such a loss is no loss rate either: path_lost()
+ *     leaves it out.
  *   - Congestion episodes: one reduction per episode, however many packets it
  *     loses; it ends once what it lost has been delivered again — its last repair
  *     acknowledged, nothing still owed: NewReno's recovery point in packet
@@ -236,7 +236,8 @@ public:
     /// a one-second outage unnoticed for up to as long again — every live message
     /// in that time lost for nothing. Such a timeout does not count towards giving
     /// up; the connection's idle timeout still ends a path that never answers.
-    /// Loss is judged by the default reordering bars meanwhile (counts_packets()).
+    /// Loss is judged as for anything else: what the path has shown of its
+    /// reordering is a fact about the path, whatever is waiting to cross it.
     void set_impatient(bool impatient) noexcept;
 
     /// Frames of the newest packet still in flight that carried data — what
@@ -275,11 +276,13 @@ public:
     /// its window is up. Not once a path has overtaken a packet by more: what it
     /// overtakes it by follows the sending rate, so a count learnt at one rate is
     /// beaten at the next (as Linux and RFC 8985 do, only the window judges then).
-    /// What the path has shown of its reordering is waited out only by traffic
-    /// that can wait: while a live message is outstanding (set_impatient) the
-    /// default bars hold — a piece sent twice costs a packet, one waited for past
-    /// its deadline the whole frame.
-    bool counts_packets() const noexcept { return impatient_ || !reordering_seen_; }
+    /// Live data waits it out too. Judged by the default bars instead, a path that
+    /// reorders every few packets — per-packet jitter, a bonded link — had up to
+    /// half a video stream sent twice and every overtaken packet reported to BBR as
+    /// congestion, which cut its estimate below the stream's rate: frames expired
+    /// in the queue. What waiting costs a frame with little time left is FEC's to
+    /// cover (UdpConnection::live_repairs counts the window in).
+    bool counts_packets() const noexcept { return !reordering_seen_; }
     /// Times the controller was told about congestion: once per loss episode, plus
     /// once per retransmission timeout.
     uint32_t congestion_events() const noexcept { return congestion_events_; }
@@ -343,6 +346,8 @@ private:
     /// less when impatient.
     Clock::duration timeout_wait() const noexcept;
     Clock::duration impatient_wait() const noexcept;
+    /// The most a reordering window may wait (see reorder_window()).
+    Clock::duration max_reorder_window() const noexcept;
     void            arm_loss_timer(Clock::time_point from) noexcept;
     void            rearm(Clock::time_point now) noexcept;
 

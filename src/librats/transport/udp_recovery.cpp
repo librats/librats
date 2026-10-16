@@ -434,8 +434,8 @@ void Recovery::on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept
     // newest delivery — the reference RACK measures from. From now on the window
     // covers that and the count no longer decides, so the same reordering is not
     // taken for loss again: sent twice, cutting the window, counted into the loss
-    // rate FEC and BBR go by. One overtaken by more than a round trip is past what
-    // a window may wait for (RFC 8985 caps it there).
+    // rate FEC and BBR go by. One overtaken by more than a probe timeout is past
+    // what a window may wait for (see max_reorder_window()).
     pkt.rack_lost    = false;
     spurious_       += pkt.bytes;
     reordering_seen_ = true;
@@ -447,12 +447,24 @@ void Recovery::on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept
 Clock::duration Recovery::reorder_window() const noexcept {
     // The reordering a path is allowed before a packet counts as lost: a quarter of
     // the minimum round trip (RFC 8985's default), plus however late a packet given
-    // up on has turned up; at least a millisecond, never more than a round trip.
+    // up on has turned up; at least a millisecond, never more than
+    // max_reorder_window().
     const Clock::duration floor = std::chrono::milliseconds(1);
     if (!rtt_.have_rtt) return floor;
-    const Clock::duration late = impatient_ ? Clock::duration::zero() : reorder_late_;
-    const Clock::duration wnd  = Clock::duration(rtt_.min_rtt / 4) + late;
-    return (std::max)(floor, (std::min)(wnd, rtt_.srtt));
+    const Clock::duration wnd = Clock::duration(rtt_.min_rtt / 4) + reorder_late_;
+    return (std::max)(floor, (std::min)(wnd, max_reorder_window()));
+}
+
+Clock::duration Recovery::max_reorder_window() const noexcept {
+    // RFC 8985 stops at a round trip, which takes a packet's lateness to be no more
+    // than that. Where the jitter is larger than the round trip itself — Wi-Fi to a
+    // peer on the same LAN: 2 ms, and 10 ms of jitter — that bar cannot hold what
+    // the path does, and every packet past it is a spurious loss again (1 Gbit/s,
+    // 2 ms, 0-10 ms per packet in bench_path: half of 1080p60's frames late). The
+    // smoothed round trip is itself pulled down there, sampled from the newest
+    // packet delivered, which is the one that overtook the rest. Waiting longer
+    // than a probe timeout is never what a window does: by then a probe asks.
+    return (std::max)(rtt_.srtt, base_probe_timeout());
 }
 
 void Recovery::congestion_event(Clock::time_point now, uint64_t newest_lost) {
@@ -498,8 +510,9 @@ void Recovery::retire_front(Clock::time_point now) noexcept {
     // A packet leaves the log once nothing more can be learnt from it: delivered,
     // written off, or a bare ACK nobody acknowledges. One RACK gave up on stays
     // while an acknowledgement could still say it was only late — its round trip
-    // plus the most a window waits (a round trip), with an ack delay to spare.
-    const Clock::duration keep = 2 * rtt_.srtt + std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
+    // plus the most a window waits, with an ack delay to spare.
+    const Clock::duration keep =
+        rtt_.srtt + max_reorder_window() + std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
     while (!sent_.empty() && !sent_.front().in_flight) {
         if (sent_.front().rack_lost && now - sent_.front().tx.sent_at < keep) break;
         pop_front();

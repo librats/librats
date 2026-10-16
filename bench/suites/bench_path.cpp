@@ -1271,10 +1271,11 @@ void class_tables() {
                 "   by its own draw from 0-10 ms, as over a path that keeps no order (per-packet\n"
                 "   jitter, a bonded link): overtaken all the time. \"+loss\": 0.5%% lost as\n"
                 "   well, so FEC and repairs have real work. Loss detection reads three\n"
-                "   packets acked past a hole as a loss, and while a frame is outstanding\n"
-                "   keeps doing so: a piece sent twice costs a packet, one waited for the\n"
-                "   frame. What turns up after all is no loss rate, so FEC does not pay for\n"
-                "   it; bulk traffic waits it out instead — see the \"overtaken\" rows of bulk.)\n");
+                "   packets acked past a hole as a loss until the path has shown that it\n"
+                "   reorders; from then on it waits for as long as the path has been late,\n"
+                "   live data and bulk alike, and FEC sizes its repairs knowing a loss is\n"
+                "   found that much later. What turns up after all is no loss rate, so\n"
+                "   reordering neither cuts the estimate nor buys repair symbols.)\n");
 }
 
 } // namespace

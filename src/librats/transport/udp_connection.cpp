@@ -1320,10 +1320,11 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     // Whether a piece lost now could still be sent again in time: the message
     // leaves at the pacing rate, a loss is known a round trip and a reordering
     // window after — an ack delay more for the last piece — and the second copy
-    // takes the one-way delay.
+    // takes the one-way delay. The window is the one the path has taught
+    // Recovery: on a path that reorders, a loss waits that out before it is known.
     const cc::PacingRate rate = recovery_.congestion().pacing_rate();
     const Clock::duration out   = rate.paced() ? rate.time_for(layout.size) : Clock::duration::zero();
-    const Clock::duration again = rtt.srtt + rtt.srtt / 8 + Recovery::kMaxAckDelay + one_way();
+    const Clock::duration again = rtt.srtt + recovery_.reorder_window() + Recovery::kMaxAckDelay + one_way();
     const double target = now + out + again <= deadline ? kLiveLossTargetWithArq : kLiveLossTarget;
     return fec::rows_for(layout.columns(0), live_loss_.rate(), target);
 }

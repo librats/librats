@@ -58,6 +58,9 @@ struct Direction {
     /// queue, which they leave on time: a host's timer, a radio's retries.
     double               late       = 0;
     Clock::duration      late_by{};
+    /// Every datagram late by its own draw from [0, jitter]: a path that keeps no
+    /// order (per-packet jitter, a bonded link), so they overtake one another.
+    Clock::duration      jitter{};
     Clock::time_point    busy_until{};
     std::deque<InFlight> wire;
     size_t               sent  = 0;   ///< datagrams that entered the queue
@@ -102,6 +105,8 @@ public:
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
         Clock::time_point arrive = d.busy_until + d.delay;
         if (d.late > 0 && unit_(rng_) < d.late) arrive += d.late_by;
+        if (d.jitter > Clock::duration::zero())
+            arrive += std::chrono::duration_cast<Clock::duration>(d.jitter * unit_(rng_));
         // Held back past the ones behind it: in arrival order, so it is overtaken.
         auto at = std::upper_bound(d.wire.begin(), d.wire.end(), arrive,
                                    [](Clock::time_point t, const InFlight& f) { return t < f.arrive; });
@@ -686,8 +691,8 @@ struct HandDriven {
 // A packet given up on whose acknowledgement still comes was overtaken, not
 // lost. From then on three packets acknowledged past one prove nothing — how
 // many overtake it follows the sending rate — and the window it is given covers
-// how late the overtaken one was. It is no loss rate either. A live message
-// outstanding would rather send a piece twice than wait: the count holds again.
+// how late the overtaken one was. It is no loss rate either — and all of it
+// holds while a live message is outstanding: the path is the same path.
 TEST(UdpLossRecoveryTest, APacketAcknowledgedAfterItWasGivenUpOnWidensTheReorderWindow) {
     HandDriven h;
     std::vector<uint64_t> pn;
@@ -722,10 +727,48 @@ TEST(UdpLossRecoveryTest, APacketAcknowledgedAfterItWasGivenUpOnWidensTheReorder
     EXPECT_EQ(h.r.retransmits(), 1u) << "the count still decided";
 
     h.r.set_impatient(true);
-    EXPECT_TRUE(h.r.counts_packets());
-    EXPECT_EQ(h.r.reorder_window(), base_window);
+    EXPECT_FALSE(h.r.counts_packets());
+    EXPECT_EQ(h.r.reorder_window(), base_window + 14ms);
     h.ack(next[6]);
-    EXPECT_EQ(h.r.retransmits(), 2u) << "a live message waited out the path's reordering";
+    EXPECT_EQ(h.r.retransmits(), 1u) << "a live message forgot what the path had shown";
+}
+
+// A path whose packets come later than its whole round trip — Wi-Fi to a peer on
+// the same LAN: 2 ms, and 10 ms of jitter. A window stopped at a round trip could
+// not hold that, and every such packet was a loss again; it stops at a probe
+// timeout instead, past which a probe asks anyway.
+TEST(UdpLossRecoveryTest, TheReorderWindowCoversLatenessPastTheRoundTrip) {
+    HandDriven h;
+    const auto step = [&](Clock::duration rtt, uint64_t first, uint64_t last) {
+        h.now += rtt;
+        for (uint64_t p = first; p <= last; ++p) h.ack(p);
+    };
+    for (int i = 0; i < 8; ++i) {   // a 2 ms path
+        const uint64_t p = h.send();
+        step(2ms, p, p);
+    }
+
+    const uint64_t overtaken = h.send();
+    const uint64_t later     = h.send();
+    for (int i = 0; i < 3; ++i) h.send();
+    step(2ms, later, later + 3);
+    ASSERT_EQ(h.r.retransmits(), 1u);
+    h.now += 10ms;
+    h.ack(overtaken);
+    ASSERT_EQ(h.r.spurious(), 1000u) << "a packet 10 ms late was no longer kept to learn from";
+    EXPECT_LT(h.r.rtt().srtt, Clock::duration(4ms));
+    EXPECT_GE(h.r.reorder_window(), Clock::duration(10ms)) << "held to the round trip";
+    EXPECT_LE(h.r.reorder_window(), h.r.probe_timeout());
+
+    // The next one 8 ms late is waited for.
+    const uint64_t again = h.send();
+    const uint64_t after = h.send();
+    for (int i = 0; i < 3; ++i) h.send();
+    step(2ms, after, after + 3);
+    h.now += 8ms;
+    h.r.on_timer(h.now, h.sink);
+    h.ack(again);
+    EXPECT_EQ(h.r.retransmits(), 1u) << "taken for lost again";
 }
 
 // What a path did once is forgotten after kReorderMemory loss episodes with no
@@ -783,11 +826,10 @@ TEST(UdpLossRecoveryTest, APathThatOnlyReordersIsNotTakenForALossyOne) {
     }
 }
 
-// Live video over such a path, two datagrams in a hundred overtaken: its pieces
-// are given up on at three packets still (a frame would rather lose a packet's
-// worth of bandwidth than its deadline), but what turns up after all is not the
-// path's loss rate, which is what repair symbols are sized by. Counted, it bought
-// a stream with no loss to repair 1% of its bytes in repair symbols.
+// Live video over such a path, two datagrams in a hundred overtaken: what turns
+// up after all is not the path's loss rate, which is what repair symbols are
+// sized by. Counted, it bought a stream with no loss to repair 1% of its bytes in
+// repair symbols.
 TEST(UdpLossRecoveryTest, ReorderingBuysALiveStreamNoRepairSymbols) {
     Sim sim(50, 20ms, 104);
     sim.path.fwd().late    = 0.02;
@@ -812,6 +854,41 @@ TEST(UdpLossRecoveryTest, ReorderingBuysALiveStreamNoRepairSymbols) {
     EXPECT_GT(f.sender().recovery().spurious(), 0u) << "nothing was overtaken: the test tests nothing";
     EXPECT_EQ(st.live_expired, 0u);
     EXPECT_LT(st.live_repair_bytes, 15000u) << "repair symbols for a path that loses nothing";
+}
+
+// Live video over a path that keeps no order: every datagram, both ways, late by
+// its own draw from 0-10 ms, so packets overtake one another all the time and lose
+// nothing. Taken for loss by three packets acknowledged past them, as live data
+// once was however much the path had shown, a quarter of the stream went twice
+// and every overtaken packet reached BBR as congestion: its estimate fell below
+// the stream's rate and the frames expired in the queue — 535 of 600.
+TEST(UdpLossRecoveryTest, LiveVideoOverAPathThatKeepsNoOrderKeepsItsRate) {
+    Sim sim(50, 20ms, 104);
+    sim.path.fwd().jitter = 10ms;
+    sim.path.rev().jitter = 10ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(200ms);
+    ASSERT_TRUE(f.tx.established());
+
+    const std::string frame(25000, 'v');   // 60 a second: 12 Mbit/s
+    Clock::time_point next = sim.now;
+    int frames = 0;
+    sim.on_step = [&] {
+        if (sim.now < next) return;
+        next += 16667us;
+        ++frames;
+        ASSERT_TRUE(f.tx.send_live(MessageType::App, frame, sim.now + 110ms));
+        f.tx.conn->flush(sim.now);
+    };
+    sim.run(10s);
+    sim.on_step = nullptr;
+    sim.run(500ms);
+
+    const udp::Recovery& r = f.sender().recovery();
+    const PathStats st = f.sender().path_stats();
+    EXPECT_GT(r.spurious(), 0u) << "nothing was overtaken: the test tests nothing";
+    EXPECT_LT(st.live_expired, static_cast<uint64_t>(frames / 50)) << "of " << frames << " frames";
+    EXPECT_LT(r.retransmits(), r.next_pn() / 20) << "the stream sent twice";
 }
 
 // ── Flow control ────────────────────────────────────────────────────────────
