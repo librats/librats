@@ -315,7 +315,8 @@ public:
             d.wire.push_back(InFlight{arrive, to, from, Bytes(data, data + len)});
             return;
         }
-        if (unit_(rng_) < late_.share) arrive += late_.by;
+        if (late_.scattered)                arrive += std::chrono::duration_cast<Clock::duration>(late_.by * unit_(rng_));
+        else if (unit_(rng_) < late_.share) arrive += late_.by;
         if (!late_.reorders && !d.wire.empty()) arrive = (std::max)(arrive, d.wire.back().arrive);
         // In arrival order: one held back is overtaken by those behind it.
         auto at = d.wire.end();
@@ -360,7 +361,11 @@ public:
     /// timer. One held back holds back those behind it too, as a Wi-Fi receiver's
     /// block-ack window does — delay without reordering — unless `reorders`, when
     /// those behind overtake it.
-    void   hold_back(double share, Clock::duration by, bool reorders) { late_ = Late{share, by, reorders}; }
+    void   hold_back(double share, Clock::duration by, bool reorders) { late_ = Late{share, by, reorders, false}; }
+    /// Delay every datagram, both ways, by its own draw from [0, `up_to`]: a path
+    /// whose packets do not keep to one queue — per-packet jitter, a bonded link —
+    /// so they overtake one another all the time.
+    void   scatter(Clock::duration up_to) { late_ = Late{1, up_to, true, true}; }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -395,6 +400,7 @@ private:
         double          share = 0;
         Clock::duration by{};
         bool            reorders = false;
+        bool            scattered = false;   ///< every datagram late by a draw from [0, by]
     };
     Late         late_;
     std::mt19937 rng_;
@@ -748,6 +754,7 @@ struct Scene {
     double  late = 0;               ///< share of datagrams held back late_ms, both ways
     int     late_ms = 0;
     bool    late_reorders = false;  ///< overtaken by those behind, or holding them back too
+    bool    late_scattered = false; ///< every datagram late by its own draw from [0, late_ms]
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
     Scene& over(double mbps, int ms) { link = mbps; rtt = ms; return *this; }
@@ -755,6 +762,7 @@ struct Scene {
     Scene& jittery(double share, int ms, bool reorder = false) {
         late = share; late_ms = ms; late_reorders = reorder; return *this;
     }
+    Scene& scattered(int ms) { late = 1; late_ms = ms; late_reorders = late_scattered = true; return *this; }
     Scene& lossy(double share, int burst = 0) { loss = share; burst_ms = burst; return *this; }
     Scene& buffer(double bdp) { buffer_bdp = bdp; return *this; }
     Scene& adaptive(double ceiling = 8) { source = Source::Adaptive; video = ceiling; return *this; }
@@ -782,6 +790,7 @@ struct RealtimeResult {
     double video;           ///< Mbit/s the encoder produced
     double fec;             ///< repair symbols sent, % of the video
     double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; <0 none did
+    double resent;          ///< packets sent again, % of the packets sent
 };
 
 /// One live source and the player at the far end of its connection: the scene's
@@ -950,7 +959,8 @@ RealtimeResult realtime(const Scene& sc) {
     fwd.burst = ms(sc.burst_ms);
     Direction rev = fwd;
     Path path(fwd, rev);
-    path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
+    if (sc.late_scattered) path.scatter(ms(sc.late_ms));
+    else                   path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
 
     const auto event     = std::chrono::seconds(10);
     const bool dark      = sc.besides == Besides::Outage || sc.besides == Besides::Roam;
@@ -1075,7 +1085,8 @@ RealtimeResult realtime(const Scene& sc) {
     std::sort(key_latency.begin(), key_latency.end());
     const double key_median = key_latency.empty() ? -1 : key_latency[(key_latency.size() - 1) / 2] - base;
     return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
-            recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median};
+            recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median,
+            fv.tx.retransmits() * 100.0 / double((std::max<uint64_t>)(fv.tx.conn()->recovery().next_pn(), 1))};
 }
 
 /// A share of frames late, as a column: green within what a call shrugs off,
@@ -1213,36 +1224,57 @@ void class_tables() {
                 "   another).)\n");
 
     // Reordering, which the wi-fi column above does not do: a datagram held back
-    // there holds back those behind it, as a block-ack window does.
-    const double shares[] = {0.001, 0.01, 0.05};
-    std::printf("\n%srealtime by class — %% of frames late, 50 Mbit/20 ms, a share of the datagrams overtaken by 8 ms%s\n  %-30s",
-                col("\x1b[1m"), col("\x1b[0m"), "");
-    std::printf(" %9s", "none");
-    for (double sh : shares) {
-        char h[16];
-        std::snprintf(h, sizeof(h), "%g%%", sh * 100);
-        std::printf(" %9s", h);
-    }
-    std::printf(" %9s", "1%+loss");
-    std::printf("\n  %-30s", "------------------------------");
-    for (int i = 0; i < 5; ++i) std::printf(" %9s", "---------");
-    std::printf("\n");
+    // there holds back those behind it, as a block-ack window does. Each cell is
+    // one run, read twice: the frames it made late, and what it sent twice.
+    struct Column {
+        const char* name;
+        Scene (*on)(Scene);
+    };
+    const Column columns[] = {
+        {"none", [](Scene s) { return s; }},
+        {"0.1%", [](Scene s) { return s.jittery(0.001, 8, true); }},
+        {"1%", [](Scene s) { return s.jittery(0.01, 8, true); }},
+        {"5%", [](Scene s) { return s.jittery(0.05, 8, true); }},
+        {"1%+loss", [](Scene s) { return s.jittery(0.01, 8, true).lossy(0.005); }},
+        {"0-10 ms", [](Scene s) { return s.scattered(10); }},
+        {"0-10+loss", [](Scene s) { return s.scattered(10).lossy(0.005); }},
+    };
+    std::vector<std::pair<const VideoClass*, std::vector<RealtimeResult>>> runs;
     for (const VideoClass& v : kVideoClasses) {
         if (v.mbps > 45) continue;
         const Scene base = Scene{}.over(50, 20).sending(v.mbps, v.fps).shaped(v.profile);
-        std::printf("  %-30s %s", v.name, late_cell(realtime(base).late).c_str());
-        for (double sh : shares)
-            std::printf(" %s", late_cell(realtime(Scene{base}.jittery(sh, 8, true)).late).c_str());
-        std::printf(" %s", late_cell(realtime(Scene{base}.jittery(0.01, 8, true).lossy(0.005)).late).c_str());
-        std::printf("\n");
+        std::vector<RealtimeResult> row;
+        for (const Column& c : columns) row.push_back(realtime(c.on(base)));
+        runs.emplace_back(&v, std::move(row));
     }
-    std::printf("  (a datagram 8 ms late on this path is overtaken by every one sent in those\n"
-                "   8 ms — at 40 Mbit/s some thirty. Loss detection reads three packets acked\n"
-                "   past a hole as a loss, and while a frame is outstanding keeps doing so: a\n"
-                "   piece sent twice costs a packet, one waited for the frame. What turns up\n"
-                "   after all is no loss rate, so FEC does not pay for it; bulk traffic waits\n"
-                "   it out instead — see the \"overtaken\" rows of bulk. \"1%%+loss\": 1%%\n"
-                "   overtaken and 0.5%% lost as well, so FEC and repairs have real work.)\n");
+    const auto reorder_table = [&](const char* title, auto cell) {
+        std::printf("\n%s%s%s\n  %-30s", col("\x1b[1m"), title, col("\x1b[0m"), "");
+        for (const Column& c : columns) std::printf(" %9s", c.name);
+        std::printf("\n  %-30s", "------------------------------");
+        for (size_t i = 0; i < std::size(columns); ++i) std::printf(" %9s", "---------");
+        std::printf("\n");
+        for (const auto& [v, row] : runs) {
+            std::printf("  %-30s", v->name);
+            for (const RealtimeResult& r : row) std::printf(" %s", cell(r).c_str());
+            std::printf("\n");
+        }
+    };
+    reorder_table("realtime by class — % of frames late, 50 Mbit/20 ms, datagrams overtaken",
+                  [](const RealtimeResult& r) { return late_cell(r.late); });
+    reorder_table("realtime by class — % of packets sent again, same runs", [](const RealtimeResult& r) {
+        char s[32];
+        std::snprintf(s, sizeof(s), "%8.1f%%", r.resent);
+        return std::string(s);
+    });
+    std::printf("  (a share of the datagrams 8 ms late, both ways: overtaken by every one sent\n"
+                "   in those 8 ms — at 40 Mbit/s some thirty. \"0-10 ms\": every datagram late\n"
+                "   by its own draw from 0-10 ms, as over a path that keeps no order (per-packet\n"
+                "   jitter, a bonded link): overtaken all the time. \"+loss\": 0.5%% lost as\n"
+                "   well, so FEC and repairs have real work. Loss detection reads three\n"
+                "   packets acked past a hole as a loss, and while a frame is outstanding\n"
+                "   keeps doing so: a piece sent twice costs a packet, one waited for the\n"
+                "   frame. What turns up after all is no loss rate, so FEC does not pay for\n"
+                "   it; bulk traffic waits it out instead — see the \"overtaken\" rows of bulk.)\n");
 }
 
 } // namespace
