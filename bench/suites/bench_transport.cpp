@@ -799,6 +799,7 @@ struct Options {
     int    live_secs     = 10;     ///< 0 skips the live phase
     double live_mbps     = 4;
     int    live_ms       = 150;
+    bool   live_adapt    = false;  ///< sized to the estimate, first thing on the connection
 
     bool   help          = false;
 };
@@ -1105,6 +1106,8 @@ struct Run {
     double live_delivered = 0, live_expired = 0;   ///< % of frames
     double live_repair = 0;                        ///< repair symbols sent, % of the video
     double live_rtt_median_ms = 0, live_rtt_p99_ms = 0;
+    double live_mbps = 0;            ///< video produced, mean
+    double live_full_s = -1;         ///< --live-adapt: s until it ran at --live-mbps; <0 never
 };
 
 /// One connected client node, plus the endpoint whose handlers it runs.
@@ -1297,11 +1300,16 @@ void measure_small(const Options& o, Wire& w, Run& run) {
 /// times a frame's size every two seconds, each frame a live message of
 /// --live-ms. The responder echoes every frame that arrives, so the round trip
 /// is measured on one clock: sent → delivered whole → echo back.
+///
+/// With --live-adapt the encoder sizes itself to the estimate instead — 90% of
+/// PathStats::bandwidth_bps, read every 100 ms — from 1 Mbit/s up to --live-mbps,
+/// as an application that takes the estimate for the path's capacity would.
 void measure_live(const Options& o, Wire& w, Run& run) {
     if (o.live_secs <= 0) return;
     constexpr int kFps = 30, kGop = 60, kKeyWeight = 5;
-    const double unit   = o.live_mbps * 1e6 / 8 * kGop / kFps / (kGop - 1 + kKeyWeight);
-    const int    frames = o.live_secs * kFps;
+    const double ceiling = o.live_mbps * 1e6;
+    double       rate    = o.live_adapt ? (std::min)(ceiling, 1e6) : ceiling;
+    const int    frames  = o.live_secs * kFps;
     SendOptions live;
     live.lifetime = std::chrono::milliseconds(o.live_ms);
     {
@@ -1316,6 +1324,12 @@ void measure_live(const Options& o, Wire& w, Run& run) {
     for (int n = 0; n < frames; ++n) {
         std::this_thread::sleep_until(next);
         next += std::chrono::microseconds(1000000 / kFps);
+        if (o.live_adapt && n % 3 == 0) {
+            const auto st = w.node->path_stats(w.remote);
+            if (st && st->bandwidth_bps > 0) rate = (std::max)(150e3, (std::min)(st->bandwidth_bps * 0.9, ceiling));
+            if (rate >= ceiling && run.live_full_s < 0) run.live_full_s = n / double(kFps);
+        }
+        const double unit  = rate / 8 * kGop / kFps / (kGop - 1 + kKeyWeight);
         const size_t bytes = static_cast<size_t>(unit * (n % kGop == 0 ? kKeyWeight : 1));
         frame.assign((std::max)(bytes, kLiveHeader), 'v');
         video_bytes += frame.size();
@@ -1333,6 +1347,7 @@ void measure_live(const Options& o, Wire& w, Run& run) {
         rtts = w.session->live_rtts;
     }
     run.live_delivered     = rtts.size() * 100.0 / frames;
+    run.live_mbps          = video_bytes * 8.0 / o.live_secs / 1e6;
     run.live_rtt_median_ms = percentile(rtts, 0.50);
     run.live_rtt_p99_ms    = percentile(rtts, 0.99);
     const auto after = w.node->path_stats(w.remote);
@@ -1358,6 +1373,13 @@ Run measure_wire(TransportKind kind, const Options& o) {
     std::printf("  %s: connected to %s — rtt ...", wire(kind), run.remote_id.c_str());
     std::fflush(stdout);
     measure_rtt(o, w, run);
+    // A source that sizes itself to the estimate is measured on a connection
+    // nothing has filled yet: after the bulk phases the estimate is the path's.
+    if (o.live_adapt && o.live_secs > 0) {
+        std::printf(" live ...");
+        std::fflush(stdout);
+        measure_live(o, w, run);
+    }
     std::printf(" upload ...");
     std::fflush(stdout);
     measure_upload(o, w, run);
@@ -1367,7 +1389,7 @@ Run measure_wire(TransportKind kind, const Options& o) {
     std::printf(" small ...");
     std::fflush(stdout);
     measure_small(o, w, run);
-    if (o.live_secs > 0) {
+    if (o.live_secs > 0 && !o.live_adapt) {
         std::printf(" live ...");
         std::fflush(stdout);
         measure_live(o, w, run);
@@ -1469,14 +1491,23 @@ int connect_and_measure(const Options& o) {
 
     if (o.live_secs > 0) {
         char title[128];
-        std::snprintf(title, sizeof(title), "live — %d s of 30 fps video at %.1f Mbit/s, %d ms lifetime",
-                      o.live_secs, o.live_mbps, o.live_ms);
+        if (o.live_adapt)
+            std::snprintf(title, sizeof(title),
+                          "live — %d s of 30 fps video sized to the estimate, up to %.1f Mbit/s, %d ms lifetime",
+                          o.live_secs, o.live_mbps, o.live_ms);
+        else
+            std::snprintf(title, sizeof(title), "live — %d s of 30 fps video at %.1f Mbit/s, %d ms lifetime",
+                          o.live_secs, o.live_mbps, o.live_ms);
         table.head(title);
         table.line("frames delivered",       tcp.live_delivered,     udp.live_delivered,     "%", false, "%8.1f");
         table.line("given up by the sender", tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
         table.line("repair symbols sent",    tcp.live_repair,        udp.live_repair,        "%", true,  "%8.1f");
         table.line("frame round trip, median", tcp.live_rtt_median_ms, udp.live_rtt_median_ms, "ms", true);
         table.line("frame round trip, p99",  tcp.live_rtt_p99_ms,    udp.live_rtt_p99_ms,    "ms", true);
+        if (o.live_adapt) {
+            table.line("video sent, mean",       tcp.live_mbps,   udp.live_mbps,   "Mbit/s", false);
+            table.line("at full rate after",     tcp.live_full_s, udp.live_full_s, "s",      true, "%8.1f");
+        }
         std::printf("  (each frame is a live message: repaired while it can still arrive in time,\n"
                     "   dropped whole once it cannot. The round trip is sent -> delivered whole ->\n"
                     "   echoed back, so it is the frame's delivery plus one small message the other\n"
@@ -1488,6 +1519,10 @@ int connect_and_measure(const Options& o) {
                     "   already in the socket can be dropped, so there a loss delays the frames\n"
                     "   behind it instead. Repair symbols are the forward error correction a\n"
                     "   lossy datagram path gets, as a share of the video.)\n");
+        if (o.live_adapt)
+            std::printf("  (--live-adapt: the video ran first, on the fresh connection, at 90%% of\n"
+                        "   the estimate from 1 Mbit/s up to --live-mbps. \"At full rate after\" is\n"
+                        "   when it first got there, -1 if it never did.)\n");
     }
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "
@@ -1530,6 +1565,8 @@ void usage() {
         "  --live-s N        seconds of live video, 0 to skip   (default 10)\n"
         "  --live-mbps N     its rate, Mbit/s                   (default 4)\n"
         "  --live-ms N       each frame's lifetime, ms          (default 150)\n"
+        "  --live-adapt      size the video to the estimate, from 1 Mbit/s, on the\n"
+        "                    fresh connection (before the bulk phases)\n"
         "  -h, --help        this text\n"
         "\n"
         "both ends must run the same --protocol; the responder must be reachable on\n"
@@ -1623,6 +1660,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (arg == "--live-s")       { if (!number(i, n, 1)) return false; o.live_secs = static_cast<int>(n); }
         else if (arg == "--live-mbps")    { if (!number(i, n, 1)) return false; o.live_mbps = static_cast<double>(n); }
         else if (arg == "--live-ms")      { if (!number(i, n, 1)) return false; o.live_ms = static_cast<int>(n); }
+        else if (arg == "--live-adapt")   { o.live_adapt = true; }
         else {
             std::fprintf(stderr, "bench_transport: unknown option '%s' (try --help)\n", arg.c_str());
             return false;

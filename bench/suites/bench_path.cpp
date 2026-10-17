@@ -364,8 +364,10 @@ public:
     void   hold_back(double share, Clock::duration by, bool reorders) { late_ = Late{share, by, reorders, false}; }
     /// Delay every datagram, both ways, by its own draw from [0, `up_to`]: a path
     /// whose packets do not keep to one queue — per-packet jitter, a bonded link —
-    /// so they overtake one another all the time.
-    void   scatter(Clock::duration up_to) { late_ = Late{1, up_to, true, true}; }
+    /// so they overtake one another all the time; or, unless `reorders`, one that
+    /// keeps them in order, each held back by those before it — a radio that
+    /// waits for its medium.
+    void   scatter(Clock::duration up_to, bool reorders = true) { late_ = Late{1, up_to, reorders, true}; }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -705,6 +707,7 @@ void delay(const char* name, double rate, int rtt, size_t queue, int secs) {
 enum class Source {
     Fixed,      ///< encodes at its configured rate whatever the path does
     Adaptive,   ///< retargets its encoder from the stream's PathStats every 100 ms
+    Estimate,   ///< sets its encoder to 90% of PathStats::bandwidth_bps every 100 ms
 };
 /// What else the path is doing while the video runs. Every event starts at 10 s.
 enum class Besides {
@@ -755,6 +758,7 @@ struct Scene {
     int     late_ms = 0;
     bool    late_reorders = false;  ///< overtaken by those behind, or holding them back too
     bool    late_scattered = false; ///< every datagram late by its own draw from [0, late_ms]
+                                    ///< (in order unless late_reorders)
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
     Scene& over(double mbps, int ms) { link = mbps; rtt = ms; return *this; }
@@ -762,10 +766,13 @@ struct Scene {
     Scene& jittery(double share, int ms, bool reorder = false) {
         late = share; late_ms = ms; late_reorders = reorder; return *this;
     }
-    Scene& scattered(int ms) { late = 1; late_ms = ms; late_reorders = late_scattered = true; return *this; }
+    Scene& scattered(int ms, bool reorder = true) {
+        late = 1; late_ms = ms; late_reorders = reorder; late_scattered = true; return *this;
+    }
     Scene& lossy(double share, int burst = 0) { loss = share; burst_ms = burst; return *this; }
     Scene& buffer(double bdp) { buffer_bdp = bdp; return *this; }
     Scene& adaptive(double ceiling = 8) { source = Source::Adaptive; video = ceiling; return *this; }
+    Scene& following(double ceiling = 8) { source = Source::Estimate; video = ceiling; return *this; }
     Scene& with(Besides b) { besides = b; return *this; }
     Scene& outage(int ms) { besides = Besides::Outage; outage_ms = ms; return *this; }
     Scene& roam(int ms) { besides = Besides::Roam; outage_ms = ms; return *this; }
@@ -791,6 +798,8 @@ struct RealtimeResult {
     double fec;             ///< repair symbols sent, % of the video
     double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; <0 none did
     double resent;          ///< packets sent again, % of the packets sent
+    double estimate;        ///< PathStats::bandwidth_bps from 10 s on, median, Mbit/s
+    double reach;           ///< s from the first frame until the encoder ran at its ceiling; inf never
 };
 
 /// One live source and the player at the far end of its connection: the scene's
@@ -824,7 +833,7 @@ struct Video {
     Video(Peer& tx, Peer& rx, const Scene& scene)
         : tx(tx), rx(rx), scene(scene), fps(scene.fps), gop(2 * scene.fps), rng(1) {
         target = scene.video * 1e6;
-        if (scene.source == Source::Adaptive) target = (std::min)(target, 1e6);   // calls start low
+        if (scene.source != Source::Fixed) target = (std::min)(target, 1e6);   // calls start low
         encoder_rate = target;
         for (int n = 0; n < gop; ++n) gop_weight += weight(n);
     }
@@ -892,10 +901,20 @@ struct Video {
     /// the connection or on the path — and creep up while none does: the estimate
     /// alone cannot be followed upwards, because a source that keeps to it is
     /// app-limited and the estimate is then only a floor.
+    ///
+    /// The other kind takes the estimate for the path's capacity and sizes
+    /// itself to it, as an application that knows nothing of how it is made
+    /// would: it climbs only as fast as the estimate does.
     void retarget(Clock::time_point now) {
-        if (scene.source != Source::Adaptive || now < next_retarget) return;
+        if (scene.source == Source::Fixed || now < next_retarget) return;
         next_retarget += ms(100);
         const PathStats st = tx.path_stats();
+        if (scene.source == Source::Estimate) {
+            if (st.bandwidth_bps > 0)
+                target = (std::max)(150e3, (std::min)(st.bandwidth_bps * 0.9, scene.video * 1e6));
+            if (target >= scene.video * 1e6 && reached == Clock::time_point{}) reached = now;
+            return;
+        }
         uint64_t backlog = st.queued_bytes;
         for (size_t i = fed; i < frames.size(); ++i) backlog += frames[i].bytes;
         if (st.bandwidth_bps > 0) {
@@ -929,6 +948,7 @@ struct Video {
     int               frame_no = 0;
     Clock::time_point next_frame = Clock::time_point{} + std::chrono::seconds(1);   // after the handshake
     Clock::time_point next_retarget = next_frame;
+    Clock::time_point reached{};         // when the encoder was first told its ceiling
     uint64_t          prev_delivered = 0, prev_lost = 0;
 };
 
@@ -959,7 +979,7 @@ RealtimeResult realtime(const Scene& sc) {
     fwd.burst = ms(sc.burst_ms);
     Direction rev = fwd;
     Path path(fwd, rev);
-    if (sc.late_scattered) path.scatter(ms(sc.late_ms));
+    if (sc.late_scattered) path.scatter(ms(sc.late_ms), sc.late_reorders);
     else                   path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
 
     const auto event     = std::chrono::seconds(10);
@@ -981,6 +1001,7 @@ RealtimeResult realtime(const Scene& sc) {
     if (sc.besides == Besides::Duplex) back = std::make_unique<Video>(other->tx, other->rx, sc);
 
     const size_t chunk = feed_buffer().size();
+    std::vector<double> estimates;   // Mbit/s, every 100 ms from 10 s on
 
     constexpr auto kStep  = us(200);
     const auto     start  = std::chrono::seconds(1);    // handshake and first estimate
@@ -1019,6 +1040,8 @@ RealtimeResult realtime(const Scene& sc) {
 
         video.retarget(now);
         if (back) back->retarget(now);
+        if (t >= event && t < finish && t % ms(100) == Clock::duration::zero())
+            estimates.push_back(fv.tx.path_stats().bandwidth_bps / 1e6);
     }
 
     const double base  = sc.rtt / 2.0;
@@ -1084,9 +1107,15 @@ RealtimeResult realtime(const Scene& sc) {
     const double fec = video.video_bytes ? fv.tx.path_stats().live_repair_bytes * 100.0 / video.video_bytes : 0;
     std::sort(key_latency.begin(), key_latency.end());
     const double key_median = key_latency.empty() ? -1 : key_latency[(key_latency.size() - 1) / 2] - base;
+    std::sort(estimates.begin(), estimates.end());
+    const double estimate = estimates.empty() ? 0 : estimates[estimates.size() / 2];
+    const double reach = video.reached == Clock::time_point{}
+                             ? std::numeric_limits<double>::infinity()
+                             : std::chrono::duration<double>(video.reached - (Clock::time_point{} + start)).count();
     return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
             recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median,
-            fv.tx.retransmits() * 100.0 / double((std::max<uint64_t>)(fv.tx.conn()->recovery().next_pn(), 1))};
+            fv.tx.retransmits() * 100.0 / double((std::max<uint64_t>)(fv.tx.conn()->recovery().next_pn(), 1)),
+            estimate, reach};
 }
 
 /// A share of frames late, as a column: green within what a call shrugs off,
@@ -1276,6 +1305,68 @@ void class_tables() {
                 "   live data and bulk alike, and FEC sizes its repairs knowing a loss is\n"
                 "   found that much later. What turns up after all is no loss rate, so\n"
                 "   reordering neither cuts the estimate nor buys repair symbols.)\n");
+}
+
+/// Jitter with no queue behind it, under the three kinds of source: one that
+/// sends its rate whatever happens, the adaptive one of the realtime table, and
+/// one that sizes itself to the estimate. A path that delays a packet now and
+/// then is no slower for it, so neither what the source may send nor what the
+/// estimate says should move with the jitter.
+void jitter_table() {
+    struct Row {
+        const char* name;
+        Scene (*on)(Scene);
+    };
+    const Row rows[] = {
+        {"none", [](Scene s) { return s; }},
+        {"a fifth 8 ms late", [](Scene s) { return s.jittery(0.2, 8); }},
+        {"5% 30 ms late", [](Scene s) { return s.jittery(0.05, 30); }},
+        {"0-10 ms, in order", [](Scene s) { return s.scattered(10, false); }},
+        {"0-20 ms, in order", [](Scene s) { return s.scattered(20, false); }},
+        {"0-40 ms, in order", [](Scene s) { return s.scattered(40, false); }},
+        {"0-10 ms, reordered", [](Scene s) { return s.scattered(10); }},
+        {"0-20 ms, reordered", [](Scene s) { return s.scattered(20); }},
+    };
+    struct Over {
+        const char* name;
+        double      link;
+        int         rtt;
+    };
+    const Over paths[] = {{"1 Gbit, 20 ms", 1000, 20}, {"1 Gbit, 2 ms", 1000, 2}};
+
+    std::printf("\n%srealtime with jitter — a source of at most 8 Mbit/s, adaptive ones from 1%s\n",
+                col("\x1b[1m"), col("\x1b[0m"));
+    std::printf("  %-30s %9s %19s %39s\n", "", "fixed 8", "adaptive", "sized to the estimate");
+    std::printf("  %-30s %9s %9s %9s %9s %9s %9s %9s\n", "", "late", "late", "Mbit/s", "late", "Mbit/s",
+                "at 8 in", "estimate");
+    std::printf("  %-30s", "------------------------------");
+    for (int i = 0; i < 7; ++i) std::printf(" %9s", "---------");
+    std::printf("\n");
+    for (const Over& p : paths) {
+        std::printf("  %s\n", p.name);
+        for (const Row& row : rows) {
+            const Scene base = row.on(Scene{}.over(p.link, p.rtt));
+            const RealtimeResult fixed = realtime(Scene(base).sending(8, 30));
+            const RealtimeResult adapt = realtime(Scene(base).adaptive());
+            const RealtimeResult est   = realtime(Scene(base).following());
+            char reach[32];
+            if (std::isinf(est.reach)) std::snprintf(reach, sizeof(reach), "%9s", "never");
+            else                       std::snprintf(reach, sizeof(reach), "%8.1fs", est.reach);
+            std::printf("    %-28s %s %s %9.2f %s %9.2f %s %9.1f\n", row.name, late_cell(fixed.late).c_str(),
+                        late_cell(adapt.late).c_str(), adapt.video, late_cell(est.late).c_str(), est.video,
+                        reach, est.estimate);
+        }
+    }
+    std::printf("  (every datagram, both ways: \"late\" ones held back that long past their\n"
+                "   turn, holding back those behind them; \"0-N ms\" each late by its own draw,\n"
+                "   kept in order — each also held back by those before it, as a radio that\n"
+                "   waits for its medium does — or overtaking one another. Nothing is lost and\n"
+                "   no queue is full: the path carries 1 Gbit/s whatever the jitter. \"sized to\n"
+                "   the estimate\": 90%% of PathStats::bandwidth_bps every 100 ms, up to 8;\n"
+                "   \"at 8 in\" is how long after the first frame it first got there, \"estimate\"\n"
+                "   the median of bandwidth_bps from 10 s on, Mbit/s. A source that sizes itself\n"
+                "   to the estimate sees as much as the estimate shows; the adaptive one also\n"
+                "   reads the round trip over the minimum as a queue, which jitter is too.)\n");
 }
 
 } // namespace
@@ -1480,6 +1571,7 @@ int main(int argc, char** argv) {
                 "   they only reshape.)\n");
 
     class_tables();
+    jitter_table();
 
     std::printf("\nnote: no ack compression; reordering, variable delay and competing traffic only\n"
                 "in the rows that say so. These are not predictions about a real network — they\n"
