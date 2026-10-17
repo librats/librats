@@ -256,11 +256,19 @@ void FileTransfer::worker_loop() {
         if (!t) continue;
         {
             std::lock_guard<std::mutex> lk(t->mtx);
-            if (t->worker_active) continue;  // another worker owns it
+            // Another worker owns it. That worker may already be on its way out of
+            // run_send — it saw a pause that a resume has since undone — and would
+            // then never look at the status again, so the wakeup is handed to it
+            // rather than dropped.
+            if (t->worker_active) { t->rerun = true; continue; }
             t->worker_active = true;
         }
-        run_send(t);
-        { std::lock_guard<std::mutex> lk(t->mtx); t->worker_active = false; }
+        for (;;) {
+            run_send(t);
+            std::lock_guard<std::mutex> lk(t->mtx);
+            if (!t->rerun || !running_.load()) { t->worker_active = false; t->rerun = false; break; }
+            t->rerun = false;
+        }
     }
 }
 

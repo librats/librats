@@ -272,6 +272,8 @@ private:
         uint32_t                 files_done = 0;
         Status                   status = Status::Pending;
         bool                     worker_active = false;
+        /// Queued again while a worker held it: that worker runs it once more.
+        bool                     rerun = false;
         bool                     finished = false;
         rats_sha256_context_t         hash{};
         std::chrono::steady_clock::time_point last_activity{};
