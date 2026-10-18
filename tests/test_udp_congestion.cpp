@@ -58,6 +58,12 @@ struct Direction {
     /// queue, which they leave on time: a host's timer, a radio's retries.
     double               late       = 0;
     Clock::duration      late_by{};
+    /// A late one holds back those behind it rather than being overtaken, as a
+    /// Wi-Fi receiver's block-ack window does: delay without reordering.
+    bool                 late_holds = false;
+    /// Datagrams handed over on the tick of a clock this far apart: a station
+    /// that sends in transmit opportunities, a receiver reading in batches.
+    Clock::duration      bunch{};
     /// Every datagram late by its own draw from [0, jitter]: a path that keeps no
     /// order (per-packet jitter, a bonded link), so they overtake one another.
     Clock::duration      jitter{};
@@ -104,10 +110,13 @@ public:
         ++d.sent;
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
         Clock::time_point arrive = d.busy_until + d.delay;
+        if (d.bunch > Clock::duration::zero())
+            arrive = Clock::time_point{} + (arrive.time_since_epoch() / d.bunch + 1) * d.bunch;
         if (d.late > 0 && unit_(rng_) < d.late) arrive += d.late_by;
         if (d.jitter > Clock::duration::zero())
             arrive += std::chrono::duration_cast<Clock::duration>(d.jitter * unit_(rng_));
-        // Held back past the ones behind it: in arrival order, so it is overtaken.
+        if (d.late_holds && !d.wire.empty()) arrive = (std::max)(arrive, d.wire.back().arrive);
+        // In arrival order: one held back is overtaken by those behind it, unless it holds them.
         auto at = std::upper_bound(d.wire.begin(), d.wire.end(), arrive,
                                    [](Clock::time_point t, const InFlight& f) { return t < f.arrive; });
         d.wire.insert(at, InFlight{arrive, from, to, std::move(bytes)});
@@ -1377,6 +1386,84 @@ TEST(BbrTest, AnAppLimitedFlowLeavesStartupOnceItsBurstsQueue) {
     EXPECT_LE(f.sender().recovery().retransmits() - lost, 10u)
         << "keyframes still overflow the bottleneck";
     EXPECT_LT(f.sender().path_stats().pacing_bps, 1.4 * 10e6) << "bursts paced far above the path";
+}
+
+// The same over a path that hands the acknowledgements back in bunches 8 ms
+// apart, as a Wi-Fi station's transmit opportunities do. Along each bunch the
+// round trip falls — the packet sent last waited least — while the queue in front
+// of the frames grows: read acknowledgement by acknowledgement it never rises for
+// long, and Startup must end all the same.
+TEST(BbrTest, AnAppLimitedFlowLeavesStartupOnceItsBurstsQueueWhenAcksComeInBunches) {
+    Sim sim(10, 40ms, 41);
+    sim.path.rev().bunch = 8ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4};
+    video.play(6s);
+    EXPECT_TRUE(bbr(f.sender()).full_bw_reached()) << "still in Startup";
+
+    const uint32_t lost = f.sender().recovery().retransmits();
+    video.play(10s);
+    EXPECT_LE(f.sender().recovery().retransmits() - lost, 10u)
+        << "keyframes still overflow the bottleneck";
+    EXPECT_LT(f.sender().path_stats().pacing_bps, 1.4 * 10e6) << "bursts paced far above the path";
+}
+
+// On 1 Mbit/s a frame is three packets and two acknowledgements, too few for the
+// round trip to rise in. But the queue Startup's bursts build there does not
+// drain before the next frame: it stands, and that ends Startup.
+TEST(BbrTest, AStandingQueueEndsStartupOnASlowLink) {
+    Sim sim(1, 40ms, 8);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 0.8};
+    video.play(6s);
+    EXPECT_TRUE(bbr(f.sender()).full_bw_reached()) << "still in Startup";
+
+    const uint32_t lost = f.sender().recovery().retransmits();
+    video.play(10s);
+    EXPECT_LE(f.sender().recovery().retransmits() - lost, 10u)
+        << "keyframes still overflow the bottleneck";
+    EXPECT_LT(f.sender().path_stats().pacing_bps, 1.4 * 1e6) << "bursts paced far above the path";
+}
+
+// A radio holds a packet back now and then, and those behind it with it: the
+// round trip of an acknowledgement jumps with nothing queued. Read as a queue,
+// that ended Startup a second in, at the 1-2 Mbit/s a call had reached — and a
+// call whose rate control sizes it to the estimate stayed there: what it sends is
+// all the estimate can see. Such a jump lifts one group of acknowledgements, and
+// those it held fall back; Startup goes on and the call gets its rate. On 10
+// Mbit/s, with a fifth of the datagrams late, the jumps come close together and
+// one acknowledgement after another rose often enough to look like a queue; the
+// smallest round trip of each group does not.
+TEST(BbrTest, JitterDoesNotHoldDownACallSizedToTheEstimate) {
+    struct Case {
+        double          mbps;
+        Clock::duration rtt;
+        double          late;
+        Clock::duration late_by;
+        uint32_t        seed;
+    };
+    std::vector<Case> cases{{1000, 20ms, 0.1, 20ms, 1}};
+    for (uint32_t seed = 1; seed <= 6; ++seed) cases.push_back({10, 40ms, 0.2, 8ms, seed});
+    for (const Case& c : cases) {
+        Sim sim(c.mbps, c.rtt, 2000, 0.0, c.seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = c.late;
+            d->late_by    = c.late_by;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 1};
+        for (int i = 0; i < 100; ++i) {
+            const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+            video.mbps = (std::max)(0.15, (std::min)(0.9 * estimate, 8.0));
+            video.play(100ms);
+        }
+        EXPECT_GT(video.mbps, 7.0) << "a call on " << c.mbps << " Mbit/s (seed " << c.seed << ") held to "
+                                   << video.mbps << " Mbit/s";
+    }
 }
 
 // ProbeRTT empties a queue to measure the path's own delay. An app-limited flow

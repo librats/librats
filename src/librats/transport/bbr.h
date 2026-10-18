@@ -69,16 +69,23 @@
  *
  *   - An app-limited burst of ours that queues at the bottleneck — more than a
  *     BDP and at least the starting window in flight, and the round trip lifted
- *     by it past max(min_rtt/4, 10 ms) — counts as the plateau: it ends Startup,
- *     and a bandwidth probe. The plateau test proper needs non-app-limited
- *     samples such a flow never produces; without this every keyframe would
- *     leave at Startup's 2.77x the bandwidth already found, into a buffer it
- *     overflows, and a probe would last until loss ended it. One sample decides
- *     here, so the bar is higher than "queued": on a real path the round trip of
- *     a single acknowledgement jumps by 4–10 ms with nothing queued, and a few
- *     small messages early on (identify, a request) are more than the BDP their
- *     own rate implies — read by the lower bar, they ended Startup at a few KB/s
- *     and a later transfer probed its way up from there.
+ *     by it past max(min_rtt/4, 10 ms) — counts as the plateau: it ends a
+ *     bandwidth probe, and read more strictly, Startup. The plateau test proper
+ *     needs non-app-limited samples such a flow never produces; without this
+ *     every keyframe would leave at Startup's 2.77x the bandwidth already found,
+ *     into a buffer it overflows, and a probe would last until loss ended it.
+ *     The bar is higher than "queued": a few small messages early on (identify,
+ *     a request) are more than the BDP their own rate implies — read by the
+ *     lower bar, they ended Startup at a few KB/s. One sample past it ends a
+ *     probe: missing a queue there costs frames, a false one only the probe.
+ *     Startup ends once and for good, and a radio's jitter — a packet held
+ *     15–30 ms, those behind it with it — lifts single samples past any such
+ *     bar: ended by that, a call stayed at the 1–2 Mbit/s Startup had reached.
+ *     So Startup wants what jitter does not do (startup_queued): the round trip
+ *     rising group after group of acknowledgements, as our burst fills a queue
+ *     (jitter lifts one, and those it held fall back), or standing far above the
+ *     minimum for a while, as our queue does on a slow link, where a frame is
+ *     too few acknowledgements to rise in and does not drain before the next.
  *   - ProbeRTT is skipped while app-limited round trips keep coming in within
  *     1/8 of the minimum (as Chromium's BBR does): the queue it would drain was
  *     empty anyway, and holding inflight to half a BDP for 200 ms is a lost
@@ -205,13 +212,32 @@ public:
     /// path shows with nothing queued, below what one burst of ours builds.
     static constexpr std::chrono::milliseconds kQueueMin{4};
     static constexpr std::chrono::milliseconds kQueueMax{16};
-    /// What it takes for one app-limited acknowledgement to end Startup or a probe
+    /// What it takes for one app-limited acknowledgement to end a probe
     /// (burst_queued): a burst of at least the starting window, and a queue of a
-    /// quarter of the minimum round trip, at least kBurstQueueMin. A single sample
-    /// decides there, so the bar sits above what a real path's acknowledgements
-    /// show with nothing queued — a host's late timer, a radio: 4–10 ms is common —
-    /// and a few small messages are no burst at all.
+    /// quarter of the minimum round trip, at least kBurstQueueMin — above what a
+    /// host's late timer shows with nothing queued; and a few small messages are
+    /// no burst at all.
     static constexpr std::chrono::milliseconds kBurstQueueMin{10};
+    /// What it takes to end Startup instead (startup_queued). kQueueRises groups of
+    /// acknowledgements in a row, each above the one before and the last past
+    /// burst_queued's bar, are a queue our burst is filling; jitter lifts one, and
+    /// the ones it held back fall again. A group is the acknowledgements arriving
+    /// within kAckGroup of the first, read by the smallest round trip among them:
+    /// at 10 Mbit/s, with a fifth of the packets held back, held ones follow one
+    /// another closely enough that acknowledgement after acknowledgement rose six
+    /// times in a row (a call sized to the estimate reached its rate in 4 runs of
+    /// 12 that way, 11 by groups) — a group nearly always holds one that was not
+    /// held. And acknowledgements a Wi-Fi station or a batching receiver hands back
+    /// in bunches fall along each bunch even while a queue grows.
+    static constexpr std::chrono::microseconds kAckGroup{2500};
+    static constexpr int                       kQueueRises = 6;
+    /// Or a queue that stands: every round trip for kStandingFor at least
+    /// kStandingBar (in kUnit) of that bar over the minimum. On a link of a Mbit/s
+    /// or two a frame is two or three acknowledgements, too few to rise in, but its
+    /// queue does not drain before the next one; jitter lets the packets after the
+    /// ones it held through on time.
+    static constexpr std::chrono::milliseconds kStandingFor{60};
+    static constexpr uint64_t                  kStandingBar = 2500;
 
     /// Rounds after its last app-limited sample a sender still counts as one that
     /// does not fill the pipe, for whether its loss is congestion: as long as the
@@ -280,6 +306,7 @@ private:
     void update_round();
     void update_max_bw();
     void update_ack_aggregation();
+    void update_queue_signals();
     void check_full_bw_reached();
     void check_startup_done();
     void check_startup_high_loss();
@@ -356,9 +383,17 @@ private:
     /// A round trip, the peer's ack delay taken off, that shows a queue (see
     /// "Flows that do not fill the pipe" above).
     bool     queued(Clock::duration rtt_net) const noexcept;
+    /// This acknowledgement is of a burst of ours that could have queued — at
+    /// least the starting window in flight, more than the path holds — and has a
+    /// round trip to read.
+    bool     burst_in_flight() const noexcept;
+    /// The queueing delay a burst must show: max(min_rtt/4, kBurstQueueMin).
+    Clock::duration burst_bar() const noexcept;
     /// This acknowledgement's sample is an app-limited burst of ours that queued
-    /// at the bottleneck: the plateau of a flow that never fills the pipe.
+    /// at the bottleneck: the end of a probe for a flow that never fills the pipe.
     bool     burst_queued() const noexcept;
+    /// The same, read strictly enough to end Startup by (kAckGroup, kStandingFor).
+    bool     startup_queued() const noexcept;
     /// The sender has run out of things to send within the last kRanDryRounds.
     bool     runs_dry() const noexcept { return ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds; }
     /// Whether the loss being reported can be a full queue's: always, unless the
@@ -458,6 +493,16 @@ private:
     int      full_bw_count_ = 0;
     bool     full_bw_now_     = false;
     bool     full_bw_reached_ = false;
+    /// Startup's reading of the round trip (startup_queued), kept until the pipe
+    /// is found full: the group of acknowledgements open since group_start_, the
+    /// smallest round trip of it and of the group before, and how many groups in
+    /// a row have each been above the one before; and since when every round trip
+    /// has stood kStandingBar over the minimum (the epoch: the last one did not).
+    Clock::time_point group_start_{};
+    Clock::duration   group_rtt_      = (Clock::duration::max)();
+    Clock::duration   prev_group_rtt_ = (Clock::duration::max)();
+    int               group_rises_    = 0;
+    Clock::time_point standing_since_{};
 
     // ProbeBW cycle.
     Clock::time_point cycle_stamp_{};

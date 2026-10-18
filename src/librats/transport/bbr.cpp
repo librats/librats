@@ -235,6 +235,7 @@ void BbrController::update_model_and_state() {
     update_latest_delivery_signals();
     update_congestion_signals();
     update_ack_aggregation();
+    update_queue_signals();
     check_full_bw_reached();
     check_startup_done();
     check_drain_done();
@@ -358,6 +359,27 @@ void BbrController::update_ack_aggregation() {
     extra_acked_ = (std::max)(extra_acked_win_[0], extra_acked_win_[1]);
 }
 
+void BbrController::update_queue_signals() {
+    // Read only until the pipe is found full, and only off a round trip.
+    if (full_bw_reached_ || ack_rtt_net_ == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)())
+        return;
+
+    if (now_ - group_start_ > kAckGroup) {
+        // The group is over. Before the first one both are unset: no rise.
+        group_rises_    = group_rtt_ > prev_group_rtt_ ? group_rises_ + 1 : 0;
+        prev_group_rtt_ = group_rtt_;
+        group_start_    = now_;
+        group_rtt_      = ack_rtt_net_;
+    } else {
+        group_rtt_ = (std::min)(group_rtt_, ack_rtt_net_);
+    }
+
+    if (ack_rtt_net_ < min_rtt_ + burst_bar() * kStandingBar / kUnit)
+        standing_since_ = Clock::time_point{};
+    else if (standing_since_ == Clock::time_point{})
+        standing_since_ = now_;
+}
+
 void BbrController::check_full_bw_reached() {
     if (full_bw_now_ || !rs_.acked) return;
 
@@ -367,9 +389,10 @@ void BbrController::check_full_bw_reached() {
     // since found, and in a probe it would never stop probing. What such a flow
     // does produce is a burst that queues: more in flight than the path holds, and
     // the round trip lifted by it. That is the path saying it is full at the rate
-    // it delivers already — the plateau's verdict, reached in one burst.
+    // it delivers already — the plateau's verdict, reached in one burst. Startup
+    // ends once and for good, so it asks for more of it than a probe does.
     if (rs_.is_app_limited) {
-        if (burst_queued()) full_bw_now_ = full_bw_reached_ = true;
+        if (full_bw_reached_ ? burst_queued() : startup_queued()) full_bw_now_ = full_bw_reached_ = true;
         return;
     }
 
@@ -928,12 +951,25 @@ bool BbrController::queued(Clock::duration rtt_net) const noexcept {
     return rtt_net >= min_rtt_ + threshold;
 }
 
+bool BbrController::burst_in_flight() const noexcept {
+    return rs_.tx_in_flight >= kInitialWindow && rs_.tx_in_flight > bdp_multiple(max_bw_, kUnit) &&
+           ack_rtt_net_ != (Clock::duration::max)() && min_rtt_ != (Clock::duration::max)();
+}
+
+Clock::duration BbrController::burst_bar() const noexcept {
+    return (std::max)(min_rtt_ / 4, std::chrono::duration_cast<Clock::duration>(kBurstQueueMin));
+}
+
 bool BbrController::burst_queued() const noexcept {
-    if (rs_.tx_in_flight < kInitialWindow || rs_.tx_in_flight <= bdp_multiple(max_bw_, kUnit)) return false;
-    if (ack_rtt_net_ == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)()) return false;
-    const Clock::duration threshold =
-        (std::max)(min_rtt_ / 4, std::chrono::duration_cast<Clock::duration>(kBurstQueueMin));
-    return ack_rtt_net_ >= min_rtt_ + threshold;
+    return burst_in_flight() && ack_rtt_net_ >= min_rtt_ + burst_bar();
+}
+
+bool BbrController::startup_queued() const noexcept {
+    if (!burst_in_flight()) return false;
+    // Our burst, lifting the bottom of the round trip group after group...
+    if (group_rises_ >= kQueueRises && group_rtt_ >= min_rtt_ + burst_bar()) return true;
+    // ...or a queue that has stood far above the minimum for a while.
+    return standing_since_ != Clock::time_point{} && now_ - standing_since_ >= kStandingFor;
 }
 
 bool BbrController::loss_is_congestion() const noexcept {
