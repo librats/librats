@@ -50,6 +50,8 @@
 //            against source shapes — keyframe size, intra refresh, noisy
 //            frames, a slow rate control, temporal layers — since how an
 //            encoder spreads its rate is all a codec changes for the path.
+//            Then jitter with no queue behind it, and sources close to the
+//            link's rate, where the sender's own queue must still be seen.
 //            Every frame is a live message (SendOptions::lifetime), dropped
 //            when it cannot make the player's deadline; `--reliable-video`
 //            sends them reliably instead, `--no-fec` without repair symbols.
@@ -66,8 +68,9 @@
 // no reordering, no ack compression, no competing traffic and no variable delay,
 // so these figures are not predictions of what a real network will give. They
 // are a *comparison* — this build against that one — and should be read only
-// that way. (The realtime section can add loss bursts, an outage and a link
-// whose rate changes on a schedule; still deterministic, still a model.)
+// that way. (The realtime section can add loss bursts, an outage, a link whose
+// rate changes on a schedule, jitter and reordering, and acknowledgements handed
+// back in bunches; still deterministic, still a model.)
 //
 // Build:  cmake -S bench -B bench/build && cmake --build bench/build --target bench_path
 
@@ -311,6 +314,8 @@ public:
 
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
         Clock::time_point arrive = d.busy_until + d.delay;
+        if (&d == &rev_ && bunch_ > Clock::duration::zero())
+            arrive = Clock::time_point{} + ((arrive.time_since_epoch() / bunch_) + 1) * bunch_;
         if (late_.share == 0) {
             d.wire.push_back(InFlight{arrive, to, from, Bytes(data, data + len)});
             return;
@@ -368,6 +373,12 @@ public:
     /// keeps them in order, each held back by those before it — a radio that
     /// waits for its medium.
     void   scatter(Clock::duration up_to, bool reorders = true) { late_ = Late{1, up_to, reorders, true}; }
+    /// Hand what travels back to the senders over in bunches, on the tick of a clock
+    /// that runs `every`: a Wi-Fi station that sends its acknowledgements in one
+    /// transmit opportunity, a receiver that reads its socket in batches. Within a
+    /// bunch, what left last waited least — so the round trip a sender reads off
+    /// the acknowledgements falls along each bunch even while a queue grows.
+    void   bunch_acks(Clock::duration every) { bunch_ = every; }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -405,6 +416,7 @@ private:
         bool            scattered = false;   ///< every datagram late by a draw from [0, by]
     };
     Late         late_;
+    Clock::duration bunch_{};
     std::mt19937 rng_;
     std::uniform_real_distribution<double> unit_{0.0, 1.0};
 };
@@ -759,6 +771,7 @@ struct Scene {
     bool    late_reorders = false;  ///< overtaken by those behind, or holding them back too
     bool    late_scattered = false; ///< every datagram late by its own draw from [0, late_ms]
                                     ///< (in order unless late_reorders)
+    int     ack_bunch_ms = 0;       ///< acknowledgements handed back in bunches this far apart
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
     Scene& over(double mbps, int ms) { link = mbps; rtt = ms; return *this; }
@@ -769,6 +782,7 @@ struct Scene {
     Scene& scattered(int ms, bool reorder = true) {
         late = 1; late_ms = ms; late_reorders = reorder; late_scattered = true; return *this;
     }
+    Scene& acks_bunched(int ms) { ack_bunch_ms = ms; return *this; }
     Scene& lossy(double share, int burst = 0) { loss = share; burst_ms = burst; return *this; }
     Scene& buffer(double bdp) { buffer_bdp = bdp; return *this; }
     Scene& adaptive(double ceiling = 8) { source = Source::Adaptive; video = ceiling; return *this; }
@@ -981,6 +995,7 @@ RealtimeResult realtime(const Scene& sc) {
     Path path(fwd, rev);
     if (sc.late_scattered) path.scatter(ms(sc.late_ms), sc.late_reorders);
     else                   path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
+    path.bunch_acks(ms(sc.ack_bunch_ms));
 
     const auto event     = std::chrono::seconds(10);
     const bool dark      = sc.besides == Besides::Outage || sc.besides == Besides::Roam;
@@ -1321,6 +1336,9 @@ void jitter_table() {
         {"none", [](Scene s) { return s; }},
         {"a fifth 8 ms late", [](Scene s) { return s.jittery(0.2, 8); }},
         {"5% 30 ms late", [](Scene s) { return s.jittery(0.05, 30); }},
+        {"a tenth 20 ms late", [](Scene s) { return s.jittery(0.1, 20); }},
+        {"a third 15 ms late", [](Scene s) { return s.jittery(0.3, 15); }},
+        {"a tenth 20 ms, acks 4 ms", [](Scene s) { return s.jittery(0.1, 20).acks_bunched(4); }},
         {"0-10 ms, in order", [](Scene s) { return s.scattered(10, false); }},
         {"0-20 ms, in order", [](Scene s) { return s.scattered(20, false); }},
         {"0-40 ms, in order", [](Scene s) { return s.scattered(40, false); }},
@@ -1366,7 +1384,57 @@ void jitter_table() {
                 "   \"at 8 in\" is how long after the first frame it first got there, \"estimate\"\n"
                 "   the median of bandwidth_bps from 10 s on, Mbit/s. A source that sizes itself\n"
                 "   to the estimate sees as much as the estimate shows; the adaptive one also\n"
-                "   reads the round trip over the minimum as a queue, which jitter is too.)\n");
+                "   reads the round trip over the minimum as a queue, which jitter is too.\n"
+                "   \"acks 4 ms\": what travels back handed over in bunches every 4 ms.)\n");
+}
+
+/// The other side of jitter_table: live sources close to the link's rate, where
+/// the sender must see its own bursts queue — Startup sends every burst at 2.77x
+/// the estimate, a probe at 1.25x — and stop. A queue read wrongly as jitter
+/// shows here as frames late; jitter read as a queue shows in jitter_table.
+void near_rate_table() {
+    struct Row {
+        const char* name;
+        Scene       scene;
+    };
+    const Row rows[] = {
+        {"8 of 10 Mbit, 40 ms", Scene{}.over(10, 40).sending(8, 30)},
+        {"up to 8 on 10 Mbit, 40 ms", Scene{}.over(10, 40).following(8)},
+        {"4K60 on 50 Mbit, 20 ms", Scene{}.over(50, 20).sending(40, 60)},
+        {"1.5 of 2 Mbit, 40 ms", Scene{}.over(2, 40).sending(1.5, 30)},
+        {"up to 1.8 on 2 Mbit, 40 ms", Scene{}.over(2, 40).following(1.8)},
+        {"0.8 of 1 Mbit, 40 ms", Scene{}.over(1, 40).sending(0.8, 30)},
+        {"up to 0.9 on 1 Mbit, 40 ms", Scene{}.over(1, 40).following(0.9)},
+    };
+    struct Column {
+        const char* name;
+        Scene (*on)(Scene);
+    };
+    const Column columns[] = {
+        {"none", [](Scene s) { return s; }},
+        {"acks 4 ms", [](Scene s) { return s.acks_bunched(4); }},
+        {"acks 8 ms", [](Scene s) { return s.acks_bunched(8); }},
+        {"10% 20 ms", [](Scene s) { return s.jittery(0.1, 20); }},
+    };
+    std::printf("\n%srealtime near the link's rate — %% of frames late%s\n  %-30s", col("\x1b[1m"),
+                col("\x1b[0m"), "");
+    for (const Column& c : columns) std::printf(" %9s", c.name);
+    std::printf("\n  %-30s", "------------------------------");
+    for (size_t i = 0; i < std::size(columns); ++i) std::printf(" %9s", "---------");
+    std::printf("\n");
+    for (const Row& row : rows) {
+        std::printf("  %-30s", row.name);
+        for (const Column& c : columns) std::printf(" %s", late_cell(realtime(c.on(row.scene)).late).c_str());
+        std::printf("\n");
+    }
+    std::printf("  (\"N of M\": a fixed-rate source; \"up to N\": sized to the estimate, as in the\n"
+                "   jitter table. \"acks N ms\": what travels back handed over in bunches every\n"
+                "   N ms, as a Wi-Fi station's transmit opportunities or a receiver reading in\n"
+                "   batches do — the round trip read off them falls along each bunch while the\n"
+                "   queue in front of the frames grows. \"10%% 20 ms\": a tenth of the datagrams\n"
+                "   held back 20 ms, both ways, holding back those behind them. On 1-2 Mbit a\n"
+                "   frame is a few packets and two or three acknowledgements; a burst that\n"
+                "   queues looks much like jitter there.)\n");
 }
 
 } // namespace
@@ -1572,11 +1640,12 @@ int main(int argc, char** argv) {
 
     class_tables();
     jitter_table();
+    near_rate_table();
 
-    std::printf("\nnote: no ack compression; reordering, variable delay and competing traffic only\n"
-                "in the rows that say so. These are not predictions about a real network — they\n"
-                "are a comparison between builds, and only useful read that way. For \"does it\n"
-                "survive a hostile network at all\", put tools/badnet.sh in front of\n"
-                "bench_transport instead.\n");
+    std::printf("\nnote: acknowledgements in bunches, reordering, variable delay and competing\n"
+                "traffic only in the rows that say so. These are not predictions about a real\n"
+                "network — they are a comparison between builds, and only useful read that way.\n"
+                "For \"does it survive a hostile network at all\", put tools/badnet.sh in front\n"
+                "of bench_transport instead.\n");
     return 0;
 }
