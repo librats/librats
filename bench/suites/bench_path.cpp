@@ -1415,6 +1415,8 @@ void near_rate_table() {
         {"acks 4 ms", [](Scene s) { return s.acks_bunched(4); }},
         {"acks 8 ms", [](Scene s) { return s.acks_bunched(8); }},
         {"10% 20 ms", [](Scene s) { return s.jittery(0.1, 20); }},
+        {"+ 1% loss", [](Scene s) { return s.jittery(0.1, 20).lossy(0.01); }},
+        {"2% loss", [](Scene s) { return s.lossy(0.02); }},
     };
     std::printf("\n%srealtime near the link's rate — %% of frames late%s\n  %-30s", col("\x1b[1m"),
                 col("\x1b[0m"), "");
@@ -1432,9 +1434,12 @@ void near_rate_table() {
                 "   N ms, as a Wi-Fi station's transmit opportunities or a receiver reading in\n"
                 "   batches do — the round trip read off them falls along each bunch while the\n"
                 "   queue in front of the frames grows. \"10%% 20 ms\": a tenth of the datagrams\n"
-                "   held back 20 ms, both ways, holding back those behind them. On 1-2 Mbit a\n"
-                "   frame is a few packets and two or three acknowledgements; a burst that\n"
-                "   queues looks much like jitter there.)\n");
+                "   held back 20 ms, both ways, holding back those behind them; \"+ 1%% loss\":\n"
+                "   that, and 1%% of the datagrams lost. \"2%% loss\": random loss alone, which\n"
+                "   buys repair symbols — they must fit in what the link has to spare. On 1-2\n"
+                "   Mbit a frame is a few packets and two or three acknowledgements; a burst\n"
+                "   that queues looks much like jitter there. The last three columns are one\n"
+                "   draw each: compare them over seeds, RATS_SEED=1..N.)\n");
 }
 
 } // namespace
