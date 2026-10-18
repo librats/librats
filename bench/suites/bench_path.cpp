@@ -813,7 +813,8 @@ struct RealtimeResult {
     double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; <0 none did
     double resent;          ///< packets sent again, % of the packets sent
     double estimate;        ///< PathStats::bandwidth_bps from 10 s on, median, Mbit/s
-    double reach;           ///< s from the first frame until the encoder ran at its ceiling; inf never
+    double reach;           ///< s from the first frame — from the rise, on a link that rises — until
+                            ///< the encoder ran at its ceiling; inf never
 };
 
 /// One live source and the player at the far end of its connection: the scene's
@@ -1124,9 +1125,10 @@ RealtimeResult realtime(const Scene& sc) {
     const double key_median = key_latency.empty() ? -1 : key_latency[(key_latency.size() - 1) / 2] - base;
     std::sort(estimates.begin(), estimates.end());
     const double estimate = estimates.empty() ? 0 : estimates[estimates.size() / 2];
+    const auto   climb_from = sc.besides == Besides::RateRise ? event : start;
     const double reach = video.reached == Clock::time_point{}
                              ? std::numeric_limits<double>::infinity()
-                             : std::chrono::duration<double>(video.reached - (Clock::time_point{} + start)).count();
+                             : std::chrono::duration<double>(video.reached - (Clock::time_point{} + climb_from)).count();
     return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
             recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median,
             fv.tx.retransmits() * 100.0 / double((std::max<uint64_t>)(fv.tx.conn()->recovery().next_pn(), 1)),
@@ -1442,6 +1444,60 @@ void near_rate_table() {
                 "   draw each: compare them over seeds, RATS_SEED=1..N.)\n");
 }
 
+/// How fast a source sized to the estimate climbs to its ceiling: over long
+/// round trips, which it climbs a share at a time, and after a link's capacity
+/// rises, which only probes find. Jitter that ends a probe at its first late
+/// acknowledgement shows here as a ceiling reached late or never.
+void climb_table() {
+    struct Row {
+        const char* name;
+        Scene       scene;
+    };
+    const Row rows[] = {
+        {"1 Gbit, 20 ms", Scene{}.over(1000, 20)},
+        {"1 Gbit, 100 ms", Scene{}.over(1000, 100)},
+        {"1 Gbit, 200 ms", Scene{}.over(1000, 200)},
+        {"10 Mbit, 40 ms, rises from 3", Scene{}.over(10, 40).with(Besides::RateRise)},
+    };
+    struct Column {
+        const char* name;
+        Scene (*on)(Scene);
+    };
+    const Column columns[] = {
+        {"none", [](Scene s) { return s; }},
+        {"a tenth 20 ms late", [](Scene s) { return s.jittery(0.1, 20); }},
+        {"a third 15 ms late", [](Scene s) { return s.jittery(0.3, 15); }},
+    };
+    std::printf("\n%srealtime sized to the estimate, up to 8 Mbit/s — climbing after Startup%s\n  %-30s",
+                col("\x1b[1m"), col("\x1b[0m"), "");
+    for (const Column& c : columns) std::printf(" %19s", c.name);
+    std::printf("\n  %-30s", "");
+    for (size_t i = 0; i < std::size(columns); ++i) std::printf(" %9s %9s", "at 8 in", "estimate");
+    std::printf("\n  %-30s", "------------------------------");
+    for (size_t i = 0; i < 2 * std::size(columns); ++i) std::printf(" %9s", "---------");
+    std::printf("\n");
+    for (const Row& row : rows) {
+        std::printf("  %-30s", row.name);
+        for (const Column& c : columns) {
+            const RealtimeResult r = realtime(c.on(row.scene).following());
+            if (std::isinf(r.reach)) std::printf(" %9s", "never");
+            else                     std::printf(" %8.1fs", r.reach);
+            std::printf(" %9.1f", r.estimate);
+        }
+        std::printf("\n");
+    }
+    std::printf("  (the source of the jitter table: 90%% of PathStats::bandwidth_bps every 100 ms,\n"
+                "   up to 8, from 1. \"at 8 in\" is how long after the first frame it first got\n"
+                "   there — on a link that rises, how long after the rise: the link carries 3\n"
+                "   Mbit/s until 10 s, 10 after — and \"estimate\" the median of bandwidth_bps\n"
+                "   from 10 s on, Mbit/s. A source that keeps to the estimate is app-limited,\n"
+                "   and the estimate then shows only what its own frames, paced above it,\n"
+                "   measure: it gains a share a round trip, so a long path is slow to climb\n"
+                "   whatever the jitter. A link that rises once Startup is over is found only\n"
+                "   by probes, at most 1.25x the estimate, each ended by the first\n"
+                "   acknowledgement that looks queued. Jitter as in the jitter table.)\n");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1646,6 +1702,7 @@ int main(int argc, char** argv) {
     class_tables();
     jitter_table();
     near_rate_table();
+    climb_table();
 
     std::printf("\nnote: acknowledgements in bunches, reordering, variable delay and competing\n"
                 "traffic only in the rows that say so. These are not predictions about a real\n"
