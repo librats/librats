@@ -436,7 +436,8 @@ private:
     void     protect_live(const udp::LiveSender::Piece& piece, Clock::time_point now);
     /// Repair symbols per block for a live message of `layout` due at `deadline`:
     /// enough that a block is lost with the path's loss rate seldom — rarely, if
-    /// what the path loses could not be sent again in time.
+    /// what the path loses could not be sent again in time; none after a round
+    /// trip whose queue never emptied (Recovery::queue_stood).
     uint32_t live_repairs(const udp::fec::Layout& layout, Clock::time_point deadline,
                           Clock::time_point now);
     uint8_t* write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now);

@@ -688,9 +688,11 @@ struct HandDriven {
         r.on_packet_sent(now, 1000, /*ack_eliciting=*/true, /*data=*/true, false, false);
         return pn;
     }
-    void ack(uint64_t pn) {
+    /// `delay`: what the peer says it held the acknowledgement for.
+    void ack(uint64_t pn, Clock::duration delay = {}) {
         udp::AckFrame a;
         a.largest = pn;
+        a.delay   = static_cast<uint64_t>(delay / udp::kAckDelayUnit);
         ASSERT_TRUE(r.on_ack(a, now, sink));
     }
 };
@@ -833,6 +835,51 @@ TEST(UdpLossRecoveryTest, APathThatOnlyReordersIsNotTakenForALossyOne) {
         EXPECT_GT(mbps_of(f.delivered(), 10s), 35.0);
         EXPECT_FALSE(f.sender().dead());
     }
+}
+
+// The queue at the bottleneck stood through a round trip when not one packet of
+// it came back near the base round trip: one that did — jitter holds some
+// packets back, never all — says the queue emptied, and what the peer held its
+// acknowledgement for is no queue either. A path whose own delay grew is a queue
+// for a window at least, never for good: the base follows it within two.
+TEST(UdpLossRecoveryTest, AQueueStandsWhileNoRoundTripOfARoundComesBackNearTheBase) {
+    HandDriven h;
+    // One packet a round trip, answered `rtt` after it left.
+    const auto round_trip = [&](Clock::duration rtt, Clock::duration ack_delay = {}) {
+        const uint64_t pn = h.send();
+        h.now += rtt;
+        h.ack(pn, ack_delay);
+    };
+    for (int i = 0; i < 5; ++i) round_trip(40ms);
+    EXPECT_FALSE(h.r.queue_stood());
+    round_trip(70ms);
+    EXPECT_TRUE(h.r.queue_stood()) << "the whole round trip 30 ms over the base";
+    round_trip(44ms);
+    EXPECT_FALSE(h.r.queue_stood()) << "less than an eighth of the base over it is no queue";
+    round_trip(60ms, 20ms);
+    EXPECT_FALSE(h.r.queue_stood()) << "the peer's ack delay taken for a queue";
+
+    // Two packets 30 ms apart: the first answered after 70 ms, which ends a round
+    // trip of its own; the second 2 ms later, after 42 — in the next one, with a
+    // third that takes 70 again.
+    const uint64_t held = h.send();
+    h.now += 30ms;
+    const uint64_t on_time = h.send();
+    h.now += 40ms;
+    h.ack(held);
+    EXPECT_TRUE(h.r.queue_stood());
+    h.now += 2ms;
+    h.ack(on_time);
+    round_trip(70ms);
+    EXPECT_FALSE(h.r.queue_stood()) << "one packet of the round trip came back near the base";
+
+    const Clock::time_point rose = h.now;
+    while (h.now - rose < udp::Recovery::kBaseRttWindow) {
+        round_trip(70ms);
+        ASSERT_TRUE(h.r.queue_stood()) << "a queue forgotten " << (h.now - rose) / 1ms << " ms on";
+    }
+    while (h.now - rose < 2 * udp::Recovery::kBaseRttWindow) round_trip(70ms);
+    EXPECT_FALSE(h.r.queue_stood()) << "the path's own delay taken for a queue for good";
 }
 
 // Live video over such a path, two datagrams in a hundred overtaken: what turns
@@ -1466,6 +1513,48 @@ TEST(BbrTest, JitterDoesNotHoldDownACallSizedToTheEstimate) {
     }
 }
 
+// Repair symbols fill the bottleneck's idle time. A call sized to the estimate
+// on 1 Mbit/s leaves the link a tenth to spare, and a radio's jitter lifts the
+// estimate past the link: the sender runs dry between frames with a queue still
+// standing. A few early losses made the path look lossy; a repair a frame, sent
+// whenever the sender had nothing else, then overflowed the queue, and the loss
+// that made kept the repairs coming — 13% more bytes, frames expiring, for good.
+TEST(UdpLossRecoveryTest, RepairSymbolsDoNotOverloadALinkTheVideoNearlyFills) {
+    for (uint32_t seed = 1; seed <= 3; ++seed) {
+        Sim sim(1, 40ms, 8, 0.0, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        int live = 0;   // one in a hundred of the first live packets lost
+        sim.path.hook = [&](Bytes& d, const Address&, bool forward) {
+            return forward && has_frame(d, udp::kLive) && ++live <= 400 && live % 100 == 0;
+        };
+        Video video{sim, f, 0.15, 120ms};
+        const auto follow = [&](Clock::duration d) {
+            for (auto t = Clock::duration::zero(); t < d; t += 100ms) {
+                const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+                video.mbps = (std::max)(0.15, (std::min)(0.9 * estimate, 0.9));
+                video.play(100ms);
+            }
+        };
+        follow(10s);
+        const PathStats before = f.sender().path_stats();
+        const int first = video.frame;
+        follow(20s);
+        const PathStats after = f.sender().path_stats();
+        const uint64_t frames  = static_cast<uint64_t>(video.frame - first);
+        const uint64_t repairs = after.live_repair_bytes - before.live_repair_bytes;
+        EXPECT_LT(repairs, static_cast<uint64_t>(0.9e6 / 8 * 20 / 20))
+            << "seed " << seed << ": repair symbols past 5% of the video";
+        EXPECT_LT(after.live_expired - before.live_expired, frames / 25)
+            << "seed " << seed << ": of " << frames << " frames";
+    }
+}
+
 // ProbeRTT empties a queue to measure the path's own delay. An app-limited flow
 // that keeps seeing that delay has no queue to empty — and holding its inflight
 // to half a BDP for 200 ms is a keyframe lost for nothing. A flow that fills the
@@ -1672,10 +1761,10 @@ TEST(BbrTest, AJitteryPathDoesNotEndTheStartupOfATransfer) {
         << mbps_of(f.delivered(), 1s) << " Mbit/s in the first second of a 100 Mbit/s path";
 }
 
-// A buffer shallower than the queue a round trip can show (kQueueMin) never looks
-// queued, so a sender that runs dry between bursts would never be cut for what
-// it loses there (RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) — while
-// every burst overflows it again. What was in flight when the lost packet left
+// A buffer shallower than the queue a round trip can show (queue_threshold())
+// never looks queued, so a sender that runs dry between bursts would never be cut
+// for what it loses there (RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) —
+// while every burst overflows it again. What was in flight when the lost packet left
 // says it instead: more than the path holds is a queue of the sender's own.
 TEST(BbrTest, ALossFromMoreThanThePathHoldsCutsASenderThatRunsDry) {
     Sim sim(50, 1ms, 3);

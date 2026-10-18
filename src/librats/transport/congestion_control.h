@@ -30,6 +30,7 @@
 #include "librats/transport/delivery_rate.h"
 #include "librats/transport/udp_wire.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -69,6 +70,14 @@ struct RttEstimate {
         return have_rtt ? min_rtt : Clock::duration::zero();
     }
 };
+
+/// The queueing delay that counts as a queue on a path whose least round trip is
+/// `min_rtt`: an eighth of it, within 4–16 ms (RFC 9406's RTT threshold) — above
+/// the jitter a path shows with nothing queued, below what one burst builds.
+inline Clock::duration queue_threshold(Clock::duration min_rtt) noexcept {
+    const Clock::duration lo = std::chrono::milliseconds(4), hi = std::chrono::milliseconds(16);
+    return (std::min)((std::max)(min_rtt / 8, lo), hi);
+}
 
 /// A pacing rate as a ratio: `bytes` released every `per`. A ratio rather than a
 /// bytes-per-second figure so a window-based controller can say "cwnd per srtt"

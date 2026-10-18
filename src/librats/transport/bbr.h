@@ -207,11 +207,6 @@ public:
     /// Ceiling on the Reno-coexistence probe interval, in rounds.
     static constexpr uint64_t kProbeMaxRounds = 63;
 
-    /// The queueing delay that counts as a queue: an eighth of the minimum round
-    /// trip, within these bounds (RFC 9406's RTT threshold) — above the jitter a
-    /// path shows with nothing queued, below what one burst of ours builds.
-    static constexpr std::chrono::milliseconds kQueueMin{4};
-    static constexpr std::chrono::milliseconds kQueueMax{16};
     /// What it takes for one app-limited acknowledgement to end a probe
     /// (burst_queued): a burst of at least the starting window, and a queue of a
     /// quarter of the minimum round trip, at least kBurstQueueMin — above what a

@@ -24,7 +24,8 @@
  *     over in one hop (skip pointers), so an ACK costs what it newly acknowledges,
  *     not the window it repeats.
  *   - RTT estimation (RFC 6298 smoothing, RFC 9002 ack-delay adjustment), one
- *     sample per ACK from its largest packet when that one is new.
+ *     sample per ACK from its largest packet when that one is new; and, per
+ *     round trip, whether the queue at the bottleneck stood through it.
  *   - Loss detection (RFC 8985 RACK): lost once three later packets have arrived,
  *     or once a round trip and a reordering window have passed since it left with
  *     a later one delivered — on a timer of its own, so the last packets of a
@@ -126,6 +127,11 @@ public:
     /// the reordering learnt is forgotten (RFC 8985 §6.2's 16 recoveries): what a
     /// path did once costs every later loss a slower detection.
     static constexpr int kReorderMemory = 16;
+    /// A standing queue is measured from the least round trip of this window and
+    /// the one before (see queue_stood()): a path whose own delay grows reads as a
+    /// queue for two windows at most, where the all-time minimum would make it one
+    /// for good.
+    static constexpr std::chrono::seconds kBaseRttWindow{10};
 
     // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
     //
@@ -254,6 +260,12 @@ public:
     const cc::CongestionController& congestion() const noexcept { return *cc_; }
     const cc::RttEstimate&          rtt() const noexcept { return rtt_; }
     const cc::DeliveryRateSampler&  sampler() const noexcept { return sampler_; }
+    /// Whether the queue at the bottleneck stood through the whole of the last
+    /// round trip: no round trip in it (the peer's ack delay off) came back within
+    /// cc::queue_threshold() of the least of the last kBaseRttWindow or two. The
+    /// bottleneck had no idle moment then — whatever is sent on top waits behind
+    /// a queue, or overflows it.
+    bool queue_stood() const noexcept { return queue_stood_; }
     /// The timeout a probe or a handshake retransmission waits: a round trip, the
     /// variance allowance and the peer's ack delay.
     Clock::duration probe_timeout() const noexcept;
@@ -331,6 +343,8 @@ private:
     void   on_spurious_loss(SentPacket& pkt, Clock::time_point now) noexcept;
     /// `newest_lost`: the latest packet number among those just declared lost.
     void   congestion_event(Clock::time_point now, uint64_t newest_lost);
+    /// The round trip is over: judge whether its queue stood, start the next.
+    void   end_round(Clock::time_point now) noexcept;
     void   retire_front(Clock::time_point now) noexcept;
     void   pop_front() noexcept;
     void   hand_over(const SentPacket& pkt, bool acked, FrameSink& sink);
@@ -356,6 +370,14 @@ private:
     std::unique_ptr<cc::CongestionController> cc_;
     CongestionAlgorithm                       algorithm_;   ///< what on_new_path() starts again
     uint64_t                                  seed_;
+
+    // — round trips: the queue at the bottleneck (queue_stood()) —
+    uint64_t          round_end_ = 0;   ///< the delivered total that ends this round trip
+    Clock::duration   round_rtt_ = (Clock::duration::max)();   ///< its least, ack delay off
+    /// The least round trip of this kBaseRttWindow and of the one before.
+    Clock::duration   base_rtt_[2] = {(Clock::duration::max)(), (Clock::duration::max)()};
+    Clock::time_point base_since_{};    ///< when base_rtt_[0]'s window began
+    bool              queue_stood_ = false;
 
     // — the sent log: sent_[i] is packet log_base_ + i —
     RingBuffer<SentPacket> sent_;

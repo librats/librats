@@ -1317,6 +1317,13 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     live_loss_.update(recovery_.sampler().delivered(), recovery_.path_lost());
     const cc::RttEstimate& rtt = recovery_.rtt();
     if (!rtt.have_rtt || live_loss_.rate() <= 0) return 0;
+    // Repairs fill the bottleneck's idle time, and a sender with nothing left to
+    // send is not that: paced above the path (an estimate jitter lifted, a probe),
+    // it runs dry with a queue still standing. Repairs sent then land on top of
+    // the queue and overflow it, and the loss they make buys more repairs: on a
+    // link with a tenth to spare, video stayed overloaded for good. A round trip
+    // whose queue never emptied had no idle time to fill.
+    if (recovery_.queue_stood()) return 0;
     // Whether a piece lost now could still be sent again in time: the message
     // leaves at the pacing rate, a loss is known a round trip and a reordering
     // window after — an ack delay more for the last piece — and the second copy

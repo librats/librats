@@ -1,6 +1,7 @@
 #include "librats/transport/udp_recovery.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace librats {
 namespace udp {
@@ -304,6 +305,7 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
 
     // The controller hears the totals once everything the ACK implies is applied.
     const cc::RateSample rs = sampler_.take_sample(rtt_.min_or_zero());
+    if (rs.acked && rs.prior_delivered >= round_end_) end_round(now);
     if (rs.acked || lost_since_ack_ > 0) {
         cc::AckEvent ev;
         ev.now               = now;
@@ -497,6 +499,24 @@ void Recovery::congestion_event(Clock::time_point now, uint64_t newest_lost) {
     recovery_credit_ = prr_share(ack_newly_acked_);
 }
 
+void Recovery::end_round(Clock::time_point now) noexcept {
+    // A round trip is over once a packet sent after it began is acknowledged. The
+    // least round trip in it is when the queue was shortest: jitter delays some
+    // packets, never all, while a queue that stood delayed every one.
+    round_end_ = sampler_.delivered();
+    const Clock::duration rtt = std::exchange(round_rtt_, (Clock::duration::max)());
+    if (rtt == (Clock::duration::max)()) return;   // no sample: the verdict stands
+    if (now - base_since_ >= kBaseRttWindow) {
+        base_rtt_[1] = base_rtt_[0];
+        base_rtt_[0] = rtt;
+        base_since_  = now;
+    } else {
+        base_rtt_[0] = (std::min)(base_rtt_[0], rtt);
+    }
+    const Clock::duration base = (std::min)(base_rtt_[0], base_rtt_[1]);
+    queue_stood_ = rtt >= base + cc::queue_threshold(base);
+}
+
 void Recovery::hand_over(const SentPacket& pkt, bool acked, FrameSink& sink) {
     // A packet's frames stay in the log until the packet leaves its front, so its
     // span is still there whenever its fate comes in — late acknowledgements of a
@@ -536,6 +556,7 @@ void Recovery::release_memory() noexcept {
 
 void Recovery::sample_rtt(Clock::duration rtt, Clock::duration ack_delay) {
     if (rtt < Clock::duration::zero()) return;
+    Clock::duration adjusted = rtt;
     if (!rtt_.have_rtt) {
         rtt_.srtt     = rtt;
         rtt_.rttvar   = rtt / 2;
@@ -543,12 +564,12 @@ void Recovery::sample_rtt(Clock::duration rtt, Clock::duration ack_delay) {
     } else {
         // RFC 9002 §5.3: the peer's delay comes off the sample, but never so far
         // that the result is shorter than the shortest round trip ever seen.
-        auto adjusted = rtt;
         if (rtt >= rtt_.min_rtt + ack_delay) adjusted -= ack_delay;
         const auto err = rtt_.srtt > adjusted ? rtt_.srtt - adjusted : adjusted - rtt_.srtt;
         rtt_.rttvar = (rtt_.rttvar * 3 + err) / 4;
         rtt_.srtt   = (rtt_.srtt * 7 + adjusted) / 8;
     }
+    round_rtt_ = (std::min)(round_rtt_, adjusted);
     // The minimum and the controller see the raw sample: a minimum is only a floor
     // while nothing has been subtracted from it.
     rtt_.latest  = rtt;
@@ -731,6 +752,11 @@ void Recovery::on_new_path(Clock::time_point now, FrameSink& sink) {
 
     rtt_     = cc::RttEstimate{};
     rtt_.rto = kInitialRto;
+    round_end_   = sampler_.delivered();
+    round_rtt_   = (Clock::duration::max)();
+    base_rtt_[0] = base_rtt_[1] = (Clock::duration::max)();
+    base_since_  = Clock::time_point{};
+    queue_stood_ = false;
     rack_sent_at_     = Clock::time_point{};
     rack_rtt_         = Clock::duration::zero();
     reorder_deadline_ = kNever;

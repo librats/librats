@@ -945,10 +945,7 @@ uint64_t BbrController::save_cwnd() const noexcept {
 
 bool BbrController::queued(Clock::duration rtt_net) const noexcept {
     if (rtt_net == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)()) return false;
-    const auto lo = std::chrono::duration_cast<Clock::duration>(kQueueMin);
-    const auto hi = std::chrono::duration_cast<Clock::duration>(kQueueMax);
-    const Clock::duration threshold = (std::min)((std::max)(min_rtt_ / 8, lo), hi);
-    return rtt_net >= min_rtt_ + threshold;
+    return rtt_net >= min_rtt_ + queue_threshold(min_rtt_);
 }
 
 bool BbrController::burst_in_flight() const noexcept {
