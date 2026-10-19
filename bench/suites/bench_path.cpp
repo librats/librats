@@ -55,7 +55,8 @@
 //            Every frame is a live message (SendOptions::lifetime), dropped
 //            when it cannot make the player's deadline; `--reliable-video`
 //            sends them reliably instead, `--no-fec` without repair symbols.
-//            `--realtime` runs only this section.
+//            `--realtime` runs only this section. Then video from one sender
+//            to several peers through its uplink, a connection to each.
 //
 // ── Reading the numbers ─────────────────────────────────────────────────────
 //
@@ -63,7 +64,11 @@
 // is the point — it makes small regressions visible, which no real path does.
 // But a row with random loss is ONE draw of it, and a change that alters the
 // packet count reshuffles which packets die: compare such rows over many seeds
-// (RATS_SEED=1..N in the environment), never one.
+// (--seeds=N: every row run over seeds 1..N side by side, each cell their mean
+// and the line under it the least-most), never one. So is a row without loss:
+// the controller draws its probe phases from the connection id, and where a
+// probe lands against a keyframe or a jitter spike moves the figures too — a
+// seed salts the ids as well.
 // The flip side is that a model is only ever as good as what it models: there is
 // no reordering, no ack compression, no competing traffic and no variable delay,
 // so these figures are not predictions of what a real network will give. They
@@ -82,6 +87,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -93,8 +99,10 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -118,6 +126,14 @@ CongestionAlgorithm g_algo = CongestionAlgorithm::Bbr;
 bool g_reliable_video = false;
 /// Live messages carry repair symbols on a lossy path (--no-fec: they do not).
 bool g_fec = true;
+/// The seeds every row runs over (--seeds=N for 1..N, --seeds=A-B). A seed is
+/// one draw of everything random in a run: the path's losses and delays, the
+/// source's noise and, through the connection ids, the controllers' own draws
+/// (BBR picks its probe phases by its id). 0, the default, is the reference run
+/// every build is compared on.
+std::vector<unsigned> g_seeds{0};
+/// The seed the run on this thread draws from.
+thread_local unsigned t_seed = 0;
 const char* col(const char* code) { return g_color ? code : ""; }
 
 // ── The path ────────────────────────────────────────────────────────────────
@@ -212,7 +228,8 @@ public:
     /// live message may be (SendOptions::kMaxLivePayload), as the API refuses it.
     bool write_live(size_t bytes, uint32_t tag, Clock::time_point deadline, Clock::time_point now) {
         if (!conn_ || !conn_->established()) return false;
-        static std::vector<uint8_t> payload(SendOptions::kMaxLivePayload, 0xAB);
+        // Per thread: the tag is written into it, and seeds run side by side.
+        static thread_local std::vector<uint8_t> payload(SendOptions::kMaxLivePayload, 0xAB);
         if (bytes > payload.size()) return false;
         bytes = (std::max)(sizeof(tag), bytes);
         std::memcpy(payload.data(), &tag, sizeof(tag));
@@ -276,8 +293,8 @@ private:
 /// to a sender in the reverse one.
 class Path {
 public:
-    /// RATS_SEED in the environment changes the loss draws: one seed is one
-    /// sample, and a loss row only says something over many of them.
+    /// The run's seed draws the losses and delays: one seed is one sample, and a
+    /// loss row only says something over many of them (--seeds).
     Path(Direction fwd, Direction rev) : fwd_(fwd), rev_(rev), rng_(seed()) {}
 
     /// Say which side of the path `peer` is on, before it sends anything.
@@ -392,10 +409,7 @@ public:
     size_t fwd_drops() const { return fwd_.drops; }
 
 private:
-    static unsigned seed() {
-        const char* env = std::getenv("RATS_SEED");
-        return env ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 12345u;
-    }
+    static unsigned seed() { return t_seed != 0 ? t_seed : 12345u; }
 
     struct End {
         Peer* peer;
@@ -444,6 +458,10 @@ std::vector<uint8_t>& feed_buffer() {
     return v;
 }
 
+/// The id a pair dials under: `base`, salted by the run's seed, since the
+/// controllers draw their randomness from it. Even, as a dialer's id is.
+udp::Cid dial_id(udp::Cid base) { return base + (udp::Cid{t_seed} << 32); }
+
 /// A connected pair on a virtual clock, with the model between them.
 struct Rig {
     Address A{*IpAddress::parse("10.0.0.1"), 1111};
@@ -459,7 +477,7 @@ struct Rig {
           tx(path, A, g_algo), rx(path, B, g_algo) {
         path.place(&tx, false);
         path.place(&rx, true);
-        tx.dial(B, 0x10, now);
+        tx.dial(B, dial_id(0x10), now);
     }
 
     uint64_t delivered() const { return rx.delivered; }
@@ -497,6 +515,110 @@ void heading(const char* title, const char* c1, const char* c2,
     heading(title, {c1, c2, c3, c4, c5});
 }
 
+/// Run `measure` once per seed, side by side, and hand back what each run
+/// returned, in seed order. Every run builds its own model and connections, so
+/// runs share nothing but the read-only globals above.
+template <class F>
+auto over_seeds(F measure) {
+    std::vector<decltype(measure())> runs(g_seeds.size());
+    std::atomic<size_t> next{0};
+    const auto work = [&] {
+        for (size_t i; (i = next++) < runs.size();) {
+            t_seed  = g_seeds[i];
+            runs[i] = measure();
+        }
+    };
+    const unsigned own   = t_seed;
+    const size_t   cores = (std::max)(std::thread::hardware_concurrency(), 1u);
+    std::vector<std::thread> threads;
+    for (size_t i = 1; i < (std::min)(runs.size(), cores); ++i) threads.emplace_back(work);
+    work();
+    for (std::thread& t : threads) t.join();
+    t_seed = own;
+    return runs;
+}
+
+/// One figure out of each run.
+using Samples = std::vector<double>;
+template <class R, class F>
+Samples each(const std::vector<R>& runs, F figure) {
+    Samples s;
+    for (const R& r : runs) s.push_back(figure(r));
+    return s;
+}
+
+/// Jain's fairness index of what each of several got: 1 an even split, 1/n
+/// one of them taking it all.
+double jain(const std::vector<double>& got) {
+    double sum = 0, squares = 0;
+    for (double g : got) { sum += g; squares += g * g; }
+    return squares > 0 ? sum * sum / (got.size() * squares) : 1;
+}
+
+/// One cell of a table: the mean over the seeds, 9 columns wide as the table
+/// shows it, and the least and the most of them, "lo-hi", for the line under
+/// the row (empty with one seed). A run that never got there — infinity — is
+/// left out of both and counted instead.
+struct Cell {
+    std::string shown, spread;
+};
+/// The colour a mean is shown in, or "" for none.
+using Tint = const char* (*)(double);
+
+/// `prec` decimals, then `unit` ("%", "s") inside the 9 columns.
+Cell figure(const Samples& s, int prec, const char* unit = "", Tint tint = nullptr) {
+    Samples got;
+    for (double v : s)
+        if (!std::isinf(v)) got.push_back(v);
+    char buf[64];
+    Cell c;
+    if (got.empty()) {
+        std::snprintf(buf, sizeof(buf), "%9s", "never");
+        c.shown = buf;
+        return c;
+    }
+    const double mean  = std::accumulate(got.begin(), got.end(), 0.0) / got.size();
+    const int    width = 9 - static_cast<int>(std::strlen(unit));
+    std::snprintf(buf, sizeof(buf), "%*.*f%s", width, prec, mean, unit);
+    c.shown = buf;
+    if (tint && g_color) c.shown = tint(mean) + c.shown + "\x1b[0m";
+    if (s.size() < 2) return c;
+    if (got.size() < s.size()) {
+        std::snprintf(buf, sizeof(buf), "%zu never", s.size() - got.size());
+    } else {
+        // As many decimals as still fit the column; the unit is the cell's.
+        const auto [lo, hi] = std::minmax_element(got.begin(), got.end());
+        for (int p = prec; p >= 0; --p) {
+            std::snprintf(buf, sizeof(buf), "%.*f-%.*f", p, *lo, p, *hi);
+            if (std::strlen(buf) <= 9) break;
+        }
+    }
+    c.spread = buf;
+    return c;
+}
+Cell text(const char* s) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%9s", s);
+    return Cell{buf, ""};
+}
+
+/// A share of frames late: green within what a call shrugs off, yellow past
+/// what it visibly freezes on.
+const char* late_tint(double late) { return late <= 1 ? "\x1b[32m" : late <= 5 ? "" : "\x1b[33m"; }
+Cell late_cell(const Samples& late) { return figure(late, 1, "%", late_tint); }
+
+/// A row: its name, its cells and, with more than one seed, each cell's spread
+/// on a dim line under it. `indent` for rows grouped under a name of their own.
+void row(const char* name, const std::vector<Cell>& cells, int indent = 2) {
+    std::printf("%*s%-*s", indent, "", 32 - indent, name);
+    for (const Cell& c : cells) std::printf(" %s", c.shown.c_str());
+    std::printf("\n");
+    if (g_seeds.size() < 2) return;
+    std::printf("%s%32s", col("\x1b[2m"), "");
+    for (const Cell& c : cells) std::printf(" %9s", c.spread.c_str());
+    std::printf("%s\n", col("\x1b[0m"));
+}
+
 // ── bulk ────────────────────────────────────────────────────────────────────
 
 /// `overtaken`: a share of the datagrams, both ways, 8 ms late and overtaken by
@@ -505,40 +627,45 @@ void heading(const char* title, const char* c1, const char* c2,
 /// `reorders`.
 void bulk(const char* name, double rate, int rtt, double loss, size_t queue, int secs,
           double overtaken = 0, int sd_ms = 0, bool reorders = false) {
-    Rig r(rate, rtt, loss, queue);
-    if (overtaken > 0) r.path.hold_back(overtaken, std::chrono::milliseconds(8), true);
-    if (sd_ms > 0)     r.path.vary(std::chrono::milliseconds(sd_ms), reorders);
-    r.run(std::chrono::seconds(secs), true);
-
-    const double mbps = r.delivered() * 8.0 / (secs * 1e6);
-    const double util = mbps / rate * 100;
-
-    char util_s[64];
-    std::snprintf(util_s, sizeof(util_s), "%8.1f%%", util);
-    std::string tinted = util_s;
-    if (g_color) tinted = std::string(util >= 85 ? "\x1b[32m" : util >= 65 ? "" : "\x1b[33m")
-                        + tinted + "\x1b[0m";
-
-    std::printf("  %-30s %9.2f %s %9u %9u %9zu\n", name, mbps, tinted.c_str(),
-                r.tx.retransmits(), r.tx.congestion_events(), r.path.drops());
+    struct Run { double mbps, retrans, cuts, drops; };
+    const auto runs = over_seeds([&] {
+        Rig r(rate, rtt, loss, queue);
+        if (overtaken > 0) r.path.hold_back(overtaken, std::chrono::milliseconds(8), true);
+        if (sd_ms > 0)     r.path.vary(std::chrono::milliseconds(sd_ms), reorders);
+        r.run(std::chrono::seconds(secs), true);
+        return Run{r.delivered() * 8.0 / (secs * 1e6), double(r.tx.retransmits()),
+                   double(r.tx.congestion_events()), double(r.path.drops())};
+    });
+    const Tint util_tint = [](double util) { return util >= 85 ? "\x1b[32m" : util >= 65 ? "" : "\x1b[33m"; };
+    row(name, {figure(each(runs, [](const Run& r) { return r.mbps; }), 2),
+               figure(each(runs, [&](const Run& r) { return r.mbps / rate * 100; }), 1, "%", util_tint),
+               figure(each(runs, [](const Run& r) { return r.retrans; }), 0),
+               figure(each(runs, [](const Run& r) { return r.cuts; }), 0),
+               figure(each(runs, [](const Run& r) { return r.drops; }), 0)});
 }
 
 // ── idle ────────────────────────────────────────────────────────────────────
 
 void idle(const char* name, double rate, int rtt, size_t queue, int warm, int quiet) {
-    Rig r(rate, rtt, 0.0, queue);
-    r.run(std::chrono::seconds(warm), true);
-    const uint32_t grown = r.tx.cwnd() / cc::kMss;
+    struct Run { double grown, resumed, drops, retrans; };
+    const auto runs = over_seeds([&] {
+        Rig r(rate, rtt, 0.0, queue);
+        r.run(std::chrono::seconds(warm), true);
+        const uint32_t grown = r.tx.cwnd() / cc::kMss;
 
-    r.run(std::chrono::seconds(quiet), false);
-    const uint32_t resumed = r.tx.cwnd() / cc::kMss;
+        r.run(std::chrono::seconds(quiet), false);
+        const uint32_t resumed = r.tx.cwnd() / cc::kMss;
 
-    const size_t   drops_before = r.path.fwd_drops();
-    const uint32_t rtx_before   = r.tx.retransmits();
-    r.run(std::chrono::seconds(1), true);
-
-    std::printf("  %-30s %9u %9u %9zu %9u %9s\n", name, grown, resumed,
-                r.path.fwd_drops() - drops_before, r.tx.retransmits() - rtx_before, "");
+        const size_t   drops_before = r.path.fwd_drops();
+        const uint32_t rtx_before   = r.tx.retransmits();
+        r.run(std::chrono::seconds(1), true);
+        return Run{double(grown), double(resumed), double(r.path.fwd_drops() - drops_before),
+                   double(r.tx.retransmits() - rtx_before)};
+    });
+    row(name, {figure(each(runs, [](const Run& r) { return r.grown; }), 0),
+               figure(each(runs, [](const Run& r) { return r.resumed; }), 0),
+               figure(each(runs, [](const Run& r) { return r.drops; }), 0),
+               figure(each(runs, [](const Run& r) { return r.retrans; }), 0), text("")});
 }
 
 // ── tail ────────────────────────────────────────────────────────────────────
@@ -548,30 +675,37 @@ void idle(const char* name, double rate, int rtt, size_t queue, int warm, int qu
 /// selective ack — nothing but silence. Reported as a distribution because the
 /// median is untouched by definition and the whole effect is in the tail.
 void tail(const char* name, double rate, int rtt, double loss, int rounds, size_t bytes) {
-    Rig r(rate, rtt, loss, 200);
-    r.run(std::chrono::seconds(2), false);   // settle the handshake and the estimate
+    struct Run { double median, p90, p99, max; };
+    const auto runs = over_seeds([&] {
+        Rig r(rate, rtt, loss, 200);
+        r.run(std::chrono::seconds(2), false);   // settle the handshake and the estimate
 
-    std::vector<double> times;
-    times.reserve(static_cast<size_t>(rounds));
-    const std::string msg(bytes, 'q');
+        std::vector<double> times;
+        times.reserve(static_cast<size_t>(rounds));
+        const std::string msg(bytes, 'q');
 
-    for (int i = 0; i < rounds; ++i) {
-        const auto   started = r.now;
-        const size_t want    = r.delivered() + msg.size();
+        for (int i = 0; i < rounds; ++i) {
+            const auto   started = r.now;
+            const size_t want    = r.delivered() + msg.size();
 
-        while (r.tx.write(msg.size(), r.now) == 0) r.run(ms(1), false);
+            while (r.tx.write(msg.size(), r.now) == 0) r.run(ms(1), false);
 
-        // A second is far past any recovery this transport can attempt, so a round
-        // that reaches it did not recover at all — and shows up as the cap.
-        const auto deadline = r.now + std::chrono::seconds(1);
-        while (r.delivered() < want && r.now < deadline) r.run(us(200), false);
-        times.push_back(std::chrono::duration<double, std::milli>(r.now - started).count());
-    }
+            // A second is far past any recovery this transport can attempt, so a
+            // round that reaches it did not recover at all — and shows up as the cap.
+            const auto deadline = r.now + std::chrono::seconds(1);
+            while (r.delivered() < want && r.now < deadline) r.run(us(200), false);
+            times.push_back(std::chrono::duration<double, std::milli>(r.now - started).count());
+        }
 
-    std::sort(times.begin(), times.end());
-    const auto q = [&](double f) { return times[static_cast<size_t>(f * (times.size() - 1))]; };
-    std::printf("  %-30s %9.1f %9.1f %9.1f %9.1f %9.1f\n",
-                name, q(0.5), q(0.9), q(0.99), times.back(), q(0.99) - q(0.5));
+        std::sort(times.begin(), times.end());
+        const auto q = [&](double f) { return times[static_cast<size_t>(f * (times.size() - 1))]; };
+        return Run{q(0.5), q(0.9), q(0.99), times.back()};
+    });
+    row(name, {figure(each(runs, [](const Run& r) { return r.median; }), 1),
+               figure(each(runs, [](const Run& r) { return r.p90; }), 1),
+               figure(each(runs, [](const Run& r) { return r.p99; }), 1),
+               figure(each(runs, [](const Run& r) { return r.max; }), 1),
+               figure(each(runs, [](const Run& r) { return r.p99 - r.median; }), 1)});
 }
 
 
@@ -634,20 +768,27 @@ void memory(const char* name, double rate, int rtt, size_t queue, size_t hole) {
 /// where the curve turns into a cliff, and whether the connection survives it at
 /// all: kMaxRetransmits gives up after twelve attempts on one packet.
 void loss_row(double rate, int rtt, double loss, size_t queue, int secs) {
-    Rig r(rate, rtt, loss, queue);
-    r.run(std::chrono::seconds(secs), true);
-
-    const double mbps = r.delivered() * 8.0 / (secs * 1e6);
+    struct Run { double mbps, retrans, cuts; bool died; };
+    const auto runs = over_seeds([&] {
+        Rig r(rate, rtt, loss, queue);
+        r.run(std::chrono::seconds(secs), true);
+        return Run{r.delivered() * 8.0 / (secs * 1e6), double(r.tx.retransmits()),
+                   double(r.tx.congestion_events()), r.tx.dead() || r.rx.dead()};
+    });
     char name[64];
     std::snprintf(name, sizeof(name), "%.1f%% loss", loss * 100);
 
-    const bool  died  = r.tx.dead() || r.rx.dead();
-    std::string state = died ? "died" : "alive";
-    if (g_color) state = std::string(died ? "\x1b[31m" : "\x1b[32m") + state + "\x1b[0m";
+    const auto died = static_cast<size_t>(std::count_if(runs.begin(), runs.end(), [](const Run& r) { return r.died; }));
+    char state_s[32];
+    if (died == 0 || died == runs.size()) std::snprintf(state_s, sizeof(state_s), "%9s", died ? "died" : "alive");
+    else                                  std::snprintf(state_s, sizeof(state_s), "%4zu died", died);
+    Cell state{state_s, ""};
+    if (g_color) state.shown = std::string(died ? "\x1b[31m" : "\x1b[32m") + state.shown + "\x1b[0m";
 
-    std::printf("  %-30s %9.2f %8.1f%% %9u %9u %9s\n", name, mbps,
-                mbps / rate * 100, r.tx.retransmits(), r.tx.congestion_events(),
-                state.c_str());
+    row(name, {figure(each(runs, [](const Run& r) { return r.mbps; }), 2),
+               figure(each(runs, [&](const Run& r) { return r.mbps / rate * 100; }), 1, "%"),
+               figure(each(runs, [](const Run& r) { return r.retrans; }), 0),
+               figure(each(runs, [](const Run& r) { return r.cuts; }), 0), state});
 }
 
 // ── compete ─────────────────────────────────────────────────────────────────
@@ -662,7 +803,7 @@ struct Flow {
         path.place(&tx, reverse);
         path.place(&rx, !reverse);
         path.set_now(now);
-        tx.dial(rx.addr(), 0x100 + 0x10 * static_cast<udp::Cid>(index), now);
+        tx.dial(rx.addr(), dial_id(0x100 + 0x10 * static_cast<udp::Cid>(index)), now);
     }
     Peer tx, rx;
 };
@@ -672,37 +813,43 @@ struct Flow {
 /// index over the two, where 1.0 is an even split and 0.5 one flow taking it all.
 void compete(const char* name, CongestionAlgorithm a, CongestionAlgorithm b, double rate,
              int rtt, size_t queue, int join, int secs) {
-    Path path(Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0},
-              Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0});
-    Clock::time_point now{};
-    Flow fa(path, 0, a, now);
-    std::unique_ptr<Flow> fb;
+    struct Run { double ma, mb, retrans; };
+    const auto runs = over_seeds([&] {
+        Path path(Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0},
+                  Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0});
+        Clock::time_point now{};
+        Flow fa(path, 0, a, now);
+        std::unique_ptr<Flow> fb;
 
-    const size_t chunk = feed_buffer().size();
-    size_t base_a = 0, base_b = 0;
-    constexpr auto kStep = us(200);
-    const auto measure_from = std::chrono::seconds(join + 5);   // let the newcomer settle
+        const size_t chunk = feed_buffer().size();
+        size_t base_a = 0, base_b = 0;
+        constexpr auto kStep = us(200);
+        const auto measure_from = std::chrono::seconds(join + 5);   // let the newcomer settle
 
-    for (auto t = Clock::duration::zero(); t < std::chrono::seconds(secs); t += kStep) {
-        now += kStep;
-        if (!fb && t >= std::chrono::seconds(join)) fb = std::make_unique<Flow>(path, 1, b, now);
-        if (t == measure_from) { base_a = fa.rx.delivered; base_b = fb->rx.delivered; }
-        path.deliver_until(now);
-        for (Flow* f : {&fa, fb.get()}) {
-            if (!f) continue;
-            for (int i = 0; i < 64; ++i)
-                if (f->tx.write(chunk, now) == 0) break;
-            f->tx.tick(now);
-            f->rx.tick(now);
+        for (auto t = Clock::duration::zero(); t < std::chrono::seconds(secs); t += kStep) {
+            now += kStep;
+            if (!fb && t >= std::chrono::seconds(join)) fb = std::make_unique<Flow>(path, 1, b, now);
+            if (t == measure_from) { base_a = fa.rx.delivered; base_b = fb->rx.delivered; }
+            path.deliver_until(now);
+            for (Flow* f : {&fa, fb.get()}) {
+                if (!f) continue;
+                for (int i = 0; i < 64; ++i)
+                    if (f->tx.write(chunk, now) == 0) break;
+                f->tx.tick(now);
+                f->rx.tick(now);
+            }
         }
-    }
 
-    const double window = secs - std::chrono::duration<double>(measure_from).count();
-    const double ma = (fa.rx.delivered - base_a) * 8.0 / (window * 1e6);
-    const double mb = (fb->rx.delivered - base_b) * 8.0 / (window * 1e6);
-    const double jain = (ma + mb) * (ma + mb) / (2 * (ma * ma + mb * mb));
-    std::printf("  %-30s %9.2f %9.2f %8.1f%% %9.3f %9u\n", name, ma, mb,
-                (ma + mb) / rate * 100, jain, fa.tx.retransmits() + fb->tx.retransmits());
+        const double window = secs - std::chrono::duration<double>(measure_from).count();
+        return Run{(fa.rx.delivered - base_a) * 8.0 / (window * 1e6),
+                   (fb->rx.delivered - base_b) * 8.0 / (window * 1e6),
+                   double(fa.tx.retransmits() + fb->tx.retransmits())};
+    });
+    row(name, {figure(each(runs, [](const Run& r) { return r.ma; }), 2),
+               figure(each(runs, [](const Run& r) { return r.mb; }), 2),
+               figure(each(runs, [&](const Run& r) { return (r.ma + r.mb) / rate * 100; }), 1, "%"),
+               figure(each(runs, [](const Run& r) { return jain({r.ma, r.mb}); }), 3),
+               figure(each(runs, [](const Run& r) { return r.retrans; }), 0)});
 }
 
 // ── delay ───────────────────────────────────────────────────────────────────
@@ -712,19 +859,24 @@ void compete(const char* name, CongestionAlgorithm a, CongestionAlgorithm b, dou
 /// once it has settled. A loss-based controller fills whatever buffer there is;
 /// this is the column a peer's interactive traffic actually waits in.
 void delay(const char* name, double rate, int rtt, size_t queue, int secs) {
-    Rig r(rate, rtt, 0.0, queue);
-    r.run(std::chrono::seconds(5), true);   // past startup
+    struct Run { double median, p95, max, mbps; };
+    const auto runs = over_seeds([&] {
+        Rig r(rate, rtt, 0.0, queue);
+        r.run(std::chrono::seconds(5), true);   // past startup
 
-    std::vector<double> samples;
-    for (int i = 0; i < secs * 100; ++i) {
-        r.run(ms(10), true);
-        samples.push_back(std::chrono::duration<double, std::milli>(r.tx.rtt().latest).count() - rtt);
-    }
-    std::sort(samples.begin(), samples.end());
-    const auto q = [&](double f) { return samples[static_cast<size_t>(f * (samples.size() - 1))]; };
-    const double mbps = r.delivered() * 8.0 / ((secs + 5) * 1e6);
-    std::printf("  %-30s %9.1f %9.1f %9.1f %9.2f %9s\n", name, q(0.5), q(0.95), samples.back(),
-                mbps, "");
+        std::vector<double> samples;
+        for (int i = 0; i < secs * 100; ++i) {
+            r.run(ms(10), true);
+            samples.push_back(std::chrono::duration<double, std::milli>(r.tx.rtt().latest).count() - rtt);
+        }
+        std::sort(samples.begin(), samples.end());
+        const auto q = [&](double f) { return samples[static_cast<size_t>(f * (samples.size() - 1))]; };
+        return Run{q(0.5), q(0.95), samples.back(), r.delivered() * 8.0 / ((secs + 5) * 1e6)};
+    });
+    row(name, {figure(each(runs, [](const Run& r) { return r.median; }), 1),
+               figure(each(runs, [](const Run& r) { return r.p95; }), 1),
+               figure(each(runs, [](const Run& r) { return r.max; }), 1),
+               figure(each(runs, [](const Run& r) { return r.mbps; }), 2), text("")});
 }
 
 // ── realtime ────────────────────────────────────────────────────────────────
@@ -788,6 +940,9 @@ struct Scene {
     bool    late_normal = false;    ///< every datagram moved by a normal draw of deviation
                                     ///< late_ms (Path::vary; in order unless late_reorders)
     int     ack_bunch_ms = 0;       ///< acknowledgements handed back in bunches this far apart
+    int     peers = 1;              ///< receivers the sender sends the video to, a connection
+                                    ///< to each, all of it through the one bottleneck
+    int     join_every_s = 0;       ///< s between one peer's connection and the next; 0 = all at once
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
     Scene& over(double mbps, int ms) { link = mbps; rtt = ms; return *this; }
@@ -810,6 +965,7 @@ struct Scene {
     Scene& outage(int ms) { besides = Besides::Outage; outage_ms = ms; return *this; }
     Scene& roam(int ms) { besides = Besides::Roam; outage_ms = ms; return *this; }
     Scene& shaped(const Profile& p) { profile = p; return *this; }
+    Scene& to(int n, int every_s = 0) { peers = n; join_every_s = every_s; return *this; }
 
     /// An event that ends, so a recovery from it can be timed. A swing never
     /// ends; the rows without an event have nothing to recover from.
@@ -829,12 +985,16 @@ struct RealtimeResult {
     double recover;         ///< ms from the event's end to a second of on-time frames; <0 no event, inf never
     double video;           ///< Mbit/s the encoder produced
     double fec;             ///< repair symbols sent, % of the video
-    double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; <0 none did
+    double key_median;      ///< keyframe latency over the one-way delay, ms, of those that arrived; inf none did
     double resent;          ///< packets sent again, % of the packets sent
     double estimate;        ///< PathStats::bandwidth_bps from 10 s on, median, Mbit/s
     double reach;           ///< s from the first frame — from the rise, on a link that rises — until
                             ///< the encoder ran at its ceiling; inf never
 };
+/// Each run's result, one figure out of it per seed.
+Samples each(const std::vector<RealtimeResult>& runs, double RealtimeResult::*figure) {
+    return each(runs, [&](const RealtimeResult& r) { return r.*figure; });
+}
 
 /// One live source and the player at the far end of its connection: the scene's
 /// frames a second (30 unless it says otherwise), each sent as one message the
@@ -864,8 +1024,10 @@ struct Video {
         Clock::time_point arrived_at{};
     };
 
-    Video(Peer& tx, Peer& rx, const Scene& scene)
-        : tx(tx), rx(rx), scene(scene), fps(scene.fps), gop(2 * scene.fps), rng(1) {
+    /// `begin`: when the first frame is captured, a second after the connection
+    /// is dialled — the handshake and a first estimate.
+    Video(Peer& tx, Peer& rx, const Scene& scene, Clock::time_point begin)
+        : tx(tx), rx(rx), scene(scene), fps(scene.fps), gop(2 * scene.fps), rng(1 + t_seed), begin(begin) {
         target = scene.video * 1e6;
         if (scene.source != Source::Fixed) target = (std::min)(target, 1e6);   // calls start low
         encoder_rate = target;
@@ -980,10 +1142,12 @@ struct Video {
     double            gop_weight = 0;
     double            debt = 0;          // bytes produced over budget, still to be paid back
     int               frame_no = 0;
-    Clock::time_point next_frame = Clock::time_point{} + std::chrono::seconds(1);   // after the handshake
-    Clock::time_point next_retarget = next_frame;
+    const Clock::time_point begin;       // the first frame's capture
+    Clock::time_point next_frame = begin;
+    Clock::time_point next_retarget = begin;
     Clock::time_point reached{};         // when the encoder was first told its ceiling
     uint64_t          prev_delivered = 0, prev_lost = 0;
+    std::vector<double> estimates;       // PathStats::bandwidth_bps every 100 ms from 10 s on, Mbit/s
 };
 
 /// Live video over one connection, measured the way a viewer would: a frame is
@@ -1005,9 +1169,14 @@ struct Video {
 /// decoder makes of a gap (intra refresh, layers, asking for a keyframe) is its
 /// own business. --reliable-video sends each frame reliably instead, where a loss
 /// holds back the frames behind it and nothing stale is ever dropped.
-RealtimeResult realtime(const Scene& sc) {
+///
+/// With more than one peer the sender sends the scene's video to each of them,
+/// a connection to each — every one with its own controller, as a node's
+/// connections are — all through the one bottleneck: the sender's uplink. The
+/// result is each peer's, in the order they joined.
+std::vector<RealtimeResult> realtime_peers(const Scene& sc) {
     const size_t bdp_pkts = static_cast<size_t>(sc.link * 1e6 / 8 * sc.rtt / 1000.0 / 1228);
-    const size_t queue    = (std::max<size_t>)(static_cast<size_t>(bdp_pkts * sc.buffer_bdp), 8);
+    const size_t queue    = (std::max)(static_cast<size_t>(bdp_pkts * sc.buffer_bdp), size_t{8});
     const double rate0    = sc.besides == Besides::RateRise ? sc.link * 0.3e6 : sc.link * 1e6;
     Direction fwd{rate0, us(sc.rtt * 500), queue, sc.loss, {}, {}, 0};
     fwd.burst = ms(sc.burst_ms);
@@ -1024,28 +1193,37 @@ RealtimeResult realtime(const Scene& sc) {
     if (dark) path.set_outage(Clock::time_point{} + event, Clock::time_point{} + event_end);
 
     Clock::time_point now{};
-    Flow fv(path, 0, g_algo, now);
+    std::vector<std::unique_ptr<Flow>>  peers;    // the sender's connection to each, as they join
+    std::vector<std::unique_ptr<Video>> videos;   // the video to each
+    const auto join = [&] {
+        peers.push_back(std::make_unique<Flow>(path, static_cast<int>(peers.size()), g_algo, now));
+        videos.push_back(std::make_unique<Video>(peers.back()->tx, peers.back()->rx, sc,
+                                                 now + std::chrono::seconds(1)));
+    };
+    do join(); while (sc.join_every_s == 0 && peers.size() < static_cast<size_t>(sc.peers));
+    Flow& fv = *peers.front();
     std::unique_ptr<Flow> other;
-    if (sc.besides == Besides::PathBulk) other = std::make_unique<Flow>(path, 1, g_algo, now);
-    if (sc.besides == Besides::Duplex)   other = std::make_unique<Flow>(path, 1, g_algo, now, true);
-    Video video(fv.tx, fv.rx, sc);
+    if (sc.besides == Besides::PathBulk) other = std::make_unique<Flow>(path, sc.peers, g_algo, now);
+    if (sc.besides == Besides::Duplex)   other = std::make_unique<Flow>(path, sc.peers, g_algo, now, true);
     if (sc.besides == Besides::Rebind)
         path.move(fv.rx.addr(), Address{fv.rx.addr().ip, 3333}, Clock::time_point{} + event);
     if (sc.besides == Besides::Roam)
         path.move(fv.rx.addr(), Address{*IpAddress::parse("10.0.3.1"), 2222}, Clock::time_point{} + event_end);
     std::unique_ptr<Video> back;
-    if (sc.besides == Besides::Duplex) back = std::make_unique<Video>(other->tx, other->rx, sc);
+    if (sc.besides == Besides::Duplex)
+        back = std::make_unique<Video>(other->tx, other->rx, sc, now + std::chrono::seconds(1));
 
     const size_t chunk = feed_buffer().size();
-    std::vector<double> estimates;   // Mbit/s, every 100 ms from 10 s on
 
     constexpr auto kStep  = us(200);
-    const auto     start  = std::chrono::seconds(1);    // handshake and first estimate
     const auto     finish = std::chrono::seconds(31);
     const auto     until  = finish + std::chrono::seconds(2);   // the tail drains
 
     for (auto t = Clock::duration::zero(); t < until; t += kStep) {
         now += kStep;
+        if (peers.size() < static_cast<size_t>(sc.peers) &&
+            t == std::chrono::seconds(sc.join_every_s) * static_cast<int>(peers.size()))
+            join();
         if (sc.besides == Besides::RateDrop && t == event) path.set_rate(sc.link * 0.3e6);
         if (sc.besides == Besides::RateRise && t == event) path.set_rate(sc.link * 1e6);
         if (sc.besides == Besides::RateSwing && t >= event && (t - event) % std::chrono::seconds(2) == Clock::duration::zero())
@@ -1053,11 +1231,12 @@ RealtimeResult realtime(const Scene& sc) {
         path.deliver_until(now);
 
         // Nothing is captured after `finish`.
-        for (Video* v : {&video, back.get()}) {
-            if (!v) continue;
-            if (t < finish) v->capture(now);
-            v->feed(now);
-        }
+        const auto source = [&](Video& v) {
+            if (t < finish) v.capture(now);
+            v.feed(now);
+        };
+        for (auto& v : videos) source(*v);
+        if (back) source(*back);
         // A file to the same peer: its own lane, at the lowest priority.
         if (sc.besides == Besides::StreamBulk && t < finish)
             for (int i = 0; i < 64; ++i)
@@ -1066,18 +1245,21 @@ RealtimeResult realtime(const Scene& sc) {
             for (int i = 0; i < 64; ++i)
                 if (other->tx.write(chunk, now) == 0) break;
 
-        for (Flow* f : {&fv, other.get()}) {
-            if (!f) continue;
+        for (auto& f : peers) {
             f->tx.tick(now);
             f->rx.tick(now);
         }
-        video.play(now);
+        if (other) {
+            other->tx.tick(now);
+            other->rx.tick(now);
+        }
+        for (auto& v : videos) v->play(now);
         if (back) back->play(now);
 
-        video.retarget(now);
+        for (auto& v : videos) v->retarget(now);
         if (back) back->retarget(now);
         if (t >= event && t < finish && t % ms(100) == Clock::duration::zero())
-            estimates.push_back(fv.tx.path_stats().bandwidth_bps / 1e6);
+            for (auto& v : videos) v->estimates.push_back(v->tx.path_stats().bandwidth_bps / 1e6);
     }
 
     const double base  = sc.rtt / 2.0;
@@ -1085,93 +1267,94 @@ RealtimeResult realtime(const Scene& sc) {
     const auto   deadline = ms(static_cast<long long>(base)) + Video::kJitterBudget;
     const auto   on_time = [&](const Video::Frame& f) { return f.arrived && f.arrived_at - f.captured <= deadline; };
 
-    // A frame that never arrived — dropped, or still undelivered when the run
-    // ends — was not in time either.
-    // Latency is of the frames that arrived; "late" counts the rest too.
-    std::vector<double> latency, key_latency;
-    size_t missing = 0, late_frames = 0;
-    for (const Video::Frame& f : video.frames) {
-        if (f.arrived) latency.push_back(to_ms(f.arrived_at - f.captured));
-        else           ++missing;
-        if (!on_time(f)) ++late_frames;
-        if (f.key && f.arrived) key_latency.push_back(to_ms(f.arrived_at - f.captured));
-    }
-    if (latency.empty()) latency.push_back(2000);
-
-    // The player: each frame shown at its deadline, or on arrival when later; a
-    // frame that never came is never shown.
-    const Clock::duration frame_every =
-        std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / sc.fps;
-    const Clock::duration freeze_at = (std::max)(frame_every * 3, frame_every + ms(150));
-    double freeze_max = 0, frozen = 0;
-    Clock::time_point shown_prev{};
-    const auto freeze = [&](Clock::time_point shown) {
-        if (shown_prev != Clock::time_point{} && shown - shown_prev > freeze_at) {
-            freeze_max = (std::max)(freeze_max, to_ms(shown - shown_prev));
-            frozen    += to_ms(shown - shown_prev) / 1000;
+    const auto measure = [&](Video& video) {
+        // A frame that never arrived — dropped, or still undelivered when the run
+        // ends — was not in time either.
+        // Latency is of the frames that arrived; "late" counts the rest too.
+        std::vector<double> latency, key_latency;
+        size_t missing = 0, late_frames = 0;
+        for (const Video::Frame& f : video.frames) {
+            if (f.arrived) latency.push_back(to_ms(f.arrived_at - f.captured));
+            else           ++missing;
+            if (!on_time(f)) ++late_frames;
+            if (f.key && f.arrived) key_latency.push_back(to_ms(f.arrived_at - f.captured));
         }
-        shown_prev = (std::max)(shown_prev, shown);
-    };
-    for (const Video::Frame& f : video.frames)
-        if (f.arrived) freeze((std::max)(f.arrived_at, f.captured + deadline));
-    // A stream whose last frames never came stands still until the last was due.
-    if (!video.frames.empty() && !video.frames.back().arrived)
-        freeze(video.frames.back().captured + deadline);
+        if (latency.empty()) latency.push_back(2000);
 
-    double recover = -1;
-    if (sc.has_event()) {
-        recover = std::numeric_limits<double>::infinity();
-        const size_t kSettled = static_cast<size_t>(sc.fps);
-        const auto from = Clock::time_point{} + event_end;
-        size_t run = 0;
-        for (size_t i = 0; i < video.frames.size(); ++i) {
-            const Video::Frame& f = video.frames[i];
-            if (f.captured < from) continue;
-            run = on_time(f) ? run + 1 : 0;
-            if (run == kSettled) {
-                recover = to_ms(video.frames[i + 1 - kSettled].captured - from);
-                break;
+        // The player: each frame shown at its deadline, or on arrival when later; a
+        // frame that never came is never shown.
+        const Clock::duration frame_every =
+            std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / sc.fps;
+        const Clock::duration freeze_at = (std::max)(frame_every * 3, frame_every + ms(150));
+        double freeze_max = 0, frozen = 0;
+        Clock::time_point shown_prev{};
+        const auto freeze = [&](Clock::time_point shown) {
+            if (shown_prev != Clock::time_point{} && shown - shown_prev > freeze_at) {
+                freeze_max = (std::max)(freeze_max, to_ms(shown - shown_prev));
+                frozen    += to_ms(shown - shown_prev) / 1000;
+            }
+            shown_prev = (std::max)(shown_prev, shown);
+        };
+        for (const Video::Frame& f : video.frames)
+            if (f.arrived) freeze((std::max)(f.arrived_at, f.captured + deadline));
+        // A stream whose last frames never came stands still until the last was due.
+        if (!video.frames.empty() && !video.frames.back().arrived)
+            freeze(video.frames.back().captured + deadline);
+
+        double recover = -1;
+        if (sc.has_event()) {
+            recover = std::numeric_limits<double>::infinity();
+            const size_t kSettled = static_cast<size_t>(sc.fps);
+            const auto from = Clock::time_point{} + event_end;
+            size_t run = 0;
+            for (size_t i = 0; i < video.frames.size(); ++i) {
+                const Video::Frame& f = video.frames[i];
+                if (f.captured < from) continue;
+                run = on_time(f) ? run + 1 : 0;
+                if (run == kSettled) {
+                    recover = to_ms(video.frames[i + 1 - kSettled].captured - from);
+                    break;
+                }
             }
         }
-    }
 
-    std::sort(latency.begin(), latency.end());
-    const auto q = [&](double f) { return latency[static_cast<size_t>(f * (latency.size() - 1))]; };
-    const double frames = static_cast<double>((std::max<size_t>)(video.frames.size(), 1));
-    const double late   = late_frames * 100.0 / frames;
-    const double secs   = std::chrono::duration<double>(finish - start).count();
-    const double fec = video.video_bytes ? fv.tx.path_stats().live_repair_bytes * 100.0 / video.video_bytes : 0;
-    std::sort(key_latency.begin(), key_latency.end());
-    const double key_median = key_latency.empty() ? -1 : key_latency[(key_latency.size() - 1) / 2] - base;
-    std::sort(estimates.begin(), estimates.end());
-    const double estimate = estimates.empty() ? 0 : estimates[estimates.size() / 2];
-    const auto   climb_from = sc.besides == Besides::RateRise ? event : start;
-    const double reach = video.reached == Clock::time_point{}
-                             ? std::numeric_limits<double>::infinity()
-                             : std::chrono::duration<double>(video.reached - (Clock::time_point{} + climb_from)).count();
-    return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
-            recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median,
-            fv.tx.retransmits() * 100.0 / double((std::max<uint64_t>)(fv.tx.conn()->recovery().next_pn(), 1)),
-            estimate, reach};
+        std::sort(latency.begin(), latency.end());
+        const auto q = [&](double f) { return latency[static_cast<size_t>(f * (latency.size() - 1))]; };
+        const double frames = static_cast<double>((std::max)(video.frames.size(), size_t{1}));
+        const double late   = late_frames * 100.0 / frames;
+        const double secs   = std::chrono::duration<double>(Clock::time_point{} + finish - video.begin).count();
+        const double fec = video.video_bytes ? video.tx.path_stats().live_repair_bytes * 100.0 / video.video_bytes : 0;
+        std::sort(key_latency.begin(), key_latency.end());
+        const double key_median = key_latency.empty() ? std::numeric_limits<double>::infinity()
+                                                      : key_latency[(key_latency.size() - 1) / 2] - base;
+        std::vector<double>& estimates = video.estimates;
+        std::sort(estimates.begin(), estimates.end());
+        const double estimate = estimates.empty() ? 0 : estimates[estimates.size() / 2];
+        const auto   climb_from = sc.besides == Besides::RateRise ? Clock::time_point{} + event : video.begin;
+        const double reach = video.reached == Clock::time_point{}
+                                 ? std::numeric_limits<double>::infinity()
+                                 : std::chrono::duration<double>(video.reached - climb_from).count();
+        const double sent = static_cast<double>((std::max)(video.tx.conn()->recovery().next_pn(), uint64_t{1}));
+        return RealtimeResult{q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
+                              recover, video.video_bytes * 8.0 / secs / 1e6, fec, key_median,
+                              video.tx.retransmits() * 100.0 / sent, estimate, reach};
+    };
+    std::vector<RealtimeResult> results;
+    for (auto& v : videos) results.push_back(measure(*v));
+    return results;
 }
 
-/// A share of frames late, as a column: green within what a call shrugs off,
-/// yellow past what it visibly freezes on.
-std::string late_cell(double late) {
-    char s[32];
-    std::snprintf(s, sizeof(s), "%8.1f%%", late);
-    if (!g_color) return s;
-    return std::string(late <= 1 ? "\x1b[32m" : late <= 5 ? "" : "\x1b[33m") + s + "\x1b[0m";
-}
+/// One video to one peer: the realtime tables' run.
+RealtimeResult realtime(const Scene& sc) { return realtime_peers(sc).front(); }
 
 void realtime_row(const char* name, const Scene& sc) {
-    const RealtimeResult r = realtime(sc);
-    char recover[32];
-    if (r.recover < 0)                  std::snprintf(recover, sizeof(recover), "%9s", "-");
-    else if (std::isinf(r.recover))     std::snprintf(recover, sizeof(recover), "%9s", "never");
-    else                                std::snprintf(recover, sizeof(recover), "%9.0f", r.recover);
-    std::printf("  %-30s %9.1f %9.1f %s %8.1f%% %9.0f %9.1f %s %9.2f %8.1f%%\n", name, r.median, r.p99,
-                late_cell(r.late).c_str(), r.dropped, r.freeze_max, r.frozen, recover, r.video, r.fec);
+    const auto runs = over_seeds([&] { return realtime(sc); });
+    using R = RealtimeResult;
+    row(name, {figure(each(runs, &R::median), 1), figure(each(runs, &R::p99), 1),
+               late_cell(each(runs, &R::late)), figure(each(runs, &R::dropped), 1, "%"),
+               figure(each(runs, &R::freeze_max), 0), figure(each(runs, &R::frozen), 1),
+               sc.has_event() ? figure(each(runs, &R::recover), 0) : text("-"),
+               figure(each(runs, &R::video), 2), figure(each(runs, &R::fec), 1, "%")});
 }
 
 /// One source shape across the conditions it is most sensitive to: a clean path
@@ -1179,16 +1362,17 @@ void realtime_row(const char* name, const Scene& sc) {
 /// encoder on a clean path and through a capacity drop — which is where a rate
 /// control that answers slowly, or overshoots, pays.
 void profile_row(const Profile& p) {
-    const double cells[] = {
-        realtime(Scene{}.shaped(p)).late,
-        realtime(Scene{}.shaped(p).lossy(0.01)).late,
-        realtime(Scene{}.shaped(p).buffer(0.5)).late,
-        realtime(Scene{}.shaped(p).adaptive()).late,
-        realtime(Scene{}.shaped(p).adaptive().with(Besides::RateDrop)).late,
+    const Scene scenes[] = {
+        Scene{}.shaped(p),
+        Scene{}.shaped(p).lossy(0.01),
+        Scene{}.shaped(p).buffer(0.5),
+        Scene{}.shaped(p).adaptive(),
+        Scene{}.shaped(p).adaptive().with(Besides::RateDrop),
     };
-    std::printf("  %-30s", p.name);
-    for (double c : cells) std::printf(" %s", late_cell(c).c_str());
-    std::printf("\n");
+    std::vector<Cell> cells;
+    for (const Scene& sc : scenes)
+        cells.push_back(late_cell(each(over_seeds([&] { return realtime(sc); }), &RealtimeResult::late)));
+    row(p.name, cells);
 }
 
 // ── realtime by class ───────────────────────────────────────────────────────
@@ -1238,17 +1422,16 @@ const PathClass kPathClasses[] = {
 /// 90% of the link is not run — it cannot fit, whatever the transport does.
 void class_tables() {
     constexpr size_t kPaths = sizeof(kPathClasses) / sizeof(kPathClasses[0]);
-    struct Cell { bool run; RealtimeResult r; };
-    std::vector<std::array<Cell, kPaths>> grid;
+    // Each cell's runs, one per seed; none where the source does not fit.
+    std::vector<std::array<std::vector<RealtimeResult>, kPaths>> grid;
     for (const VideoClass& v : kVideoClasses) {
         grid.emplace_back();
         for (size_t i = 0; i < kPaths; ++i) {
             const PathClass& p = kPathClasses[i];
-            Cell& c = grid.back()[i];
-            c.run = v.mbps <= 0.9 * p.link;
-            if (!c.run) continue;
-            c.r = realtime(Scene{}.over(p.link, p.rtt).lossy(p.loss, p.burst_ms)
-                               .jittery(p.late, p.late_ms).sending(v.mbps, v.fps).shaped(v.profile));
+            if (v.mbps > 0.9 * p.link) continue;
+            const Scene sc = Scene{}.over(p.link, p.rtt).lossy(p.loss, p.burst_ms)
+                                 .jittery(p.late, p.late_ms).sending(v.mbps, v.fps).shaped(v.profile);
+            grid.back()[i] = over_seeds([&] { return realtime(sc); });
         }
     }
     const auto table = [&](const char* title, auto cell) {
@@ -1259,25 +1442,17 @@ void class_tables() {
         std::printf("\n  %-30s", "------------------------------");
         for (size_t i = 0; i < kPaths; ++i) std::printf(" %9s", "---------");
         std::printf("\n");
-        for (size_t row = 0; row < grid.size(); ++row) {
-            std::printf("  %-30s", kVideoClasses[row].name);
-            for (const Cell& c : grid[row]) {
-                if (!c.run) std::printf(" %9s", "-");
-                else        std::printf(" %s", cell(c.r).c_str());
-            }
-            std::printf("\n");
+        for (size_t i = 0; i < grid.size(); ++i) {
+            std::vector<Cell> cells;
+            for (const auto& runs : grid[i]) cells.push_back(runs.empty() ? text("-") : cell(runs));
+            row(kVideoClasses[i].name, cells);
         }
     };
     table(g_reliable_video ? "realtime by class — % of frames late (fixed-rate source, every frame reliable)"
                            : "realtime by class — % of frames late (fixed-rate live source)",
-          [](const RealtimeResult& r) { return late_cell(r.late); });
+          [](const auto& runs) { return late_cell(each(runs, &RealtimeResult::late)); });
     table("realtime by class — keyframe latency over one-way delay, median ms",
-          [](const RealtimeResult& r) {
-              char s[32];
-              if (r.key_median < 0) std::snprintf(s, sizeof(s), "%9s", "never");
-              else                  std::snprintf(s, sizeof(s), "%9.1f", r.key_median);
-              return std::string(s);
-          });
+          [](const auto& runs) { return figure(each(runs, &RealtimeResult::key_median), 1); });
     std::printf("  (paths: mobile 15 Mbit/60 ms, 1%% loss in 20 ms bursts; wi-fi 50 Mbit/20 ms,\n"
                 "   0.5%% in bursts, a fifth of the datagrams 8 ms late (holding back those\n"
                 "   behind them, as Wi-Fi's block-ack does: no reordering); home 100 Mbit/20 ms;\n"
@@ -1286,8 +1461,8 @@ void class_tables() {
                 "   (the screen 20x, mostly still, a slide change every 2 s). \"-\": the source\n"
                 "   is above 90%% of the link. A frame is due 100 ms after the one-way delay, as\n"
                 "   above. A frame past SendOptions::kMaxLivePayload (4 MiB) is refused by the\n"
-                "   API and never arrives. The lossy cells are one draw each (RATS_SEED for\n"
-                "   another).)\n");
+                "   API and never arrives. The lossy cells are one draw each (--seeds for\n"
+                "   more).)\n");
 
     // Reordering, which the wi-fi column above does not do: a datagram held back
     // there holds back those behind it, as a block-ack window does. Each cell is
@@ -1305,13 +1480,14 @@ void class_tables() {
         {"0-10 ms", [](Scene s) { return s.scattered(10); }},
         {"0-10+loss", [](Scene s) { return s.scattered(10).lossy(0.005); }},
     };
-    std::vector<std::pair<const VideoClass*, std::vector<RealtimeResult>>> runs;
+    // Per class, per column, one run per seed.
+    std::vector<std::pair<const VideoClass*, std::vector<std::vector<RealtimeResult>>>> runs;
     for (const VideoClass& v : kVideoClasses) {
         if (v.mbps > 45) continue;
         const Scene base = Scene{}.over(50, 20).sending(v.mbps, v.fps).shaped(v.profile);
-        std::vector<RealtimeResult> row;
-        for (const Column& c : columns) row.push_back(realtime(c.on(base)));
-        runs.emplace_back(&v, std::move(row));
+        std::vector<std::vector<RealtimeResult>> cells;
+        for (const Column& c : columns) cells.push_back(over_seeds([&] { return realtime(c.on(base)); }));
+        runs.emplace_back(&v, std::move(cells));
     }
     const auto reorder_table = [&](const char* title, auto cell) {
         std::printf("\n%s%s%s\n  %-30s", col("\x1b[1m"), title, col("\x1b[0m"), "");
@@ -1319,19 +1495,16 @@ void class_tables() {
         std::printf("\n  %-30s", "------------------------------");
         for (size_t i = 0; i < std::size(columns); ++i) std::printf(" %9s", "---------");
         std::printf("\n");
-        for (const auto& [v, row] : runs) {
-            std::printf("  %-30s", v->name);
-            for (const RealtimeResult& r : row) std::printf(" %s", cell(r).c_str());
-            std::printf("\n");
+        for (const auto& [v, cells] : runs) {
+            std::vector<Cell> shown;
+            for (const auto& c : cells) shown.push_back(cell(c));
+            row(v->name, shown);
         }
     };
     reorder_table("realtime by class — % of frames late, 50 Mbit/20 ms, datagrams overtaken",
-                  [](const RealtimeResult& r) { return late_cell(r.late); });
-    reorder_table("realtime by class — % of packets sent again, same runs", [](const RealtimeResult& r) {
-        char s[32];
-        std::snprintf(s, sizeof(s), "%8.1f%%", r.resent);
-        return std::string(s);
-    });
+                  [](const auto& runs) { return late_cell(each(runs, &RealtimeResult::late)); });
+    reorder_table("realtime by class — % of packets sent again, same runs",
+                  [](const auto& runs) { return figure(each(runs, &RealtimeResult::resent), 1, "%"); });
     std::printf("  (a share of the datagrams 8 ms late, both ways: overtaken by every one sent\n"
                 "   in those 8 ms — at 40 Mbit/s some thirty. \"0-10 ms\": every datagram late\n"
                 "   by its own draw from 0-10 ms, as over a path that keeps no order (per-packet\n"
@@ -1396,17 +1569,16 @@ void jitter_table() {
     std::printf("\n");
     for (const Over& p : paths) {
         std::printf("  %s\n", p.name);
-        for (const Row* row = p.rows; row != p.rows + p.count; ++row) {
-            const Scene base = row->on(Scene{}.over(p.link, p.rtt));
-            const RealtimeResult fixed = realtime(Scene(base).sending(8, 30));
-            const RealtimeResult adapt = realtime(Scene(base).adaptive());
-            const RealtimeResult est   = realtime(Scene(base).following());
-            char reach[32];
-            if (std::isinf(est.reach)) std::snprintf(reach, sizeof(reach), "%9s", "never");
-            else                       std::snprintf(reach, sizeof(reach), "%8.1fs", est.reach);
-            std::printf("    %-28s %s %s %9.2f %s %9.2f %s %9.1f\n", row->name, late_cell(fixed.late).c_str(),
-                        late_cell(adapt.late).c_str(), adapt.video, late_cell(est.late).c_str(), est.video,
-                        reach, est.estimate);
+        for (const Row* r = p.rows; r != p.rows + p.count; ++r) {
+            const Scene base  = r->on(Scene{}.over(p.link, p.rtt));
+            const auto  fixed = over_seeds([&] { return realtime(Scene(base).sending(8, 30)); });
+            const auto  adapt = over_seeds([&] { return realtime(Scene(base).adaptive()); });
+            const auto  est   = over_seeds([&] { return realtime(Scene(base).following()); });
+            using R = RealtimeResult;
+            row(r->name, {late_cell(each(fixed, &R::late)),
+                          late_cell(each(adapt, &R::late)), figure(each(adapt, &R::video), 2),
+                          late_cell(each(est, &R::late)), figure(each(est, &R::video), 2),
+                          figure(each(est, &R::reach), 1, "s"), figure(each(est, &R::estimate), 1)}, 4);
         }
     }
     std::printf("  (every datagram, both ways: \"late\" ones held back that long past their\n"
@@ -1461,10 +1633,11 @@ void near_rate_table() {
     std::printf("\n  %-30s", "------------------------------");
     for (size_t i = 0; i < std::size(columns); ++i) std::printf(" %9s", "---------");
     std::printf("\n");
-    for (const Row& row : rows) {
-        std::printf("  %-30s", row.name);
-        for (const Column& c : columns) std::printf(" %s", late_cell(realtime(c.on(row.scene)).late).c_str());
-        std::printf("\n");
+    for (const Row& r : rows) {
+        std::vector<Cell> cells;
+        for (const Column& c : columns)
+            cells.push_back(late_cell(each(over_seeds([&] { return realtime(c.on(r.scene)); }), &RealtimeResult::late)));
+        row(r.name, cells);
     }
     std::printf("  (\"N of M\": a fixed-rate source; \"up to N\": sized to the estimate, as in the\n"
                 "   jitter table. \"acks N ms\": what travels back handed over in bunches every\n"
@@ -1476,7 +1649,7 @@ void near_rate_table() {
                 "   buys repair symbols — they must fit in what the link has to spare. On 1-2\n"
                 "   Mbit a frame is a few packets and two or three acknowledgements; a burst\n"
                 "   that queues looks much like jitter there. The last three columns are one\n"
-                "   draw each: compare them over seeds, RATS_SEED=1..N.)\n");
+                "   draw each: compare them over seeds, --seeds=N.)\n");
 }
 
 /// How fast a source sized to the estimate climbs to its ceiling: over long
@@ -1511,15 +1684,14 @@ void climb_table() {
     std::printf("\n  %-30s", "------------------------------");
     for (size_t i = 0; i < 2 * std::size(columns); ++i) std::printf(" %9s", "---------");
     std::printf("\n");
-    for (const Row& row : rows) {
-        std::printf("  %-30s", row.name);
+    for (const Row& r : rows) {
+        std::vector<Cell> cells;
         for (const Column& c : columns) {
-            const RealtimeResult r = realtime(c.on(row.scene).following());
-            if (std::isinf(r.reach)) std::printf(" %9s", "never");
-            else                     std::printf(" %8.1fs", r.reach);
-            std::printf(" %9.1f", r.estimate);
+            const auto runs = over_seeds([&] { return realtime(c.on(r.scene).following()); });
+            cells.push_back(figure(each(runs, &RealtimeResult::reach), 1, "s"));
+            cells.push_back(figure(each(runs, &RealtimeResult::estimate), 1));
         }
-        std::printf("\n");
+        row(r.name, cells);
     }
     std::printf("  (the source of the jitter table: 90%% of PathStats::bandwidth_bps every 100 ms,\n"
                 "   up to 8, from 1. \"at 8 in\" is how long after the first frame it first got\n"
@@ -1534,6 +1706,77 @@ void climb_table() {
                 "   acknowledgements come back by themselves. Jitter as in the jitter table.)\n");
 }
 
+/// One sender, a video to each of several peers — a call of many, or a stream
+/// served from home: a connection to each, every one with its own controller,
+/// all of them through the sender's one uplink. Nothing shares an estimate
+/// between them, so what each gets is what their controllers settle on against
+/// one another, and a peer that joins must find its share in a queue the
+/// others already keep — its Startup sends at 2.77x what it has found.
+void peers_table() {
+    struct Row {
+        const char* name;
+        Scene       scene;
+    };
+    const Scene up = Scene{}.over(20, 40);
+    const Row rows[] = {
+        {"2.5 Mbit to 2 peers", Scene(up).sending(2.5, 30).to(2)},
+        {"2.5 Mbit to 4 peers", Scene(up).sending(2.5, 30).to(4)},
+        {"2.5 Mbit to 7 peers", Scene(up).sending(2.5, 30).to(7)},
+        {"  4, joining 5 s apart", Scene(up).sending(2.5, 30).to(4, 5)},
+        {"  7, joining 3 s apart", Scene(up).sending(2.5, 30).to(7, 3)},
+        {"adaptive <=8 to 1 peer", Scene(up).adaptive()},
+        {"adaptive <=8 to 2 peers", Scene(up).adaptive().to(2)},
+        {"adaptive <=8 to 4 peers", Scene(up).adaptive().to(4)},
+        {"adaptive <=8 to 8 peers", Scene(up).adaptive().to(8)},
+        {"  4, joining 5 s apart", Scene(up).adaptive().to(4, 5)},
+        {"  4, 1%", Scene(up).adaptive().to(4).lossy(0.01)},
+        {"  4, + bulk flow on the path", Scene(up).adaptive().to(4).with(Besides::PathBulk)},
+        {"sized to the estimate, 1 peer", Scene(up).following()},
+        {"sized to the estimate, 2 peers", Scene(up).following().to(2)},
+        {"sized to the estimate, 4 peers", Scene(up).following().to(4)},
+        {"  4, joining 5 s apart", Scene(up).following().to(4, 5)},
+        {"  4, 1%", Scene(up).following().to(4).lossy(0.01)},
+        {"  4, sd 10 ms, in order", Scene(up).following().to(4).varied(10)},
+    };
+    heading("realtime to several peers — one uplink, 20 Mbit, 40 ms; the same video to each",
+            {"late", "worst", "freeze ms", "video", "Jain", "fec"});
+    for (const Row& r : rows) {
+        struct Run { double late, worst, freeze, video, jain, fec; };
+        const auto runs = over_seeds([&] {
+            const std::vector<RealtimeResult> got = realtime_peers(r.scene);
+            Run run{0, 0, 0, 0, 0, 0};
+            std::vector<double> videos;
+            double video_fec = 0;
+            for (const RealtimeResult& p : got) {
+                run.late  += p.late / got.size();
+                run.worst  = (std::max)(run.worst, p.late);
+                run.freeze = (std::max)(run.freeze, p.freeze_max);
+                run.video += p.video;
+                video_fec += p.video * p.fec;
+                videos.push_back(p.video);
+            }
+            run.jain = jain(videos);
+            run.fec  = run.video > 0 ? video_fec / run.video : 0;
+            return run;
+        });
+        row(r.name, {late_cell(each(runs, [](const Run& x) { return x.late; })),
+                     late_cell(each(runs, [](const Run& x) { return x.worst; })),
+                     figure(each(runs, [](const Run& x) { return x.freeze; }), 0),
+                     figure(each(runs, [](const Run& x) { return x.video; }), 2),
+                     figure(each(runs, [](const Run& x) { return x.jain; }), 3),
+                     figure(each(runs, [](const Run& x) { return x.fec; }), 1, "%")});
+    }
+    std::printf("  (\"late\" is the share of frames late over every peer, \"worst\" that of the\n"
+                "   peer worst off; \"freeze\" the longest any picture stood still; \"video\"\n"
+                "   what the encoders produced together, Mbit/s; \"Jain\" how evenly, 1.0 an\n"
+                "   even split; \"fec\" the repair symbols, a share of the video. Every peer\n"
+                "   gets the realtime table's source; \"adaptive\" and \"sized to the estimate\"\n"
+                "   ones each read their own connection's PathStats, up to 8 Mbit/s, so the\n"
+                "   uplink cannot carry them all and they must share it. \"joining N s apart\":\n"
+                "   a new connection every N s, its first frame a second later; each peer's\n"
+                "   figures are over its own frames. Loss and jitter both ways, as above.)\n");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1545,7 +1788,19 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--realtime") == 0) realtime_only = true;
         if (std::strcmp(argv[i], "--reliable-video") == 0) g_reliable_video = true;
         if (std::strcmp(argv[i], "--no-fec") == 0) g_fec = false;
+        if (std::strncmp(argv[i], "--seeds=", 8) == 0) {
+            // N for 1..N, or A-B.
+            unsigned lo = 1, hi = 0;
+            if (std::sscanf(argv[i] + 8, "%u-%u", &lo, &hi) != 2) {
+                lo = 1;
+                hi = static_cast<unsigned>(std::strtoul(argv[i] + 8, nullptr, 10));
+            }
+            g_seeds.clear();
+            for (unsigned s = lo; s <= hi; ++s) g_seeds.push_back(s);
+            if (g_seeds.empty()) g_seeds.push_back(0);
+        }
     }
+    t_seed = g_seeds.front();   // the memory section's one run
 #ifndef _WIN32
     if (!isatty(1)) g_color = false;
 #endif
@@ -1556,6 +1811,11 @@ int main(int argc, char** argv) {
     std::printf("deterministic by construction — same build, same numbers; compare builds, not networks\n");
     std::printf("controller: %s%s%s (--cc=bbr | --cc=reno)\n", col("\x1b[1m"), to_string(g_algo),
                 col("\x1b[0m"));
+    if (g_seeds.size() > 1)
+        std::printf("seeds: %u-%u — each cell their mean, the line under it the least-most\n",
+                    g_seeds.front(), g_seeds.back());
+    else if (g_seeds.front() != 0)
+        std::printf("seed: %u\n", g_seeds.front());
 
     if (!realtime_only) {
     heading("bulk — 20 s one way; buffer = 1 BDP unless the name says otherwise",
@@ -1747,6 +2007,7 @@ int main(int argc, char** argv) {
     jitter_table();
     near_rate_table();
     climb_table();
+    peers_table();
 
     std::printf("\nnote: acknowledgements in bunches, reordering, variable delay and competing\n"
                 "traffic only in the rows that say so. These are not predictions about a real\n"
