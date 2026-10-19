@@ -153,10 +153,9 @@ constexpr size_t kMinRepairSymbol = 256;
 
 /// Resolution of an ACK's delay field: 8 us, QUIC's default exponent of 3.
 constexpr std::chrono::microseconds kAckDelayUnit{8};
-/// Ranges one ACK names at most. 32 runs is a hole every ~30 packets across a
-/// thousand-packet window; older ones are left out first, and earlier ACKs have
-/// named them already.
-constexpr size_t kMaxAckRanges = 32;
+/// Ranges one ACK names at most: the newest, and older ones a late packet has
+/// just changed (UdpConnection::ack_ranges). A peer before this accepts 128.
+constexpr size_t kMaxAckRanges = 64;
 
 // ── Varints (RFC 9000 §16) ──────────────────────────────────────────────────
 

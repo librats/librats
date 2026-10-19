@@ -489,6 +489,72 @@ TEST(UdpConnectionTest, APacketOvertakenByAWholeBurstIsReadAsItself) {
     }
 }
 
+// A path that holds packets back while those behind them overtake. The sender
+// gives each one up for lost and sends its data again; when it comes after all,
+// the receiver takes it in and acknowledges it, and that is how the sender
+// learns it was only late — the window, BBR and FEC then leave it out of the
+// path's loss. Taken for a duplicate instead, it stayed a loss: so it was with
+// more gaps open behind it than one ACK names, ...
+TEST(UdpConnectionTest, APacketLateBehindManyGapsIsTakenIn) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    // A window that lets hundreds of packets go at once.
+    p.send(MessageType::App, std::string(4 << 20, 'w'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+    p.run(100ms);
+
+    std::vector<Bytes> held;
+    size_t passed = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr() || !is_short(d) || held.size() == 2 * udp::kMaxAckRanges) return false;
+        if (passed++ % 3 != 0) return false;
+        held.push_back(d);
+        return true;
+    };
+    p.send(MessageType::App, std::string(1 << 20, 'k'));
+    ASSERT_TRUE(p.run_until([&] { return held.size() == 2 * udp::kMaxAckRanges; }, 1s));
+    p.net.hook = nullptr;
+    // Every other one is lost for good, so the gaps stay open behind those that
+    // do come: more than one ACK has room to name.
+    p.run(15ms);
+    uint64_t late = 0;
+    for (size_t i = 0; i < held.size(); i += 2) {
+        late += held[i].size();
+        p.net.inject(p.a.addr(), p.b.addr(), held[i]);
+    }
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2; }));
+    p.run(100ms);
+    EXPECT_EQ(p.a.conn->recovery().spurious(), late) << "a late packet was taken for a duplicate";
+}
+
+// ... or with the sender already holding an ACK that named the packets around it.
+TEST(UdpConnectionTest, APacketLatePastAnAcknowledgedAckIsTakenIn) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+
+    Bytes held;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr() || !is_short(d) || !held.empty()) return false;
+        held = d;
+        return true;
+    };
+    // Both ways, so each side's ACKs ride on data the other acknowledges.
+    for (int i = 0; i < 60; ++i) {
+        ASSERT_TRUE(p.a.send(MessageType::App, std::string(1000, 'a')));
+        ASSERT_TRUE(p.b.send(MessageType::App, std::string(1000, 'b')));
+        p.a.conn->flush(p.now);
+        p.b.conn->flush(p.now);
+        p.step();
+    }
+    ASSERT_FALSE(held.empty());
+    p.net.hook = nullptr;
+    p.net.inject(p.a.addr(), p.b.addr(), held);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 60; }));
+    p.run(100ms);
+    EXPECT_EQ(p.a.conn->recovery().spurious(), held.size()) << "the late packet was taken for a duplicate";
+}
+
 // Header protection: the packet number a datagram carries is not readable on the
 // path — consecutive packets do not show consecutive numbers.
 TEST(UdpConnectionTest, ThePathCannotReadPacketNumbers) {

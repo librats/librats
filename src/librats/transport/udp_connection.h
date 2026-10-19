@@ -181,6 +181,16 @@ public:
     static constexpr std::chrono::milliseconds kDelayedAck = udp::Recovery::kMaxAckDelay;
     /// Packets one burst may hold its acknowledgement for (see begin_burst).
     static constexpr int kMaxBurstAck = 64;
+    /// Received packet numbers are kept as runs while a late packet could still
+    /// fill the gap below one (Recovery::reorder_horizon), and at most this many
+    /// whatever the peer sends: a gap every other packet for 2048 packets, 25 ms
+    /// at a gigabit.
+    static constexpr size_t kMaxReceivedRuns = 1024;
+    /// An ACK names the newest kAckNewest runs until the peer holds an ACK naming
+    /// them; an older run, only in the kAckRepeats ACKs after a late packet
+    /// changes it.
+    static constexpr size_t  kAckNewest  = 32;
+    static constexpr uint8_t kAckRepeats = 3;
     /// Idle gap after which a packet goes out to prove we are still here — and to
     /// keep a NAT's mapping for the socket open.
     static constexpr std::chrono::seconds kKeepAlive{10};
@@ -409,6 +419,9 @@ private:
     bool is_duplicate(uint64_t pn) const noexcept;
     void record_received(uint64_t pn, Clock::time_point now);
     void on_ack_eliciting(bool urgent, Clock::time_point now);
+    /// The runs an ACK names, newest first, into `los`/`his` (kMaxAckRanges
+    /// each); `scanned` is how many runs, newest first, it looked at to choose.
+    size_t ack_ranges(uint64_t* los, uint64_t* his, size_t& scanned) const noexcept;
     size_t ack_size(Clock::time_point now) const noexcept;
     uint8_t* write_ack(uint8_t* p, Clock::time_point now);
     void ack_sent() noexcept;
@@ -591,9 +604,18 @@ private:
     Clock::time_point last_recv_{};
     std::array<uint8_t, udp::kResetTokenSize> peer_token_{};
     bool              have_peer_token_ = false;
-    /// Packet numbers received, as inclusive [lo, hi] runs, newest first. Anything
-    /// below ack_floor_ is no longer tracked and counts as a duplicate.
-    std::vector<std::pair<uint64_t, uint64_t>> received_;
+    /// Packet numbers received, as inclusive [lo, hi] runs, oldest first. Anything
+    /// below dup_floor_ is no longer tracked and counts as a duplicate.
+    struct Run {
+        uint64_t          lo, hi;
+        Clock::time_point at;          ///< when the gap below it opened
+        uint8_t           repeats = 0; ///< ACKs still to name it (kAckRepeats)
+    };
+    std::vector<Run>  received_;
+    uint64_t          dup_floor_      = 0;
+    /// The peer holds an ACK naming everything below this: those numbers need not
+    /// be named again (RFC 9000 §13.2.4) — though a late packet among them can
+    /// still come, and is still taken in.
     uint64_t          ack_floor_      = 0;
     uint64_t          largest_recv_   = 0;
     bool              have_recv_      = false;

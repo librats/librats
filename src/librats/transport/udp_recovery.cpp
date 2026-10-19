@@ -526,13 +526,15 @@ void Recovery::hand_over(const SentPacket& pkt, bool acked, FrameSink& sink) {
     else       sink.frames_lost(frames_, first, pkt.frame_count);
 }
 
+Clock::duration Recovery::reorder_horizon() const noexcept {
+    return rtt_.srtt + max_reorder_window() + std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
+}
+
 void Recovery::retire_front(Clock::time_point now) noexcept {
     // A packet leaves the log once nothing more can be learnt from it: delivered,
     // written off, or a bare ACK nobody acknowledges. One RACK gave up on stays
-    // while an acknowledgement could still say it was only late — its round trip
-    // plus the most a window waits, with an ack delay to spare.
-    const Clock::duration keep =
-        rtt_.srtt + max_reorder_window() + std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
+    // while an acknowledgement could still say it was only late.
+    const Clock::duration keep = reorder_horizon();
     while (!sent_.empty() && !sent_.front().in_flight) {
         if (sent_.front().rack_lost && now - sent_.front().tx.sent_at < keep) break;
         pop_front();

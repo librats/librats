@@ -269,6 +269,11 @@ public:
     /// The timeout a probe or a handshake retransmission waits: a round trip, the
     /// variance allowance and the peer's ack delay.
     Clock::duration probe_timeout() const noexcept;
+    /// How long after a packet is sent an acknowledgement of it can still tell
+    /// this end anything: its round trip, the most a reordering window waits, and
+    /// an ack delay. A packet given up on stays in the log that long; a receiver
+    /// keeps a hole open as long for the packet that is late.
+    Clock::duration reorder_horizon() const noexcept;
 
     /// Packets declared lost, plus probes sent — packets the sender had to send
     /// because an earlier one went unanswered.

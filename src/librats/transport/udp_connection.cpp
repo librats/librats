@@ -820,12 +820,10 @@ void UdpConnection::nudge(Clock::time_point now) {
 // ── Acknowledgements we owe ─────────────────────────────────────────────────
 
 bool UdpConnection::is_duplicate(uint64_t pn) const noexcept {
-    if (pn < ack_floor_) return true;
-    for (const auto& [lo, hi] : received_) {
-        if (pn > hi) return false;
-        if (pn >= lo) return true;
-    }
-    return false;
+    if (pn < dup_floor_) return true;
+    const auto it = std::lower_bound(received_.begin(), received_.end(), pn,
+                                     [](const Run& r, uint64_t v) { return r.hi < v; });
+    return it != received_.end() && it->lo <= pn;
 }
 
 void UdpConnection::record_received(uint64_t pn, Clock::time_point now) {
@@ -834,36 +832,47 @@ void UdpConnection::record_received(uint64_t pn, Clock::time_point now) {
         largest_recv_at_ = now;
         have_recv_       = true;
     }
-    // Runs newest first. The common case — the next number — extends the first.
-    if (!received_.empty() && pn == received_.front().second + 1) {
-        received_.front().second = pn;
+    // Runs oldest first. The common case — the next number — extends the last.
+    if (!received_.empty() && pn == received_.back().hi + 1) {
+        received_.back().hi = pn;
     } else {
-        // The first run (newest first) that reaches down to pn + 1 or below.
-        size_t i = 0;
-        while (i < received_.size() && received_[i].first > pn + 1) ++i;
-        if (i < received_.size() && received_[i].second + 1 >= pn) {
-            // Adjacent to run i: grow it, and join it to a neighbour if pn was the
-            // one number between them.
-            auto& run  = received_[i];
-            run.first  = (std::min)(run.first, pn);
-            run.second = (std::max)(run.second, pn);
-            if (i + 1 < received_.size() && received_[i + 1].second + 1 == run.first) {
-                run.first = received_[i + 1].first;
-                received_.erase(received_.begin() + static_cast<std::ptrdiff_t>(i + 1));
+        // The first run that reaches up to pn - 1: pn extends it, or the one after
+        // it down, or closes the gap between them, or starts a run of its own.
+        auto it = std::lower_bound(received_.begin(), received_.end(), pn,
+                                   [](const Run& r, uint64_t v) { return r.hi + 1 < v; });
+        if (it != received_.end() && it->hi + 1 == pn) {
+            it->hi = pn;
+            const auto next = it + 1;
+            if (next != received_.end() && next->lo == pn + 1) {
+                it->hi = next->hi;
+                received_.erase(next);
             }
-            if (i > 0 && received_[i - 1].first == received_[i].second + 1) {
-                received_[i - 1].first = received_[i].first;
-                received_.erase(received_.begin() + static_cast<std::ptrdiff_t>(i));
-            }
+        } else if (it != received_.end() && it->lo == pn + 1) {
+            it->lo = pn;
         } else {
-            received_.insert(received_.begin() + static_cast<std::ptrdiff_t>(i), {pn, pn});
+            // In the middle of a gap, the part below it opened with the gap; past
+            // the newest run, it opens now.
+            it = received_.insert(it, Run{pn, pn, it != received_.end() ? it->at : now});
         }
+        // Out of order: the ACKs that named this run before did not name it so.
+        it->repeats = kAckRepeats;
     }
-    // What does not fit an ACK any more is forgotten, oldest first: earlier ACKs
-    // named it, and it is below anything the peer can still be waiting to hear of.
-    while (received_.size() > kMaxAckRanges) {
-        ack_floor_ = (std::max)(ack_floor_, received_.back().second + 1);
-        received_.pop_back();
+    // A gap is kept open while the peer could still be waiting on what is missing
+    // from it, so a packet that comes late is taken in and acknowledged — which
+    // is how the peer learns it was only late, not lost. Past that, and once the
+    // peer holds an ACK naming the run above the gap, the run is forgotten and
+    // the gap with it.
+    size_t forget = 0;
+    if (received_.size() > 1) {
+        const Clock::duration keep = recovery_.reorder_horizon();
+        while (received_.size() - forget > kMaxReceivedRuns ||
+               (received_.size() - forget > 1 && received_[forget].hi < ack_floor_ &&
+                now - received_[forget].at > keep))
+            ++forget;
+    }
+    if (forget > 0) {
+        dup_floor_ = (std::max)(dup_floor_, received_[forget - 1].hi + 1);
+        received_.erase(received_.begin(), received_.begin() + static_cast<std::ptrdiff_t>(forget));
     }
 }
 
@@ -878,19 +887,42 @@ void UdpConnection::on_ack_eliciting(bool urgent, Clock::time_point now) {
     else if (ack_due_ == kNever)     ack_due_ = now + kDelayedAck;
 }
 
+size_t UdpConnection::ack_ranges(uint64_t* los, uint64_t* his, size_t& scanned) const noexcept {
+    // The newest run always, as the largest number acknowledged; the newest few
+    // the peer may not have heard of; and any a late packet has just changed,
+    // however old — the peer gave that packet up for lost and is still waiting to
+    // hear it was not.
+    size_t n = 0, i = 0;
+    for (; i < received_.size() && n < kMaxAckRanges; ++i) {
+        const Run& r = received_[received_.size() - 1 - i];
+        if (i == 0 || (i < kAckNewest && r.hi >= ack_floor_) || r.repeats > 0) {
+            los[n] = r.lo;
+            his[n] = r.hi;
+            ++n;
+        }
+    }
+    scanned = i;
+    return n;
+}
+
 size_t UdpConnection::ack_size(Clock::time_point now) const noexcept {
     if (received_.empty()) return 0;
     uint64_t los[kMaxAckRanges], his[kMaxAckRanges];
-    const size_t n = (std::min)(received_.size(), kMaxAckRanges);
-    for (size_t i = 0; i < n; ++i) { los[i] = received_[i].first; his[i] = received_[i].second; }
+    size_t scanned = 0;
+    const size_t n = ack_ranges(los, his, scanned);
     const auto held = now > largest_recv_at_ ? now - largest_recv_at_ : Clock::duration::zero();
     return ack_frame_size(los, his, n, static_cast<uint64_t>(held / kAckDelayUnit));
 }
 
 uint8_t* UdpConnection::write_ack(uint8_t* p, Clock::time_point now) {
     uint64_t los[kMaxAckRanges], his[kMaxAckRanges];
-    const size_t n = (std::min)(received_.size(), kMaxAckRanges);
-    for (size_t i = 0; i < n; ++i) { los[i] = received_[i].first; his[i] = received_[i].second; }
+    size_t scanned = 0;
+    const size_t n = ack_ranges(los, his, scanned);
+    // Every run still to be repeated among those looked at was named.
+    for (size_t i = 0; i < scanned; ++i) {
+        Run& r = received_[received_.size() - 1 - i];
+        if (r.repeats > 0) --r.repeats;
+    }
     // How long the newest packet waited for this ACK, which the peer takes back
     // out of its round-trip sample.
     const auto held = now > largest_recv_at_ ? now - largest_recv_at_ : Clock::duration::zero();
@@ -912,9 +944,8 @@ void UdpConnection::ack_sent() noexcept {
 
 void UdpConnection::send_ack(Clock::time_point now) {
     if (!established()) return;
-    // Owed, but everything it would name has been pruned since — an ack-of-ack in
-    // a packet that was itself refused, so never recorded. Nothing left to say:
-    // the debt is settled, or next_deadline() would keep asking for it at once.
+    // Owed with nothing received: nothing to say. The debt is settled, or
+    // next_deadline() would keep asking for it at once.
     if (received_.empty()) {
         ack_sent();
         return;
@@ -1098,11 +1129,13 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
             recovery_.add_frame(f);
         }
         eliciting = p != before;
-    } else if (!eliciting && has_ack && !keepalive && received_.size() > 1) {
+    } else if (!eliciting && has_ack && !keepalive && received_.size() > 1 &&
+               received_[received_.size() - 2].hi >= ack_floor_) {
         // A receiver that only ever acknowledges never has its ACKs acknowledged,
-        // and so never learns it may stop naming old holes. Once a round trip it
+        // and so never learns it may stop naming old holes, or forget them. Once
+        // a round trip, while its ACKs name a hole the peer may not know of, it
         // makes one of them ack-eliciting, so the next ACK it gets back lets it
-        // forget them (RFC 9000 §13.2.4).
+        // (RFC 9000 §13.2.4).
         const auto rtt = recovery_.rtt().have_rtt ? recovery_.rtt().srtt : Clock::duration(Recovery::kMaxAckDelay);
         if (now - last_eliciting_send_ >= rtt && p < end) {
             *p++ = kPing;
@@ -1697,13 +1730,8 @@ void UdpConnection::frames_acked(const RingBuffer<SentFrame>& log, size_t first,
                 live_send_.on_parity_acked(f.offset, f.at);
                 break;
             case SentFrame::Ack: {
-                // The peer has our ACK naming everything up to f.offset, so those
-                // numbers need never be named again (RFC 9000 §13.2.4).
-                const uint64_t floor = f.offset + 1;
-                if (floor <= ack_floor_) break;
-                ack_floor_ = floor;
-                while (!received_.empty() && received_.back().second < floor) received_.pop_back();
-                if (!received_.empty() && received_.back().first < floor) received_.back().first = floor;
+                // The peer has our ACK naming everything up to f.offset.
+                ack_floor_ = (std::max)(ack_floor_, f.offset + 1);
                 break;
             }
             case SentFrame::ResetToken:
