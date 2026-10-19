@@ -320,7 +320,9 @@ public:
             d.wire.push_back(InFlight{arrive, to, from, Bytes(data, data + len)});
             return;
         }
-        if (late_.scattered)                arrive += std::chrono::duration_cast<Clock::duration>(late_.by * unit_(rng_));
+        if (late_.normal)                   arrive += (std::max)(Clock::duration(-d.delay),
+                                                std::chrono::duration_cast<Clock::duration>(late_.by * normal_(rng_)));
+        else if (late_.scattered)           arrive += std::chrono::duration_cast<Clock::duration>(late_.by * unit_(rng_));
         else if (unit_(rng_) < late_.share) arrive += late_.by;
         if (!late_.reorders && !d.wire.empty()) arrive = (std::max)(arrive, d.wire.back().arrive);
         // In arrival order: one held back is overtaken by those behind it.
@@ -373,6 +375,13 @@ public:
     /// keeps them in order, each held back by those before it — a radio that
     /// waits for its medium.
     void   scatter(Clock::duration up_to, bool reorders = true) { late_ = Late{1, up_to, reorders, true}; }
+    /// Move every datagram, both ways, off the path's delay by its own draw from a
+    /// normal distribution of deviation `sd` — earlier as often as later, never
+    /// before the wire could have carried it: netem's `delay D sd distribution
+    /// normal`. Kept in order unless `reorders`, as netem keeps it with a `rate`
+    /// (one held back holds back those behind it, which then land in a bunch) and
+    /// does not without one. A radio that holds packets and hands them on in bursts.
+    void   vary(Clock::duration sd, bool reorders = false) { late_ = Late{1, sd, reorders, false, true}; }
     /// Hand what travels back to the senders over in bunches, on the tick of a clock
     /// that runs `every`: a Wi-Fi station that sends its acknowledgements in one
     /// transmit opportunity, a receiver that reads its socket in batches. Within a
@@ -414,11 +423,13 @@ private:
         Clock::duration by{};
         bool            reorders = false;
         bool            scattered = false;   ///< every datagram late by a draw from [0, by]
+        bool            normal = false;      ///< every datagram moved by a draw from N(0, by)
     };
     Late         late_;
     Clock::duration bunch_{};
     std::mt19937 rng_;
     std::uniform_real_distribution<double> unit_{0.0, 1.0};
+    std::normal_distribution<double>       normal_{0.0, 1.0};
 };
 
 void Peer::send_datagram(const Address& to, size_t len) { path_.send_datagram(addr_, to, buf_.data(), len); }
@@ -489,11 +500,14 @@ void heading(const char* title, const char* c1, const char* c2,
 // ── bulk ────────────────────────────────────────────────────────────────────
 
 /// `overtaken`: a share of the datagrams, both ways, 8 ms late and overtaken by
-/// those behind them — a path that reorders without losing anything.
+/// those behind them — a path that reorders without losing anything. `sd_ms`:
+/// every datagram's delay varied by that deviation (Path::vary), in order unless
+/// `reorders`.
 void bulk(const char* name, double rate, int rtt, double loss, size_t queue, int secs,
-          double overtaken = 0) {
+          double overtaken = 0, int sd_ms = 0, bool reorders = false) {
     Rig r(rate, rtt, loss, queue);
     if (overtaken > 0) r.path.hold_back(overtaken, std::chrono::milliseconds(8), true);
+    if (sd_ms > 0)     r.path.vary(std::chrono::milliseconds(sd_ms), reorders);
     r.run(std::chrono::seconds(secs), true);
 
     const double mbps = r.delivered() * 8.0 / (secs * 1e6);
@@ -771,6 +785,8 @@ struct Scene {
     bool    late_reorders = false;  ///< overtaken by those behind, or holding them back too
     bool    late_scattered = false; ///< every datagram late by its own draw from [0, late_ms]
                                     ///< (in order unless late_reorders)
+    bool    late_normal = false;    ///< every datagram moved by a normal draw of deviation
+                                    ///< late_ms (Path::vary; in order unless late_reorders)
     int     ack_bunch_ms = 0;       ///< acknowledgements handed back in bunches this far apart
 
     Scene& round_trip(int ms) { rtt = ms; return *this; }
@@ -781,6 +797,9 @@ struct Scene {
     }
     Scene& scattered(int ms, bool reorder = true) {
         late = 1; late_ms = ms; late_reorders = reorder; late_scattered = true; return *this;
+    }
+    Scene& varied(int sd_ms, bool reorder = false) {
+        late = 1; late_ms = sd_ms; late_reorders = reorder; late_normal = true; return *this;
     }
     Scene& acks_bunched(int ms) { ack_bunch_ms = ms; return *this; }
     Scene& lossy(double share, int burst = 0) { loss = share; burst_ms = burst; return *this; }
@@ -994,8 +1013,9 @@ RealtimeResult realtime(const Scene& sc) {
     fwd.burst = ms(sc.burst_ms);
     Direction rev = fwd;
     Path path(fwd, rev);
-    if (sc.late_scattered) path.scatter(ms(sc.late_ms), sc.late_reorders);
-    else                   path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
+    if (sc.late_normal)         path.vary(ms(sc.late_ms), sc.late_reorders);
+    else if (sc.late_scattered) path.scatter(ms(sc.late_ms), sc.late_reorders);
+    else                        path.hold_back(sc.late, ms(sc.late_ms), sc.late_reorders);
     path.bunch_acks(ms(sc.ack_bunch_ms));
 
     const auto event     = std::chrono::seconds(10);
@@ -1347,12 +1367,24 @@ void jitter_table() {
         {"0-10 ms, reordered", [](Scene s) { return s.scattered(10); }},
         {"0-20 ms, reordered", [](Scene s) { return s.scattered(20); }},
     };
+    // A deviation wants a delay to deviate from: these on a 50 ms round trip only.
+    const Row normal[] = {
+        {"none", [](Scene s) { return s; }},
+        {"sd 5 ms, in order", [](Scene s) { return s.varied(5); }},
+        {"sd 10 ms, in order", [](Scene s) { return s.varied(10); }},
+        {"sd 15 ms, in order", [](Scene s) { return s.varied(15); }},
+        {"sd 10 ms, reordered", [](Scene s) { return s.varied(10, true); }},
+    };
     struct Over {
         const char* name;
         double      link;
         int         rtt;
+        const Row*  rows;
+        size_t      count;
     };
-    const Over paths[] = {{"1 Gbit, 20 ms", 1000, 20}, {"1 Gbit, 2 ms", 1000, 2}};
+    const Over paths[] = {{"1 Gbit, 20 ms", 1000, 20, rows, std::size(rows)},
+                          {"1 Gbit, 2 ms", 1000, 2, rows, std::size(rows)},
+                          {"1 Gbit, 50 ms", 1000, 50, normal, std::size(normal)}};
 
     std::printf("\n%srealtime with jitter — a source of at most 8 Mbit/s, adaptive ones from 1%s\n",
                 col("\x1b[1m"), col("\x1b[0m"));
@@ -1364,15 +1396,15 @@ void jitter_table() {
     std::printf("\n");
     for (const Over& p : paths) {
         std::printf("  %s\n", p.name);
-        for (const Row& row : rows) {
-            const Scene base = row.on(Scene{}.over(p.link, p.rtt));
+        for (const Row* row = p.rows; row != p.rows + p.count; ++row) {
+            const Scene base = row->on(Scene{}.over(p.link, p.rtt));
             const RealtimeResult fixed = realtime(Scene(base).sending(8, 30));
             const RealtimeResult adapt = realtime(Scene(base).adaptive());
             const RealtimeResult est   = realtime(Scene(base).following());
             char reach[32];
             if (std::isinf(est.reach)) std::snprintf(reach, sizeof(reach), "%9s", "never");
             else                       std::snprintf(reach, sizeof(reach), "%8.1fs", est.reach);
-            std::printf("    %-28s %s %s %9.2f %s %9.2f %s %9.1f\n", row.name, late_cell(fixed.late).c_str(),
+            std::printf("    %-28s %s %s %9.2f %s %9.2f %s %9.1f\n", row->name, late_cell(fixed.late).c_str(),
                         late_cell(adapt.late).c_str(), adapt.video, late_cell(est.late).c_str(), est.video,
                         reach, est.estimate);
         }
@@ -1380,7 +1412,10 @@ void jitter_table() {
     std::printf("  (every datagram, both ways: \"late\" ones held back that long past their\n"
                 "   turn, holding back those behind them; \"0-N ms\" each late by its own draw,\n"
                 "   kept in order — each also held back by those before it, as a radio that\n"
-                "   waits for its medium does — or overtaking one another. Nothing is lost and\n"
+                "   waits for its medium does — or overtaking one another; \"sd N\" 25 ms one\n"
+                "   way give or take a normal draw of that deviation, netem's delay 25ms Nms\n"
+                "   distribution normal, in order as netem keeps it with a rate (a radio that\n"
+                "   holds packets back and hands them on in bunches). Nothing is lost and\n"
                 "   no queue is full: the path carries 1 Gbit/s whatever the jitter. \"sized to\n"
                 "   the estimate\": 90%% of PathStats::bandwidth_bps every 100 ms, up to 8;\n"
                 "   \"at 8 in\" is how long after the first frame it first got there, \"estimate\"\n"
@@ -1545,6 +1580,10 @@ int main(int argc, char** argv) {
     bulk("50 Mbit,  20 ms, 1% loss+ovt", 50, 20, 0.01,   104, 20, 0.01);
     bulk("100 Mbit, 50 ms, 0.1% loss",  100, 50, 0.001,  520, 20);
     bulk("100 Mbit, 50 ms, 0.1% loss+ovt",100, 50, 0.001, 520, 20, 0.01);
+    bulk("100 Mbit, 50 ms, sd 10 ms",   100, 50, 0.0,    520, 20, 0, 10);
+    bulk("1 Gbit,   50 ms, sd 10 ms",  1000, 50, 0.0,   5122, 20, 0, 10);
+    bulk("100 Mbit, 50 ms, sd 5, reord", 100, 50, 0.0,   520, 20, 0, 5, true);
+    bulk("100 Mbit, 50 ms, sd 10, reord",100, 50, 0.0,   520, 20, 0, 10, true);
     std::printf("  (a low utilisation with FEW reductions is a sender that never found the "
                 "path;\n   a low one with MANY is a sender that keeps losing it. The two want "
                 "opposite fixes.)\n"
@@ -1552,7 +1591,11 @@ int main(int argc, char** argv) {
                 "   behind, nothing lost — what a sender that takes reordering for loss pays.\n"
                 "   \"loss+ovt\": the row above it with 1%% overtaken as well. Once a path has\n"
                 "   reordered, a loss is found by time alone, not by three packets past it:\n"
-                "   what that later detection costs where both happen.)\n");
+                "   what that later detection costs where both happen. \"sd N\": every\n"
+                "   datagram, both ways, 25 ms one way give or take a normal draw of that\n"
+                "   deviation — netem's delay 25ms Nms distribution normal — kept in order (a\n"
+                "   radio that holds packets back and hands them on in bunches; netem with a\n"
+                "   rate) or \"reord\", overtaking one another (netem without one).)\n");
 
     heading("idle — 5 s of transfer, 10 s of silence, then transfer again",
             "cwnd grown", "on resume", "dropped", "retrans", "");
