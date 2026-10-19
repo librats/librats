@@ -1717,6 +1717,36 @@ TEST(BbrTest, TheReceiversAckDelayIsNoQueue) {
     EXPECT_GT(sum / steps, 6e6) << "estimate " << sum / steps / 1e6 << " Mbit/s of a 10 Mbit/s path";
 }
 
+// A radio that holds a tenth of the packets back 20 ms, and those behind them,
+// lifts the least round trip of most rounds past the queue threshold and leaves
+// more than a BDP in flight while their acknowledgements wait — with nothing
+// queued. Read as a full queue, each random loss cut the bounds to what the round
+// delivered, which for a video is its own rate: 8 Mbit/s of it on 10 was paced
+// below 8 within a second, and over a third of the frames ran out of time. Both
+// readings are taken past how late the path's acknowledgements come back
+// (BbrController::lateness()); either one alone still gave up a fifth of them.
+TEST(BbrTest, RandomLossOnAJitteryPathIsNoQueue) {
+    double dropped = 0;
+    const uint32_t seeds = 4;
+    for (uint32_t seed = 1; seed <= seeds; ++seed) {
+        Sim sim(10, 40ms, 41, 0.01, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 8, 120ms};
+        video.play(3s);
+        const PathStats before = f.sender().path_stats();
+        video.play(15s);
+        const PathStats after = f.sender().path_stats();
+        dropped += double(after.live_expired - before.live_expired) / double(after.live_sent - before.live_sent);
+    }
+    EXPECT_LT(dropped / seeds, 0.12) << "frames given up: " << dropped / seeds * 100 << "% on average";
+}
+
 // A connection's first messages are small — identify, a request or two — and on
 // a real path one acknowledgement in a few comes back 10 ms or more late with
 // nothing queued. A handful of 64 B messages is more in flight than the BDP of

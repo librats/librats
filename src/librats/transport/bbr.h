@@ -108,7 +108,14 @@
  *     the video's rate, which drops without queueing, is learnt from only by the
  *     packets it drops that left with more than a BDP in flight.) A bulk sender
  *     held by the receiver's window under heavy random loss runs dry too, and
- *     keeps its rate the same way.
+ *     keeps its rate the same way. Both are read past how late the path's
+ *     acknowledgements come back with nothing queued, beyond the jitter
+ *     "queued" allows for anyway — the aggregation the window provisions for
+ *     (lateness()). A radio holding packets back lifts every round trip and what
+ *     is in flight; read as a queue, each random loss cut the bounds to what the
+ *     round delivered, which for such a sender is its own rate (8 Mbit/s of video
+ *     on 10, a tenth of the packets held 20 ms and 1% lost: paced below 8 within
+ *     a second, a third of the frames late).
  *
  * A bulk flow takes these paths only in the moments it is app-limited too —
  * held by the receiver's window, or in the round after its own ProbeRTT. One
@@ -375,9 +382,18 @@ private:
     bool     is_in_probe_bw() const noexcept;
     bool     is_probing_bw() const noexcept;
     bool     cwnd_limited() const noexcept { return cwnd_limited_prev_ || cwnd_limited_now_; }
+    /// What the window provisions for acknowledgements that come back late or in
+    /// bunches: extra_acked, at most kExtraAckedMax at the estimate.
+    uint64_t aggregation() const noexcept;
+    /// How much later than queue_threshold() allows for the path's
+    /// acknowledgements come back with nothing queued: aggregation() as time at
+    /// the estimate, past that threshold. A radio holding packets back lifts every
+    /// round trip, and what is in flight, by as much.
+    Clock::duration lateness() const noexcept;
     /// A round trip, the peer's ack delay taken off, that shows a queue (see
-    /// "Flows that do not fill the pipe" above).
-    bool     queued(Clock::duration rtt_net) const noexcept;
+    /// "Flows that do not fill the pipe" above) — on a path whose round trips run
+    /// `late` by themselves, one past that too.
+    bool     queued(Clock::duration rtt_net, Clock::duration late = Clock::duration::zero()) const noexcept;
     /// This acknowledgement is of a burst of ours that could have queued — at
     /// least the starting window in flight, more than the path holds — and has a
     /// round trip to read.
@@ -393,7 +409,8 @@ private:
     bool     runs_dry() const noexcept { return ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds; }
     /// Whether the loss being reported can be a full queue's: always, unless the
     /// sender keeps running dry and the loss round so far neither queued nor lost
-    /// a packet sent with more than the path holds in flight.
+    /// a packet sent with more than the path holds in flight — both past what the
+    /// path's late acknowledgements show by themselves (lateness()).
     bool     loss_is_congestion() const noexcept;
     uint64_t random() noexcept;
 

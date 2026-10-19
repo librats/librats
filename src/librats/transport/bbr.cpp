@@ -95,8 +95,10 @@ void BbrController::on_packet_lost(const LostPacket& lost) {
     // Lost from more than the path holds — by the long-term model, which the
     // short-term bounds this decides about do not move: a queue of ours
     // overflowed, however shallow — too shallow, perhaps, for the round trip to
-    // have shown it.
-    if (lost.tx_in_flight > bdp_multiple(max_bw_, kUnit)) loss_round_overfull_ = true;
+    // have shown it. A path that holds its acknowledgements back has that much
+    // more in flight with nothing queued.
+    if (lost.tx_in_flight > bdp_multiple(max_bw_, kUnit) + bytes_over(max_bw_, lateness()))
+        loss_round_overfull_ = true;
 
     // Only a packet sent while probing for bandwidth says anything about where the
     // probe should have stopped. A loss between probes is handled per round by the
@@ -587,8 +589,7 @@ void BbrController::set_pacing_rate_with_gain(uint64_t gain) {
 void BbrController::set_cwnd() {
     // How much the model says the path holds at the current gain, plus room for
     // acknowledgements that arrive in bursts.
-    const uint64_t aggregation = (std::min)(extra_acked_, bytes_over(bw_, kExtraAckedMax));
-    max_inflight_ = quantization_budget(bdp_multiple(bw_, cwnd_gain_) + aggregation);
+    max_inflight_ = quantization_budget(bdp_multiple(bw_, cwnd_gain_) + aggregation());
 
     // Recovery: what was lost is no longer in flight and no longer earns room.
     if (newly_lost_ > 0) cwnd_ = cwnd_ > newly_lost_ + kMss ? cwnd_ - newly_lost_ : kMss;
@@ -943,9 +944,22 @@ uint64_t BbrController::save_cwnd() const noexcept {
     return (std::max)(prior_cwnd_, cwnd_);
 }
 
-bool BbrController::queued(Clock::duration rtt_net) const noexcept {
+uint64_t BbrController::aggregation() const noexcept {
+    return (std::min)(extra_acked_, bytes_over(bw_, kExtraAckedMax));
+}
+
+Clock::duration BbrController::lateness() const noexcept {
+    if (bw_ == 0 || min_rtt_ == (Clock::duration::max)()) return Clock::duration::zero();
+    const Clock::duration late = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::nanoseconds(mul_div(aggregation(), kNsPerSec, bw_)));
+    // Up to the threshold any path shows that much, and "queued" allows for it.
+    const Clock::duration bar = queue_threshold(min_rtt_);
+    return late > bar ? late - bar : Clock::duration::zero();
+}
+
+bool BbrController::queued(Clock::duration rtt_net, Clock::duration late) const noexcept {
     if (rtt_net == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)()) return false;
-    return rtt_net >= min_rtt_ + queue_threshold(min_rtt_);
+    return rtt_net >= min_rtt_ + queue_threshold(min_rtt_) + late;
 }
 
 bool BbrController::burst_in_flight() const noexcept {
@@ -970,7 +984,7 @@ bool BbrController::startup_queued() const noexcept {
 }
 
 bool BbrController::loss_is_congestion() const noexcept {
-    return !runs_dry() || queued(loss_round_rtt_net_) || loss_round_overfull_;
+    return !runs_dry() || queued(loss_round_rtt_net_, lateness()) || loss_round_overfull_;
 }
 
 bool BbrController::is_in_probe_bw() const noexcept {
