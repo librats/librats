@@ -1610,6 +1610,55 @@ TEST(UdpLossRecoveryTest, RepairSymbolsDoNotOverloadALinkTheVideoNearlyFills) {
     }
 }
 
+// A download beside a call keeps the bottleneck's queue standing whatever the
+// call sends, so no round trip of the call's comes back near the base. Read as a
+// queue of its own, it held every repair back: the download's losses cost the
+// call frames that a repair in a dozen symbols would have saved.
+TEST(UdpLossRecoveryTest, ACallBesideADownloadStillSendsRepairs) {
+    uint64_t expired = 0;
+    for (int join = 0; join < 6; ++join) {
+        Sim sim(10, 40ms, 41);
+        Flow& f    = sim.add(CongestionAlgorithm::Bbr);
+        Flow& bulk = sim.add(CongestionAlgorithm::Reno);
+        sim.run(500ms);
+        Video video{sim, f, 4, 150ms};
+        video.play(3s + join * 370ms);
+        bulk.to_send = SIZE_MAX;
+        video.play(5s);
+        const PathStats before = f.sender().path_stats();
+        video.play(20s);
+        const PathStats after = f.sender().path_stats();
+        EXPECT_GT(after.live_repair_bytes - before.live_repair_bytes, 80'000u)
+            << "download joined " << 3000 + join * 370 << " ms in: repairs held back";
+        expired += after.live_expired - before.live_expired;
+    }
+    EXPECT_LT(expired, 185u) << "of 3600 frames";
+}
+
+// A radio that holds a tenth of the packets back 20 ms, both ways, lifts every
+// round trip of a busy link: the queue looks as if it stood. Its losses are the
+// radio's, a few in a frame of thirty symbols, and that frame's repairs are about
+// what is lost — holding them back cost a third more late frames.
+TEST(UdpLossRecoveryTest, AJitteryLinkStillProtectsLargeFrames) {
+    uint64_t expired = 0;
+    for (uint32_t seed = 1; seed <= 4; ++seed) {
+        Sim sim(10, 40ms, 41, 0.01, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 8, 120ms};
+        video.play(5s);
+        const PathStats before = f.sender().path_stats();
+        video.play(20s);
+        expired += f.sender().path_stats().live_expired - before.live_expired;
+    }
+    EXPECT_LT(expired, 146u) << "of 2400 frames";
+}
+
 // ProbeRTT empties a queue to measure the path's own delay. An app-limited flow
 // that keeps seeing that delay has no queue to empty — and holding its inflight
 // to half a BDP for 200 ms is a keyframe lost for nothing. A flow that fills the

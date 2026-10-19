@@ -37,6 +37,12 @@ constexpr size_t kLiveFrameRoom = 24 + 16;
 /// in time, and when it still can.
 constexpr double kLiveLossTarget       = 0.01;
 constexpr double kLiveLossTargetWithArq = 0.1;
+/// After a round trip whose queue never emptied, a live message takes repairs
+/// only while they are at most one in this many of its symbols. A frame of a call
+/// on a Mbit/s is three or four symbols, and one repair in four already
+/// overloaded a link the video nearly filled; a frame of a few Mbit/s is a dozen
+/// symbols and more.
+constexpr uint32_t kQueuedRepairShare = 6;
 
 template <typename A, typename B>
 Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
@@ -1317,13 +1323,6 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     live_loss_.update(recovery_.sampler().delivered(), recovery_.path_lost());
     const cc::RttEstimate& rtt = recovery_.rtt();
     if (!rtt.have_rtt || live_loss_.rate() <= 0) return 0;
-    // Repairs fill the bottleneck's idle time, and a sender with nothing left to
-    // send is not that: paced above the path (an estimate jitter lifted, a probe),
-    // it runs dry with a queue still standing. Repairs sent then land on top of
-    // the queue and overflow it, and the loss they make buys more repairs: on a
-    // link with a tenth to spare, video stayed overloaded for good. A round trip
-    // whose queue never emptied had no idle time to fill.
-    if (recovery_.queue_stood()) return 0;
     // Whether a piece lost now could still be sent again in time: the message
     // leaves at the pacing rate, a loss is known a round trip and a reordering
     // window after — an ack delay more for the last piece — and the second copy
@@ -1333,7 +1332,22 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     const Clock::duration out   = rate.paced() ? rate.time_for(layout.size) : Clock::duration::zero();
     const Clock::duration again = rtt.srtt + recovery_.reorder_window() + Recovery::kMaxAckDelay + one_way();
     const double target = now + out + again <= deadline ? kLiveLossTargetWithArq : kLiveLossTarget;
-    return fec::rows_for(layout.columns(0), live_loss_.rate(), target);
+    const uint32_t columns = layout.columns(0);
+    const uint32_t rows    = fec::rows_for(columns, live_loss_.rate(), target);
+    // Repairs fill the bottleneck's idle time, and a sender with nothing left to
+    // send is not that: paced above the path (an estimate jitter lifted, a probe),
+    // it runs dry with a queue still standing. Repairs sent then land on top of
+    // the queue and overflow it, and the loss they make buys more repairs: on a
+    // link with a tenth to spare, video stayed overloaded for good. A round trip
+    // whose queue never emptied had no idle time to fill — but the queue need not
+    // be ours, nor a queue at all: a download beside the call keeps one standing
+    // whatever we send, and a radio holding packets back lifts every round trip.
+    // Holding every repair back there cost a quarter more late frames, for loops
+    // that only small messages fed: few symbols, so one repair is a large share
+    // of them, far past what the path loses. A large message's repairs are about
+    // what is lost, and go.
+    if (recovery_.queue_stood() && uint64_t{rows} * kQueuedRepairShare > columns) return 0;
+    return rows;
 }
 
 uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now) {
