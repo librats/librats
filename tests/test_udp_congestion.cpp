@@ -947,6 +947,26 @@ TEST(UdpLossRecoveryTest, LiveVideoOverAPathThatKeepsNoOrderKeepsItsRate) {
     EXPECT_LT(r.retransmits(), r.next_pn() / 20) << "the stream sent twice";
 }
 
+// A path that holds every datagram back by its own draw from 0-40 ms, both ways,
+// overtaken by those behind it — four times the 10 ms it takes to cross. A
+// round-trip sample comes from the newest packet acknowledged, the one that
+// overtook the rest, so the minimum is the bare 10 ms, while a full pipe holds
+// what ~50 ms of round trip does. Two BDPs over the minimum held a transfer to
+// a fifth of the path.
+TEST(UdpLossRecoveryTest, TheWindowHoldsWhatAPathThatReordersHoldsAtLoad) {
+    for (const uint32_t seed : {1u, 2u}) {
+        SCOPED_TRACE(seed);
+        Sim sim(100, 10ms, 104, 0.0, seed);
+        sim.path.fwd().jitter = 40ms;
+        sim.path.rev().jitter = 40ms;
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        f.to_send = SIZE_MAX;
+        sim.run(10s);
+        EXPECT_LT(f.sender().recovery().rtt().min_rtt, 12ms) << "the path did not show the bare minimum";
+        EXPECT_GT(mbps_of(f.delivered(), 10s), 30.0);
+    }
+}
+
 // ── Flow control ────────────────────────────────────────────────────────────
 
 // On a path whose bandwidth-delay product is larger than a starting window, the

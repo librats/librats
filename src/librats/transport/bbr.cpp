@@ -208,6 +208,8 @@ void BbrController::on_ack(const AckEvent& ack) {
     newly_acked_  = ack.newly_acked;
     newly_lost_   = ack.newly_lost;
     inflight_now_ = ack.bytes_in_flight;
+    load_time_    += ack.flight_time;
+    load_packets_ += ack.flight_packets;
     ack_cwnd_limited_ = ack.cwnd_limited;
 
     // The first acknowledgement after a timeout: the path is answering again. The
@@ -281,6 +283,7 @@ void BbrController::update_congestion_signals() {
     }
     if (ack_rtt_net_ < loss_round_rtt_net_) loss_round_rtt_net_ = ack_rtt_net_;
     if (!loss_round_start_) return;   // wait until the end of the round trip
+    update_load_rtt();
     adapt_lower_bounds_from_congestion();
     update_loss_base();
     round_acked_         = 0;
@@ -359,6 +362,27 @@ void BbrController::update_ack_aggregation() {
     extra = (std::min)(extra, cwnd_);
     if (extra > extra_acked_win_[extra_acked_win_idx_]) extra_acked_win_[extra_acked_win_idx_] = extra;
     extra_acked_ = (std::max)(extra_acked_win_[0], extra_acked_win_[1]);
+}
+
+void BbrController::update_load_rtt() {
+    if (load_packets_ == 0) return;
+    const Clock::duration mean = load_time_ / static_cast<int64_t>(load_packets_);
+    load_time_    = Clock::duration::zero();
+    load_packets_ = 0;
+    // A round slower than half the estimate says less than the path holds at it;
+    // so, now, does one that was that fast only when the estimate was lower.
+    if (max_bw_ == 0 || bw_latest_ < max_bw_ / 2) return;
+    for (LoadRound& r : load_)
+        if (r.bw < max_bw_ / 2) r = LoadRound{};
+    if (now_ - load_since_ >= kLoadRttWindow) {
+        load_[1]    = load_[0];
+        load_[0]    = LoadRound{mean, bw_latest_};
+        load_since_ = now_;
+    } else if (mean < load_[0].rtt) {
+        load_[0] = LoadRound{mean, bw_latest_};
+    }
+    const Clock::duration least = (std::min)(load_[0].rtt, load_[1].rtt);
+    load_rtt_ = least == (Clock::duration::max)() ? Clock::duration::zero() : least;
 }
 
 void BbrController::update_queue_signals() {
@@ -589,7 +613,7 @@ void BbrController::set_pacing_rate_with_gain(uint64_t gain) {
 void BbrController::set_cwnd() {
     // How much the model says the path holds at the current gain, plus room for
     // acknowledgements that arrive in bursts.
-    max_inflight_ = quantization_budget(bdp_multiple(bw_, cwnd_gain_) + aggregation());
+    max_inflight_ = quantization_budget(window_bdp(bw_, cwnd_gain_) + aggregation());
 
     // Recovery: what was lost is no longer in flight and no longer earns room.
     if (newly_lost_ > 0) cwnd_ = cwnd_ > newly_lost_ + kMss ? cwnd_ - newly_lost_ : kMss;
@@ -902,6 +926,13 @@ void BbrController::start_round() noexcept {
 uint64_t BbrController::bdp_multiple(uint64_t bw, uint64_t gain) const noexcept {
     if (min_rtt_ == (Clock::duration::max)()) return kInitialWindow;
     return bytes_over(bw, min_rtt_) * gain / kUnit;
+}
+
+uint64_t BbrController::window_bdp(uint64_t bw, uint64_t gain) const noexcept {
+    if (min_rtt_ == (Clock::duration::max)()) return kInitialWindow;
+    // Up to a BDP of the round trip at load can be our own queue — the window
+    // lets it be — so the path's own is at least the rest.
+    return bytes_over(bw, (std::max)(min_rtt_, load_rtt_ - min_rtt_)) * gain / kUnit;
 }
 
 uint64_t BbrController::send_quantum() const noexcept {

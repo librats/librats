@@ -237,6 +237,15 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
     bool              progress = false;
     bool              sample   = false;   ///< the largest packet named is newly acknowledged
     Clock::time_point sample_sent{};
+    // The delay the peer reports comes off the round trip — but never more than
+    // it may hold an acknowledgement for, so it cannot talk the estimate down.
+    // Capped while still a count of units: the field is a 62-bit varint, and a
+    // large one multiplied out first would overflow into a negative duration.
+    constexpr uint64_t kMaxDelayUnits = kMaxAckDelay / kAckDelayUnit;
+    const auto delay = std::chrono::duration_cast<Clock::duration>(
+        kAckDelayUnit * static_cast<int64_t>((std::min)(ack.delay, kMaxDelayUnits)));
+    Clock::duration flight_time{};
+    uint32_t        flight_packets = 0;
 
     // Every ACK repeats every range the receiver still holds, so most of what one
     // names was acknowledged before; next_unacked() steps over those runs rather
@@ -258,6 +267,11 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
                 sample      = true;
                 sample_sent = pkt.tx.sent_at;
             }
+            if (pkt.ack_eliciting) {
+                const Clock::duration t = now - pkt.tx.sent_at;
+                flight_time += t > delay ? t - delay : Clock::duration::zero();
+                ++flight_packets;
+            }
             on_newly_acked(pn, pkt, now, sink);
             progress = true;
         }
@@ -269,17 +283,8 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
 
     // One round-trip sample per ACK, from the largest packet it names, when that
     // is news (RFC 9002 §5.1): every other packet it covers waited at the receiver
-    // for that one. The delay the peer reports comes off it — but never more than
-    // it may hold an acknowledgement for, so it cannot talk the estimate down.
-    // Capped while still a count of units: the field is a 62-bit varint, and a
-    // large one multiplied out first would overflow into a negative duration.
-    if (sample) {
-        constexpr uint64_t kMaxDelayUnits = kMaxAckDelay / kAckDelayUnit;
-        const uint64_t units = (std::min)(ack.delay, kMaxDelayUnits);
-        const auto delay = std::chrono::duration_cast<Clock::duration>(
-            kAckDelayUnit * static_cast<int64_t>(units));
-        sample_rtt(now - sample_sent, delay);
-    }
+    // for that one.
+    if (sample) sample_rtt(now - sample_sent, delay);
 
     // What this ACK delivered earns sends in an episode already under way (one
     // opened by this ACK is credited when it opens).
@@ -316,6 +321,8 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
         ev.newly_lost        = lost_since_ack_;
         ev.bytes_in_flight   = flight_bytes_;
         ev.cwnd_limited      = cwnd_limited_;
+        ev.flight_time       = flight_time;
+        ev.flight_packets    = flight_packets;
         ev.rs                = rs;
         cc_->on_ack(ev);
         lost_since_ack_ = 0;

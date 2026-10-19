@@ -126,6 +126,13 @@ struct AckEvent {
     /// The window, not the application or the pacer, held the sender back at some
     /// point since the previous acknowledgement.
     bool     cwnd_limited = false;
+    /// How long the packets it newly acknowledges spent in flight — sent to this
+    /// acknowledgement, less the delay the peer reports — summed over them, and
+    /// how many. Unlike the one round-trip sample an acknowledgement gives, taken
+    /// from its newest packet, which on a path that reorders is the one that
+    /// overtook the rest.
+    Clock::duration flight_time{};
+    uint32_t        flight_packets = 0;
     RateSample rs;
 };
 

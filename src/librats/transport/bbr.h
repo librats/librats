@@ -131,6 +131,31 @@
  * first answer from the path, not as the outage's repairs complete (see on_ack);
  * what the timeout wrote off is not reported to it again as loss (Recovery).
  *
+ * ── A round trip longer than the minimum ─────────────────────────────────────
+ * The window is cwnd_gain BDPs over the minimum round trip, which takes the
+ * path's round trip at any rate to be the minimum and whatever we queue. On a
+ * radio it is not: a packet held back holds those behind it, so the more are
+ * sent the more wait (netem's normal jitter, 25 ± 10 ms each way: a round trip
+ * of 50 ms at a Mbit/s, near 100 at a gigabit), and the minimum is the one lucky
+ * packet in thousands; on a path that reorders, the newest packet acknowledged —
+ * where a round-trip sample comes from — is the one that overtook the rest, and
+ * the minimum falls to nearly nothing. Two BDPs over that minimum hold less than
+ * the path does at the estimate: the sender is held to what its window lets
+ * through, and its samples, not app-limited, keep the estimate there (a gigabit
+ * with 25 ± 10 ms each way, a third of it used). What the path holds at the
+ * estimate is the round trip it shows there (load_rtt_): the mean time a round's
+ * packets spent in flight — Little's law — the least, over a probe cycle or two,
+ * of the rounds that delivered at least half the estimate. The least, because a
+ * round in which we queued shows the queue and every cycle drains it (DOWN);
+ * half the estimate, because fewer packets wait behind a held one at a lower
+ * rate. Up to a BDP of it can still be a queue of ours, which the window allows;
+ * the rest is the path's own. So the window is taken over that rest when it is
+ * longer than the minimum, and twice it then holds the whole round trip: a path
+ * whose round trip at load is within twice the minimum — as one only our own
+ * queue lengthens — keeps the window it had. Only the
+ * window takes it: what the phases aim at, and what a burst or a loss is judged
+ * against, stay with the minimum, so what we queue still drains.
+ *
  * ── Fidelity ─────────────────────────────────────────────────────────────────
  * The state machine, gains and constants follow draft-ietf-ccwg-bbr (and Linux's
  * tcp_bbr.c v3 where the draft defers to it). Two adaptations to this transport:
@@ -259,6 +284,8 @@ public:
     static constexpr int kExtraAckedWindowRounds = 5;
     /// Never provision more than this much extra for aggregation.
     static constexpr std::chrono::milliseconds kExtraAckedMax{100};
+    /// load_rtt_ is the least over two windows of this long: a probe cycle.
+    static constexpr std::chrono::seconds kLoadRttWindow = kProbeWaitBase + kProbeWaitRand;
     /// Aggregation a probe takes for none when it reads how late the path's
     /// acknowledgements come back (burst_queued): an acknowledgement's two packets —
     /// the peer acknowledges every second one, so every path shows that much — and
@@ -322,6 +349,8 @@ private:
     void update_round();
     void update_max_bw();
     void update_ack_aggregation();
+    /// At the end of a round: what its packets spent in flight, into load_rtt_.
+    void update_load_rtt();
     void update_queue_signals();
     void check_full_bw_reached();
     void check_startup_done();
@@ -386,6 +415,9 @@ private:
 
     // — arithmetic —
     uint64_t bdp_multiple(uint64_t bw, uint64_t gain) const noexcept;
+    /// The same over the longer of the minimum and load_rtt_ less the minimum —
+    /// the path's own round trip at load: what the window holds.
+    uint64_t window_bdp(uint64_t bw, uint64_t gain) const noexcept;
     uint64_t quantization_budget(uint64_t inflight) const noexcept;
     uint64_t inflight(uint64_t bw, uint64_t gain) const noexcept;
     uint64_t inflight_with_headroom() const noexcept;
@@ -476,6 +508,19 @@ private:
 
     // Round-trip model.
     Clock::duration   min_rtt_ = (Clock::duration::max)();
+    /// The round trip the path shows at the estimate (see "A round trip longer
+    /// than the minimum"); zero until a round has shown one. The least of two
+    /// windows, each the least mean of a round that delivered at least half the
+    /// estimate — as fast as that at the time, or no longer counted.
+    Clock::duration   load_rtt_{};
+    struct LoadRound {
+        Clock::duration rtt = (Clock::duration::max)();
+        uint64_t        bw  = 0;   ///< what the round delivered at
+    };
+    LoadRound         load_[2];
+    Clock::time_point load_since_{};   ///< when load_[0]'s window began
+    Clock::duration   load_time_{};    ///< this round so far: time in flight, summed
+    uint64_t          load_packets_ = 0;
     Clock::time_point min_rtt_stamp_{};
     Clock::duration   probe_rtt_min_delay_ = (Clock::duration::max)();
     Clock::time_point probe_rtt_min_stamp_{};
