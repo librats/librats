@@ -1513,6 +1513,61 @@ TEST(BbrTest, JitterDoesNotHoldDownACallSizedToTheEstimate) {
     }
 }
 
+// A link that widens once Startup is over is found only by probes. A radio that
+// holds a tenth of the packets back 20 ms lifts some acknowledgement of nearly
+// every probe past the bar — read as our queue, each probe ended in its first
+// round trip, and a call sized to the estimate stayed at the 3 Mbit/s the link
+// had been for good. The bar is read past how late the path's acknowledgements
+// come back by themselves (BbrController::lateness()), once for each way.
+TEST(BbrTest, AProbeOnAJitteryPathFindsALinkThatWidened) {
+    for (uint32_t seed = 1; seed <= 4; ++seed) {
+        Sim sim(10, 40ms, 41, 0.0, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->rate_bps   = 3e6;
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 1, 120ms};
+        const auto follow = [&](Clock::duration d) {
+            for (auto t = Clock::duration::zero(); t < d; t += 100ms) {
+                const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+                video.mbps = (std::max)(0.15, (std::min)(0.9 * estimate, 8.0));
+                video.play(100ms);
+            }
+        };
+        follow(10s);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) d->rate_bps = 10e6;
+        follow(10s);
+        EXPECT_GT(video.mbps, 7.0) << "seed " << seed << ": a call held to " << video.mbps
+                                   << " Mbit/s ten seconds after the link went from 3 to 10";
+    }
+}
+
+// What a probe forgives as the path's own lateness must not include what every
+// path shows: the peer acknowledges every second packet, and on 1 Mbit/s two
+// packets are 20 ms. Counted, that hid the queue a keyframe builds in a probe —
+// the probe went on, and the queue in front of the frames peaked near twice as
+// high.
+TEST(BbrTest, AProbeOnASlowLinkStillEndsAtTheKeyframesQueue) {
+    Sim sim(1, 40ms, 8);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 0.8, 300ms};
+    video.play(3s);
+    Clock::duration peak{};
+    sim.on_step = [&] {
+        const Direction& d = sim.path.fwd();
+        if (d.busy_until > sim.now) peak = (std::max)(peak, d.busy_until - sim.now);
+    };
+    video.play(20s);
+    sim.on_step = nullptr;
+    EXPECT_LT(peak, 55ms) << "the queue in front of the frames peaked at "
+                          << std::chrono::duration<double, std::milli>(peak).count() << " ms";
+}
+
 // Repair symbols fill the bottleneck's idle time. A call sized to the estimate
 // on 1 Mbit/s leaves the link a tenth to spare, and a radio's jitter lifts the
 // estimate past the link: the sender runs dry between frames with a queue still

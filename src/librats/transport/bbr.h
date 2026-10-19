@@ -77,7 +77,15 @@
  *     The bar is higher than "queued": a few small messages early on (identify,
  *     a request) are more than the BDP their own rate implies — read by the
  *     lower bar, they ended Startup at a few KB/s. One sample past it ends a
- *     probe: missing a queue there costs frames, a false one only the probe.
+ *     probe: missing a queue there costs frames, a false one only the probe —
+ *     but a radio's jitter makes one in every probe, so a probe reads the bar
+ *     past twice how late the path's acknowledgements come back by themselves
+ *     (lateness(), a round trip crossing a radio both ways; less
+ *     kAckedTogether, which every path shows). Read at the bar alone, each probe
+ *     ended in its first round trip and a link that widened after Startup was
+ *     never found: a call on 10 Mbit/s that had been 3, a tenth of the packets
+ *     held 20 ms, stayed at 3. (The price: on such a path near full, a queue of
+ *     ours smaller than the jitter goes unseen until it outgrows it.)
  *     Startup ends once and for good, and a radio's jitter — a packet held
  *     15–30 ms, those behind it with it — lifts single samples past any such
  *     bar: ended by that, a call stayed at the 1–2 Mbit/s Startup had reached.
@@ -251,6 +259,12 @@ public:
     static constexpr int kExtraAckedWindowRounds = 5;
     /// Never provision more than this much extra for aggregation.
     static constexpr std::chrono::milliseconds kExtraAckedMax{100};
+    /// Aggregation a probe takes for none when it reads how late the path's
+    /// acknowledgements come back (burst_queued): an acknowledgement's two packets —
+    /// the peer acknowledges every second one, so every path shows that much — and
+    /// one to spare. On a link of a Mbit/s two packets are 20 ms: counted, they hid
+    /// the queue a keyframe builds in a probe.
+    static constexpr uint64_t kAckedTogether = 3 * kMss;
 
     BbrController(const RttEstimate& rtt, const DeliveryRateSampler& sampler,
                   Clock::time_point now, uint64_t seed);
@@ -386,10 +400,10 @@ private:
     /// bunches: extra_acked, at most kExtraAckedMax at the estimate.
     uint64_t aggregation() const noexcept;
     /// How much later than queue_threshold() allows for the path's
-    /// acknowledgements come back with nothing queued: aggregation() as time at
-    /// the estimate, past that threshold. A radio holding packets back lifts every
-    /// round trip, and what is in flight, by as much.
-    Clock::duration lateness() const noexcept;
+    /// acknowledgements come back with nothing queued: aggregation() past
+    /// `allowance` bytes, as time at the estimate, past that threshold. A radio
+    /// holding packets back lifts every round trip, and what is in flight, by as much.
+    Clock::duration lateness(uint64_t allowance = 0) const noexcept;
     /// A round trip, the peer's ack delay taken off, that shows a queue (see
     /// "Flows that do not fill the pipe" above) — on a path whose round trips run
     /// `late` by themselves, one past that too.
@@ -401,7 +415,8 @@ private:
     /// The queueing delay a burst must show: max(min_rtt/4, kBurstQueueMin).
     Clock::duration burst_bar() const noexcept;
     /// This acknowledgement's sample is an app-limited burst of ours that queued
-    /// at the bottleneck: the end of a probe for a flow that never fills the pipe.
+    /// at the bottleneck — past twice how late the path's acknowledgements come
+    /// back by themselves: the end of a probe for a flow that never fills the pipe.
     bool     burst_queued() const noexcept;
     /// The same, read strictly enough to end Startup by (kAckGroup, kStandingFor).
     bool     startup_queued() const noexcept;

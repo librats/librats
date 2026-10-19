@@ -1495,7 +1495,8 @@ void climb_table() {
                 "   measure: it gains a share a round trip, so a long path is slow to climb\n"
                 "   whatever the jitter. A link that rises once Startup is over is found only\n"
                 "   by probes, at most 1.25x the estimate, each ended by the first\n"
-                "   acknowledgement that looks queued. Jitter as in the jitter table.)\n");
+                "   acknowledgement that looks queued past how late the path's\n"
+                "   acknowledgements come back by themselves. Jitter as in the jitter table.)\n");
 }
 
 } // namespace

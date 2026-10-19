@@ -948,10 +948,11 @@ uint64_t BbrController::aggregation() const noexcept {
     return (std::min)(extra_acked_, bytes_over(bw_, kExtraAckedMax));
 }
 
-Clock::duration BbrController::lateness() const noexcept {
-    if (bw_ == 0 || min_rtt_ == (Clock::duration::max)()) return Clock::duration::zero();
+Clock::duration BbrController::lateness(uint64_t allowance) const noexcept {
+    const uint64_t agg = aggregation();
+    if (bw_ == 0 || min_rtt_ == (Clock::duration::max)() || agg <= allowance) return Clock::duration::zero();
     const Clock::duration late = std::chrono::duration_cast<Clock::duration>(
-        std::chrono::nanoseconds(mul_div(aggregation(), kNsPerSec, bw_)));
+        std::chrono::nanoseconds(mul_div(agg - allowance, kNsPerSec, bw_)));
     // Up to the threshold any path shows that much, and "queued" allows for it.
     const Clock::duration bar = queue_threshold(min_rtt_);
     return late > bar ? late - bar : Clock::duration::zero();
@@ -972,7 +973,9 @@ Clock::duration BbrController::burst_bar() const noexcept {
 }
 
 bool BbrController::burst_queued() const noexcept {
-    return burst_in_flight() && ack_rtt_net_ >= min_rtt_ + burst_bar();
+    // A round trip crosses a radio twice — the packet held on the way there, its
+    // acknowledgement on the way back — and lateness() sees one hold at a time.
+    return burst_in_flight() && ack_rtt_net_ >= min_rtt_ + burst_bar() + 2 * lateness(kAckedTogether);
 }
 
 bool BbrController::startup_queued() const noexcept {
