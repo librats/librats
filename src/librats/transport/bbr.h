@@ -89,11 +89,34 @@
  *     Startup ends once and for good, and a radio's jitter — a packet held
  *     15–30 ms, those behind it with it — lifts single samples past any such
  *     bar: ended by that, a call stayed at the 1–2 Mbit/s Startup had reached.
- *     So Startup wants what jitter does not do (startup_queued): the round trip
+ *     So Startup wants what jitter does not do (startup_rising): the round trip
  *     rising group after group of acknowledgements, as our burst fills a queue
- *     (jitter lifts one, and those it held fall back), or standing far above the
- *     minimum for a while, as our queue does on a slow link, where a frame is
- *     too few acknowledgements to rise in and does not drain before the next.
+ *     (jitter lifts one, and those it held fall back) — or standing far above
+ *     the minimum for a while (startup_standing), as our queue does on a slow
+ *     link, where a frame is too few acknowledgements to rise in and does not
+ *     drain before the next.
+ *   - A queue that may be the path's own is verified before it is believed. A
+ *     radio that holds a packet back holds those behind it (netem's normal
+ *     jitter keeps order that way), so the more a sender sends the longer its
+ *     round trips: a queue by every reading of the round trip — one standing, a
+ *     burst lifted by it — and different only in what it delivers. A bottleneck
+ *     delivers no faster than it drains; the radio as fast as it is sent to. So
+ *     a standing queue in Startup, and a burst that queued in a probe, start a
+ *     verification instead of ending the climb: the sender pads what it sends to its
+ *     pacing rate (wants_padding()), with the window over the smoothed round
+ *     trip rather than the one lucky packet the minimum is on such a path, and
+ *     reads what the path delivers over a round trip of acknowledgements.
+ *     Halfway from the estimate to what it sent, and the climb goes on — the
+ *     samples it took raised the estimate; a loss, or kVerifyRounds short of it,
+ *     and the queue was ours. Read by the round trip alone, a call on 25 ± 10 ms
+ *     each way at a gigabit stopped at 3 Mbit/s of its 8, a twentieth of its
+ *     frames late; verified, it gets its 8. A verification is only for a sender the
+ *     estimate may be holding back — one that sends at least 1/kVerifyShare of it
+ *     (a keyframe is several frames, and must leave in time), not held by its
+ *     peer (peer_limited) — and a queue found to be ours is believed unverified
+ *     for kVerifyHold: on a link the video nearly fills, every verification is a
+ *     queue of padding in front of its frames, a few of them late. A rising round
+ *     trip ends Startup unverified: jitter does not do that.
  *   - ProbeRTT is skipped while app-limited round trips keep coming in within
  *     1/8 of the minimum (as Chromium's BBR does): the queue it would drain was
  *     empty anyway, and holding inflight to half a BDP for 200 ms is a lost
@@ -153,8 +176,10 @@
  * longer than the minimum, and twice it then holds the whole round trip: a path
  * whose round trip at load is within twice the minimum — as one only our own
  * queue lengthens — keeps the window it had. Only the
- * window takes it: what the phases aim at, and what a burst or a loss is judged
- * against, stay with the minimum, so what we queue still drains.
+ * window takes it, and the end of Drain (which aimed below what such a path holds
+ * at Drain's own pace, and so never came): what the phases aim at, and what a
+ * burst or a loss is judged against, stay with the minimum, so what we queue
+ * still drains.
  *
  * ── Fidelity ─────────────────────────────────────────────────────────────────
  * The state machine, gains and constants follow draft-ietf-ccwg-bbr (and Linux's
@@ -253,7 +278,7 @@ public:
     /// host's late timer shows with nothing queued; and a few small messages are
     /// no burst at all.
     static constexpr std::chrono::milliseconds kBurstQueueMin{10};
-    /// What it takes to end Startup instead (startup_queued). kQueueRises groups of
+    /// What it takes to end Startup instead (startup_rising). kQueueRises groups of
     /// acknowledgements in a row, each above the one before and the last past
     /// burst_queued's bar, are a queue our burst is filling; jitter lifts one, and
     /// the ones it held back fall again. A group is the acknowledgements arriving
@@ -273,6 +298,15 @@ public:
     /// ones it held through on time.
     static constexpr std::chrono::milliseconds kStandingFor{60};
     static constexpr uint64_t                  kStandingBar = 2500;
+
+    /// Verifying a queue that may be the path's own (see "Flows that do not
+    /// fill the pipe"): only for a sender that sent at least 1/kVerifyShare of the
+    /// estimate over the last one to two kAppRateSlot; failed after kVerifyRounds
+    /// rounds without passing; and once failed, none for kVerifyHold.
+    static constexpr uint64_t                  kVerifyShare = 4;
+    static constexpr std::chrono::milliseconds kAppRateSlot{500};
+    static constexpr int                       kVerifyRounds = 2;
+    static constexpr std::chrono::seconds      kVerifyHold{30};
 
     /// Rounds after its last app-limited sample a sender still counts as one that
     /// does not fill the pipe, for whether its loss is congestion: as long as the
@@ -311,6 +345,7 @@ public:
     bool on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight, bool has_data,
                              bool app_limited) override;
     bool wants_app_limited() const noexcept override { return state_ == State::ProbeRtt; }
+    bool wants_padding() const noexcept override { return verifying_; }
     uint64_t bandwidth() const noexcept override { return bw_; }
 
     // — diagnostics (tests, benchmarks) —
@@ -416,7 +451,8 @@ private:
     // — arithmetic —
     uint64_t bdp_multiple(uint64_t bw, uint64_t gain) const noexcept;
     /// The same over the longer of the minimum and load_rtt_ less the minimum —
-    /// the path's own round trip at load: what the window holds.
+    /// the path's own round trip at load: what the window holds — and during a
+    /// verification, over the smoothed round trip if that is longer.
     uint64_t window_bdp(uint64_t bw, uint64_t gain) const noexcept;
     uint64_t quantization_budget(uint64_t inflight) const noexcept;
     uint64_t inflight(uint64_t bw, uint64_t gain) const noexcept;
@@ -450,8 +486,20 @@ private:
     /// at the bottleneck — past twice how late the path's acknowledgements come
     /// back by themselves: the end of a probe for a flow that never fills the pipe.
     bool     burst_queued() const noexcept;
-    /// The same, read strictly enough to end Startup by (kAckGroup, kStandingFor).
-    bool     startup_queued() const noexcept;
+    /// The same, read strictly enough to end Startup by: the round trip rising
+    /// group after group (kAckGroup) — or standing for kStandingFor, which is to be
+    /// verified first.
+    bool     startup_rising() const noexcept;
+    bool     startup_standing() const noexcept;
+    /// What the application has sent lately, padding aside: bytes per second.
+    uint64_t app_rate() const noexcept;
+    /// Whether a queue just read off the round trip is verified rather than
+    /// believed (see "Flows that do not fill the pipe").
+    bool     may_verify() const noexcept;
+    void     start_verify();
+    void     end_verify() noexcept { verifying_ = false; }
+    /// The verification has measured the path delivering what passes it.
+    bool     verified() noexcept;
     /// The sender has run out of things to send within the last kRanDryRounds.
     bool     runs_dry() const noexcept { return ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds; }
     /// Whether the loss being reported can be a full queue's: always, unless the
@@ -565,16 +613,36 @@ private:
     int      full_bw_count_ = 0;
     bool     full_bw_now_     = false;
     bool     full_bw_reached_ = false;
-    /// Startup's reading of the round trip (startup_queued), kept until the pipe
-    /// is found full: the group of acknowledgements open since group_start_, the
-    /// smallest round trip of it and of the group before, and how many groups in
-    /// a row have each been above the one before; and since when every round trip
-    /// has stood kStandingBar over the minimum (the epoch: the last one did not).
+    /// Startup's reading of the round trip (startup_rising, startup_standing),
+    /// kept until the pipe is found full: the group of acknowledgements open since
+    /// group_start_, the smallest round trip of it and of the group before, and
+    /// how many groups in a row have each been above the one before; and since
+    /// when every round trip has stood kStandingBar over the minimum (the epoch:
+    /// the last one did not).
     Clock::time_point group_start_{};
     Clock::duration   group_rtt_      = (Clock::duration::max)();
     Clock::duration   prev_group_rtt_ = (Clock::duration::max)();
     int               group_rises_    = 0;
     Clock::time_point standing_since_{};
+
+    // Verifying a queue that may be the path's own: the rate that passes,
+    // what had been delivered when it began (the packets it sent come after),
+    // the rounds it has run; the first acknowledgement of a packet it sent and
+    // what had been delivered then, where its measure starts; and until when a
+    // failed one is believed.
+    bool              verifying_     = false;
+    uint64_t          verify_bar_    = 0;
+    uint64_t          verify_from_   = 0;
+    int               verify_rounds_ = 0;
+    Clock::time_point verify_acked_at_{};
+    uint64_t          verify_acked_  = 0;
+    Clock::time_point verify_after_{};
+    /// What the application sent in the slot open since app_since_[0] and in the
+    /// one before it; and the round the peer last held the sender back in.
+    uint64_t          app_bytes_[2] = {0, 0};
+    Clock::time_point app_since_[2]{};
+    bool              peer_limited_       = false;
+    uint64_t          peer_limited_round_ = 0;
 
     // ProbeBW cycle.
     Clock::time_point cycle_stamp_{};

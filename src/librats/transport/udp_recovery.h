@@ -208,7 +208,8 @@ public:
 
     /// After a round of sending: whether data was left waiting with the window the
     /// only thing in its way, and whether there was nothing left to send at all
-    /// (which makes the next rate samples measure the application, not the path).
+    /// (which makes the next rate samples measure the application, not the path)
+    /// — with data waiting all the same, held by the peer.
     void note_send_limits(bool data_waiting, bool window_stopped, bool nothing_to_send);
 
     // ── Acknowledgements ────────────────────────────────────────────────────
@@ -433,6 +434,7 @@ private:
     uint64_t lost_since_ack_   = 0;
     uint64_t written_off_      = 0;
     bool     cwnd_limited_     = false;
+    bool     peer_limited_     = false;   ///< AckEvent::peer_limited, since the last ACK
 
     // — the loss timer —
     Clock::time_point loss_deadline_{};    ///< epoch = not running

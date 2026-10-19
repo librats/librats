@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -67,6 +68,10 @@ struct Direction {
     /// Every datagram late by its own draw from [0, jitter]: a path that keeps no
     /// order (per-packet jitter, a bonded link), so they overtake one another.
     Clock::duration      jitter{};
+    /// Every datagram's delay varied by a normal draw of this deviation (never
+    /// below none), in order: netem's `delay D sd distribution normal` with a
+    /// rate, a radio that holds a packet back and those behind it with it.
+    Clock::duration      delay_sd{};
     Clock::time_point    busy_until{};
     std::deque<InFlight> wire;
     size_t               sent  = 0;   ///< datagrams that entered the queue
@@ -115,7 +120,16 @@ public:
         if (d.late > 0 && unit_(rng_) < d.late) arrive += d.late_by;
         if (d.jitter > Clock::duration::zero())
             arrive += std::chrono::duration_cast<Clock::duration>(d.jitter * unit_(rng_));
-        if (d.late_holds && !d.wire.empty()) arrive = (std::max)(arrive, d.wire.back().arrive);
+        if (d.delay_sd > Clock::duration::zero()) {
+            // Box-Muller off the same uniform draws: std's normal distribution is
+            // not the same on every platform.
+            const double u = (std::max)(unit_(rng_), 1e-12), v = unit_(rng_);
+            const double z = std::sqrt(-2 * std::log(u)) * std::cos(6.283185307179586 * v);
+            const auto shift = std::chrono::duration_cast<Clock::duration>(d.delay_sd * z);
+            arrive = (std::max)(arrive + shift, d.busy_until);
+        }
+        if ((d.late_holds || d.delay_sd > Clock::duration::zero()) && !d.wire.empty())
+            arrive = (std::max)(arrive, d.wire.back().arrive);
         // In arrival order: one held back is overtaken by those behind it, unless it holds them.
         auto at = std::upper_bound(d.wire.begin(), d.wire.end(), arrive,
                                    [](Clock::time_point t, const InFlight& f) { return t < f.arrive; });
@@ -1476,6 +1490,64 @@ TEST(BbrTest, AnAppLimitedFlowLeavesStartupOnceItsBurstsQueueWhenAcksComeInBunch
     EXPECT_LT(f.sender().path_stats().pacing_bps, 1.4 * 10e6) << "bursts paced far above the path";
 }
 
+// netem's normal jitter, 25 ± 10 ms each way, in order: a packet held back holds
+// those behind it, so the round trip grows with what is sent — a queue by every
+// reading of the round trip, on a path that carries far more than the call. A
+// call sized to the estimate, read by the round trip alone, stopped at 3 Mbit/s
+// of its 8 and stayed there; verified by what the path delivers, it climbs.
+TEST(BbrTest, ACallOnARadioThatHoldsPacketsInOrderGetsItsRate) {
+    for (const uint32_t seed : {1u, 2u, 3u}) {
+        SCOPED_TRACE(seed);
+        Sim sim(200, 50ms, 1000, 0.0, seed);
+        sim.path.fwd().delay_sd = 10ms;
+        sim.path.rev().delay_sd = 10ms;
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 1, 150ms};
+        for (int i = 0; i < 80; ++i) {   // 8 s, retargeted every 100 ms
+            const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+            video.mbps = (std::max)(1.0, (std::min)(0.9 * estimate, 8.0));
+            video.play(100ms);
+        }
+        EXPECT_EQ(video.mbps, 8.0) << "the call is held at " << video.mbps << " Mbit/s";
+        EXPECT_GT(f.sender().path_stats().bandwidth_bps, 16e6) << "no room for a keyframe";
+    }
+}
+
+// The other side of verifying: a link the call nearly fills, 1 Mbit/s with a
+// radio holding a tenth of the packets back 20 ms, shows a standing queue that
+// is the call's own, and a burst that queued in every probe. Each verification
+// is a queue of padding in front of the frames, so one that found the queue ours
+// is believed for a while: verified at every probe, the call sent ten times the
+// padding, a queue in front of its frames every second or two.
+TEST(BbrTest, AVerificationThatFindsTheQueueOursIsBelievedForAWhile) {
+    for (const uint32_t seed : {1u, 2u, 3u}) {
+        SCOPED_TRACE(seed);
+        Sim sim(1, 40ms, 8, 0.0, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        size_t padding = 0;
+        sim.path.hook = [&](Bytes& d, const Address&, bool forward) {
+            if (forward && has_frame(d, udp::kPing) && !has_frame(d, udp::kLive) &&
+                !has_frame(d, udp::kLiveRepair) && !has_frame(d, udp::kStream))
+                padding += d.size();
+            return false;
+        };
+        sim.run(500ms);
+        Video video{sim, f, 0.15, 120ms};
+        for (int i = 0; i < 200; ++i) {   // 20 s, retargeted every 100 ms
+            const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+            video.mbps = (std::max)(0.15, (std::min)(0.9 * estimate, 0.9));
+            video.play(100ms);
+        }
+        EXPECT_LT(padding, 60'000u) << "verifications of a queue found to be ours kept coming";
+    }
+}
+
 // On 1 Mbit/s a frame is three packets and two acknowledgements, too few for the
 // round trip to rise in. But the queue Startup's bursts build there does not
 // drain before the next frame: it stands, and that ends Startup.
@@ -1658,10 +1730,12 @@ TEST(UdpLossRecoveryTest, ACallBesideADownloadStillSendsRepairs) {
 // A radio that holds a tenth of the packets back 20 ms, both ways, lifts every
 // round trip of a busy link: the queue looks as if it stood. Its losses are the
 // radio's, a few in a frame of thirty symbols, and that frame's repairs are about
-// what is lost — holding them back cost a third more late frames.
+// what is lost — holding them back cost a third more late frames. (Eight draws:
+// one draw's frames vary by a fifth either way, and four drew a bar a timing
+// change anywhere crossed in either direction.)
 TEST(UdpLossRecoveryTest, AJitteryLinkStillProtectsLargeFrames) {
     uint64_t expired = 0;
-    for (uint32_t seed = 1; seed <= 4; ++seed) {
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
         Sim sim(10, 40ms, 41, 0.01, seed);
         for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
             d->late       = 0.1;
@@ -1676,7 +1750,7 @@ TEST(UdpLossRecoveryTest, AJitteryLinkStillProtectsLargeFrames) {
         video.play(20s);
         expired += f.sender().path_stats().live_expired - before.live_expired;
     }
-    EXPECT_LT(expired, 146u) << "of 2400 frames";
+    EXPECT_LT(expired, 300u) << "of 4800 frames";
 }
 
 // ProbeRTT empties a queue to measure the path's own delay. An app-limited flow

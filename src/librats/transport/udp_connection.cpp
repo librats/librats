@@ -852,7 +852,7 @@ void UdpConnection::record_received(uint64_t pn, Clock::time_point now) {
         } else {
             // In the middle of a gap, the part below it opened with the gap; past
             // the newest run, it opens now.
-            it = received_.insert(it, Run{pn, pn, it != received_.end() ? it->at : now});
+            it = received_.insert(it, Run{pn, pn, it != received_.end() ? it->gap_since : now});
         }
         // Out of order: the ACKs that named this run before did not name it so.
         it->repeats = kAckRepeats;
@@ -867,7 +867,7 @@ void UdpConnection::record_received(uint64_t pn, Clock::time_point now) {
         const Clock::duration keep = recovery_.reorder_horizon();
         while (received_.size() - forget > kMaxReceivedRuns ||
                (received_.size() - forget > 1 && received_[forget].hi < ack_floor_ &&
-                now - received_[forget].at > keep))
+                now - received_[forget].gap_since > keep))
             ++forget;
     }
     if (forget > 0) {
@@ -1474,7 +1474,13 @@ void UdpConnection::pump(Clock::time_point now) {
         if (!with_data || !sent_data_) break;
     }
     const uint64_t waiting = stream_unsent() + live_send_.unsent() + live_send_.parity_unsent();
-    recovery_.note_send_limits(waiting > 0, window_stopped, !has_sendable_data());
+    // Padding only when nothing at all is waiting: data the peer holds back is
+    // not the application's to pad around. A sender that pads has something to
+    // send, so what it measures now is the path.
+    const bool dry     = !has_sendable_data();
+    const bool padding = dry && waiting == 0 && recovery_.congestion().wants_padding();
+    if (padding) pad(now);
+    recovery_.note_send_limits(waiting > 0, window_stopped, dry && !padding);
 
     // Sending — or dropping what expired — made room.
     if (want_write_ && queued_bytes() < queued_before) raise(PollOut);
@@ -1483,6 +1489,33 @@ void UdpConnection::pump(Clock::time_point now) {
         send_close(now, kCloseOrderly);
         die(CloseReason::LocalClose);
         events_ = 0;
+    }
+}
+
+void UdpConnection::pad(Clock::time_point now) {
+    for (;;) {
+        // An unproven peer has earned what it has earned; padding spends none of it.
+        if (amplification_room() < kMaxDatagram || !recovery_.cwnd_allows(kMaxDatagram)) return;
+        if (!recovery_.pace_allows(kMaxDatagram)) {
+            recovery_.hold_for_pacer(now, kMaxDatagram);
+            return;
+        }
+        uint8_t* buf = host_.datagram_buffer();
+        const uint64_t pn = recovery_.next_pn();
+        size_t pn_len = 0;
+        const size_t header = begin_packet(buf, pn, pn_len);
+        uint8_t* p   = buf + header;
+        uint8_t* end = buf + kMaxDatagram - session_->overhead();
+        const bool has_ack = ack_owed_ && !received_.empty() && ack_size(now) < static_cast<size_t>(end - p);
+        if (has_ack) p = write_ack(p, now);
+        // Ack-eliciting, so it is in flight and measured like data — and nothing
+        // in it is ever sent again: a lost one cost the path what it cost.
+        *p++ = kPing;
+        std::memset(p, kPadding, static_cast<size_t>(end - p));
+        if (has_ack) ack_sent();
+        // Not data: the controller hears of what the application sends only.
+        finish_packet(buf, header, pn_len, end, pn, now, /*eliciting=*/true, /*data=*/false,
+                      /*repair=*/false, /*probe=*/false);
     }
 }
 

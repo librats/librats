@@ -435,6 +435,9 @@ private:
     /// `keepalive` sends a packet even with nothing in it, never ack-eliciting.
     size_t send_packet(Clock::time_point now, bool data, bool probe, bool force_ack,
                        bool keepalive = false);
+    /// What the controller wants padded (CongestionController::wants_padding):
+    /// full packets of nothing but a PING, while the window and the pacer allow.
+    void   pad(Clock::time_point now);
     uint8_t* write_control(uint8_t* p, uint8_t* end, bool& eliciting);
     /// Stream data and live messages, in priority order.
     uint8_t* write_data(uint8_t* p, uint8_t* end, Clock::time_point now, bool& repair);
@@ -608,7 +611,7 @@ private:
     /// below dup_floor_ is no longer tracked and counts as a duplicate.
     struct Run {
         uint64_t          lo, hi;
-        Clock::time_point at;          ///< when the gap below it opened
+        Clock::time_point gap_since;   ///< when the gap below it opened
         uint8_t           repeats = 0; ///< ACKs still to name it (kAckRepeats)
     };
     std::vector<Run>  received_;

@@ -126,6 +126,10 @@ struct AckEvent {
     /// The window, not the application or the pacer, held the sender back at some
     /// point since the previous acknowledgement.
     bool     cwnd_limited = false;
+    /// The peer, not the application, held the sender back at some point since
+    /// the previous acknowledgement: it ran out of what it could send with data
+    /// still waiting on the peer's flow-control window.
+    bool     peer_limited = false;
     /// How long the packets it newly acknowledges spent in flight — sent to this
     /// acknowledgement, less the delay the peer reports — summed over them, and
     /// how many. Unlike the one round-trip sample an acknowledgement gives, taken
@@ -199,6 +203,12 @@ public:
     /// carry (BBR's ProbeRTT), so what it measures now must be flagged app-limited
     /// rather than taken as the path's capacity.
     virtual bool wants_app_limited() const noexcept { return false; }
+
+    /// The controller is verifying whether the path carries more than the
+    /// application gives it (BBR, bbr.h): while nothing at all is waiting, what
+    /// the pacer and the window allow goes out as padding, so what it measures
+    /// is the path rather than the application.
+    virtual bool wants_padding() const noexcept { return false; }
 
     /// Whether recovery should supplement this controller's window with
     /// proportional rate reduction in recovery (RFC 6937). A window-based

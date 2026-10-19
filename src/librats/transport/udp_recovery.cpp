@@ -129,6 +129,9 @@ void Recovery::note_send_limits(bool data_waiting, bool window_stopped, bool not
     // Something is waiting and the window is what keeps it waiting — not the
     // pacer, which time resolves, and not the receiver, which only it can.
     if (data_waiting && window_stopped) cwnd_limited_ = true;
+    // Nothing that may go and something waiting: what waits is the peer's to let
+    // go — its window, or what it lets be unfinished.
+    if (data_waiting && nothing_to_send) peer_limited_ = true;
     // Nothing to send, nothing owed, room in the window: the sender is waiting on
     // the application, and until what is in flight now is delivered every rate
     // sample measures the application rather than the path.
@@ -321,12 +324,14 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
         ev.newly_lost        = lost_since_ack_;
         ev.bytes_in_flight   = flight_bytes_;
         ev.cwnd_limited      = cwnd_limited_;
+        ev.peer_limited      = peer_limited_;
         ev.flight_time       = flight_time;
         ev.flight_packets    = flight_packets;
         ev.rs                = rs;
         cc_->on_ack(ev);
         lost_since_ack_ = 0;
         cwnd_limited_   = false;
+        peer_limited_   = false;
         if (cc_->wants_app_limited()) sampler_.mark_app_limited(flight_bytes_);
     }
 
@@ -758,6 +763,7 @@ void Recovery::on_new_path(Clock::time_point now, FrameSink& sink) {
     while (!sent_.empty()) pop_front();
     lost_since_ack_ = 0;
     cwnd_limited_   = false;
+    peer_limited_   = false;
 
     rtt_     = cc::RttEstimate{};
     rtt_.rto = kInitialRto;

@@ -79,8 +79,19 @@ uint32_t BbrController::cwnd() const noexcept {
 
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
-void BbrController::on_packet_sent(Clock::time_point, uint64_t, uint64_t bytes_in_flight) {
+void BbrController::on_packet_sent(Clock::time_point now, uint64_t bytes, uint64_t bytes_in_flight) {
     inflight_now_ = bytes_in_flight;
+    // What the application sends — padding is not heard of here — in slots of
+    // kAppRateSlot, the open one and the one before.
+    if (app_since_[0] == Clock::time_point{}) {
+        app_since_[0] = app_since_[1] = now;
+    } else if (now - app_since_[0] >= kAppRateSlot) {
+        app_bytes_[1] = app_bytes_[0];
+        app_since_[1] = app_since_[0];
+        app_bytes_[0] = 0;
+        app_since_[0] = now;
+    }
+    app_bytes_[0] += bytes;
 }
 
 void BbrController::on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) {
@@ -211,6 +222,10 @@ void BbrController::on_ack(const AckEvent& ack) {
     load_time_    += ack.flight_time;
     load_packets_ += ack.flight_packets;
     ack_cwnd_limited_ = ack.cwnd_limited;
+    if (ack.peer_limited) {
+        peer_limited_       = true;
+        peer_limited_round_ = round_count_;
+    }
 
     // The first acknowledgement after a timeout: the path is answering again. The
     // window goes back to what it was — less what the timeout cut from the bounds,
@@ -409,6 +424,25 @@ void BbrController::update_queue_signals() {
 void BbrController::check_full_bw_reached() {
     if (full_bw_now_ || !rs_.acked) return;
 
+    // Verifying a queue that may be the path's own: the verdict decides, not the
+    // round trip.
+    if (verifying_) {
+        if (verified()) {
+            // The path delivered more than the queue let it: the queue was the path's.
+            end_verify();
+            group_rises_    = 0;
+            standing_since_ = Clock::time_point{};
+            return;
+        }
+        if (newly_lost_ > 0 || (round_start_ && ++verify_rounds_ > kVerifyRounds)) {
+            end_verify();
+            verify_after_ = now_ + kVerifyHold;
+            full_bw_now_ = full_bw_reached_ = true;
+            return;
+        }
+        if (rs_.is_app_limited) return;
+    }
+
     // The plateau below is read off samples that are not app-limited, which a flow
     // that never fills the pipe — live video — hardly ever produces: it would stay
     // in Startup for good, sending every burst at 2.77x a bandwidth it has long
@@ -418,7 +452,10 @@ void BbrController::check_full_bw_reached() {
     // it delivers already — the plateau's verdict, reached in one burst. Startup
     // ends once and for good, so it asks for more of it than a probe does.
     if (rs_.is_app_limited) {
-        if (full_bw_reached_ ? burst_queued() : startup_queued()) full_bw_now_ = full_bw_reached_ = true;
+        const bool rising = !full_bw_reached_ && startup_rising();
+        if (!(full_bw_reached_ ? burst_queued() : rising || startup_standing())) return;
+        if (!rising && may_verify()) start_verify();
+        else                        full_bw_now_ = full_bw_reached_ = true;
         return;
     }
 
@@ -452,7 +489,13 @@ void BbrController::check_startup_high_loss() {
 }
 
 void BbrController::check_drain_done() {
-    if (state_ == State::Drain && inflight_now_ <= inflight(max_bw_, kUnit)) enter_probe_bw();
+    // Drained to what the path holds at the estimate by itself — the round trip
+    // the window takes (window_bdp), not the minimum: on a path whose minimum is
+    // one lucky packet, Drain's own pace keeps more than that in flight, and a
+    // live stream paced at a third of the estimate dropped its frames for
+    // seconds, until ProbeRTT ended Drain.
+    if (state_ == State::Drain && inflight_now_ <= quantization_budget(window_bdp(max_bw_, kUnit)))
+        enter_probe_bw();
 }
 
 void BbrController::update_probe_bw_cycle_phase() {
@@ -652,6 +695,7 @@ void BbrController::enter_startup() {
 }
 
 void BbrController::enter_drain() {
+    end_verify();
     state_       = State::Drain;
     pacing_gain_ = kDrainPacingGain;
     cwnd_gain_   = kStartupCwndGain;
@@ -663,6 +707,7 @@ void BbrController::enter_probe_bw() {
 }
 
 void BbrController::start_probe_bw_down() {
+    end_verify();
     reset_congestion_signals();
     probe_up_cnt_ = kInfinite;   // not growing inflight_hi
     pick_probe_wait();
@@ -705,6 +750,7 @@ void BbrController::start_probe_bw_up() {
 }
 
 void BbrController::enter_probe_rtt() {
+    end_verify();
     state_       = State::ProbeRtt;
     pacing_gain_ = kUnit;
     cwnd_gain_   = kProbeRttCwndGain;
@@ -931,8 +977,13 @@ uint64_t BbrController::bdp_multiple(uint64_t bw, uint64_t gain) const noexcept 
 uint64_t BbrController::window_bdp(uint64_t bw, uint64_t gain) const noexcept {
     if (min_rtt_ == (Clock::duration::max)()) return kInitialWindow;
     // Up to a BDP of the round trip at load can be our own queue — the window
-    // lets it be — so the path's own is at least the rest.
-    return bytes_over(bw, (std::max)(min_rtt_, load_rtt_ - min_rtt_)) * gain / kUnit;
+    // lets it be — so the path's own is at least the rest. A verification sends faster
+    // than anything measured yet, and on a path whose minimum is a lucky packet
+    // two BDPs over it would hold it to less than it is verifying; the pacer, not
+    // the window, keeps it to its rate.
+    Clock::duration rtt = (std::max)(min_rtt_, load_rtt_ - min_rtt_);
+    if (verifying_ && rtt_.have_rtt) rtt = (std::max)(rtt, rtt_.srtt);
+    return bytes_over(bw, rtt) * gain / kUnit;
 }
 
 uint64_t BbrController::send_quantum() const noexcept {
@@ -1009,12 +1060,56 @@ bool BbrController::burst_queued() const noexcept {
     return burst_in_flight() && ack_rtt_net_ >= min_rtt_ + burst_bar() + 2 * lateness(kAckedTogether);
 }
 
-bool BbrController::startup_queued() const noexcept {
-    if (!burst_in_flight()) return false;
+bool BbrController::startup_rising() const noexcept {
     // Our burst, lifting the bottom of the round trip group after group...
-    if (group_rises_ >= kQueueRises && group_rtt_ >= min_rtt_ + burst_bar()) return true;
+    return burst_in_flight() && group_rises_ >= kQueueRises && group_rtt_ >= min_rtt_ + burst_bar();
+}
+
+bool BbrController::startup_standing() const noexcept {
     // ...or a queue that has stood far above the minimum for a while.
-    return standing_since_ != Clock::time_point{} && now_ - standing_since_ >= kStandingFor;
+    return burst_in_flight() && standing_since_ != Clock::time_point{} && now_ - standing_since_ >= kStandingFor;
+}
+
+uint64_t BbrController::app_rate() const noexcept {
+    if (now_ <= app_since_[1]) return 0;
+    return mul_div(app_bytes_[0] + app_bytes_[1], kNsPerSec, to_ns(now_ - app_since_[1]));
+}
+
+bool BbrController::may_verify() const noexcept {
+    // Startup and a probe are what a queue read off the round trip ends; one the
+    // peer holds back pads nothing (UdpConnection::pump), and one sending a small
+    // share of the estimate is not held back by it.
+    const bool peer_lately = peer_limited_ && round_count_ - peer_limited_round_ <= 1;
+    return (state_ == State::Startup || state_ == State::ProbeBwUp) && now_ >= verify_after_ &&
+           !peer_lately && app_rate() * kVerifyShare >= max_bw_;
+}
+
+void BbrController::start_verify() {
+    verifying_       = true;
+    verify_bar_      = (max_bw_ + pacing_rate_) / 2;
+    verify_from_     = sampler_.delivered();
+    verify_rounds_   = 0;
+    verify_acked_at_ = Clock::time_point{};
+    start_round();
+}
+
+bool BbrController::verified() noexcept {
+    // The first acknowledgement of a packet sent while verifying starts the measure:
+    // what is delivered from there on is what it sent.
+    if (verify_acked_at_ == Clock::time_point{}) {
+        if (rs_.prior_delivered >= verify_from_) {
+            verify_acked_at_ = now_;
+            verify_acked_    = sampler_.delivered();
+        }
+        return false;
+    }
+    // Over a round trip of acknowledgements, not one: a sample is as fast as the
+    // acknowledgements a radio hands back in a bunch, up to the rate it was sent
+    // at, and on a link the sender nearly fills such a one passed a verification
+    // of a queue that was ours.
+    if (!rtt_.have_rtt || now_ - verify_acked_at_ < rtt_.srtt) return false;
+    const uint64_t delivered = sampler_.delivered() - verify_acked_;
+    return mul_div(delivered, kNsPerSec, to_ns(now_ - verify_acked_at_)) >= verify_bar_;
 }
 
 bool BbrController::loss_is_congestion() const noexcept {
