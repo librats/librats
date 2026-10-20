@@ -760,9 +760,10 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
 //   "data"  bulk/small payload in either direction; the receiver counts it
 //   "ack"   [u64 bytes][u64 msgs] LE, cumulative, from the receiver of "data"
 //   "ctl"   ASCII: "flush" (ack now), "push <bytes> <frame> <credit>" (send that
-//           much back to me), "push-done"
+//           much back to me), "push-done", "live <s> <mbps> <ms> <adapt>" (send
+//           me that video back while I send mine), "live-report <figures>"
 //   "live"  a live video frame: [u32 frame][u64 sent, sender's clock, us] then
-//           padding; the responder returns those 12 bytes, reliably, on
+//           padding; whoever receives it returns those 12 bytes, reliably, on
 //   "live-ack"                                                    → live
 //
 // The acks are what make a one-way measurement honest over a path with delay.
@@ -800,6 +801,7 @@ struct Options {
     double live_mbps     = 4;
     int    live_ms       = 150;
     bool   live_adapt    = false;  ///< sized to the estimate, first thing on the connection
+    bool   live_duplex   = false;  ///< the responder sends the same video back: a call
 
     bool   help          = false;
 };
@@ -849,14 +851,92 @@ struct Session {
     std::atomic<bool>     alive{true};
 
     /// Round trips of live frames whose echo came back, ms: sent → delivered
-    /// whole → echoed.
+    /// whole → echoed; and the far end's "live-report" of the video it sent back.
     std::mutex            live_mutex;
     std::vector<double>   live_rtts;
+    std::string           live_report;
 
     // Reactor thread only: the last counters we sent an ack for.
     uint64_t sent_ack_bytes = 0;
     uint64_t sent_ack_msgs  = 0;
 };
+
+// ── Video ───────────────────────────────────────────────────────────────────
+
+/// 30 frames a second, a keyframe kKeyWeight times a frame's size every kGop.
+constexpr int kFps = 30, kGop = 60, kKeyWeight = 5;
+
+/// What one run of video sent.
+struct VideoSent {
+    int      frames = 0;
+    uint64_t bytes  = 0;
+    double   full_s = -1;   ///< adaptive: s until it ran at its ceiling; <0 never
+};
+
+/// `secs` of video to `to`, each frame a live message of `ms` stamped with its
+/// number and send time for the echo: at `mbps`, or with `adapt` at 90% of
+/// PathStats::bandwidth_bps, read every 100 ms, from 1 Mbit/s up to `mbps` — as
+/// an application that takes the estimate for the path's capacity would.
+VideoSent send_video(Node& node, const PeerId& to, int secs, double mbps, int ms, bool adapt,
+                     const std::atomic<bool>& alive) {
+    const double ceiling = mbps * 1e6;
+    double       rate    = adapt ? (std::min)(ceiling, 1e6) : ceiling;
+    SendOptions live;
+    live.lifetime = std::chrono::milliseconds(ms);
+
+    VideoSent   sent;
+    sent.frames = secs * kFps;
+    std::string frame;
+    auto next = Clock::now();
+    for (int n = 0; n < sent.frames && alive.load(std::memory_order_acquire); ++n) {
+        std::this_thread::sleep_until(next);
+        next += std::chrono::microseconds(1000000 / kFps);
+        if (adapt && n % 3 == 0) {
+            const auto st = node.path_stats(to);
+            if (st && st->bandwidth_bps > 0) rate = (std::max)(150e3, (std::min)(st->bandwidth_bps * 0.9, ceiling));
+            if (rate >= ceiling && sent.full_s < 0) sent.full_s = n / double(kFps);
+        }
+        const double unit  = rate / 8 * kGop / kFps / (kGop - 1 + kKeyWeight);
+        const size_t bytes = static_cast<size_t>(unit * (n % kGop == 0 ? kKeyWeight : 1));
+        frame.assign((std::max)(bytes, kLiveHeader), 'v');
+        sent.bytes += frame.size();
+        const uint64_t stamp = static_cast<uint64_t>(now_us());
+        for (int i = 0; i < 4; ++i) frame[i] = static_cast<char>((static_cast<uint32_t>(n) >> (8 * i)) & 0xff);
+        for (int i = 0; i < 8; ++i) frame[4 + i] = static_cast<char>((stamp >> (8 * i)) & 0xff);
+        node.send(to, "live", ByteView(frame), live);
+    }
+    return sent;
+}
+
+/// What became of a run of video, read by the end that sent it: the echoes that
+/// came back, and what its connection gave up on and repaired since `before`.
+struct LiveFigures {
+    double delivered = 0, expired = 0;    ///< % of frames
+    double repair = 0;                    ///< repair symbols sent, % of the video
+    double rtt_median_ms = 0, rtt_p99_ms = 0;
+    double mbps   = 0;                    ///< video produced, mean
+    double full_s = -1;                   ///< adaptive: s until it ran at its ceiling; <0 never
+};
+
+LiveFigures live_figures(Node& node, const PeerId& to, Session& s, const VideoSent& sent, int secs,
+                         const std::optional<PathStats>& before) {
+    std::vector<double> rtts;
+    {
+        std::lock_guard<std::mutex> lock(s.live_mutex);
+        rtts = s.live_rtts;
+    }
+    LiveFigures f;
+    f.delivered     = rtts.size() * 100.0 / sent.frames;
+    f.mbps          = sent.bytes * 8.0 / secs / 1e6;
+    f.full_s        = sent.full_s;
+    f.rtt_median_ms = percentile(rtts, 0.50);
+    f.rtt_p99_ms    = percentile(rtts, 0.99);
+    const auto after = node.path_stats(to);
+    if (after) f.expired = (after->live_expired - (before ? before->live_expired : 0)) * 100.0 / sent.frames;
+    if (after && sent.bytes)
+        f.repair = (after->live_repair_bytes - (before ? before->live_repair_bytes : 0)) * 100.0 / sent.bytes;
+    return f;
+}
 
 /// Installs the four channels on a node and keeps a Session per peer. The
 /// responder additionally serves "ctl", which is the only asymmetry.
@@ -904,8 +984,10 @@ public:
                 send_ack(p, *s, bytes, msgs);
         });
 
-        node_.on("live", [this](const Peer& p, ByteView payload) {
-            if (responder_ && payload.size() >= kLiveHeader) p.send("live-ack", ByteView(payload.data(), kLiveHeader));
+        // Either end: the client receives frames too when the responder sends its
+        // video back (--live-duplex), and it is the responder that measures those.
+        node_.on("live", [](const Peer& p, ByteView payload) {
+            if (payload.size() >= kLiveHeader) p.send("live-ack", ByteView(payload.data(), kLiveHeader));
         });
 
         node_.on("live-ack", [this](const Peer& p, ByteView payload) {
@@ -935,11 +1017,21 @@ public:
                          s->in_msgs.load(std::memory_order_acquire));
                 return;
             }
+            if (cmd.rfind("live-report ", 0) == 0) {
+                std::lock_guard<std::mutex> lock(s->live_mutex);
+                s->live_report = cmd;
+                return;
+            }
             if (!responder_) return;
             unsigned long long total = 0, frame = 0, credit = 0;
             if (std::sscanf(cmd.c_str(), "push %llu %llu %llu", &total, &frame, &credit) == 3)
                 start_push(p.id(), s, static_cast<size_t>(total), static_cast<size_t>(frame),
                            static_cast<size_t>(credit));
+            int secs = 0, ms = 0, adapt = 0;
+            double mbps = 0;
+            if (std::sscanf(cmd.c_str(), "live %d %lf %d %d", &secs, &mbps, &ms, &adapt) == 4 &&
+                secs > 0 && secs <= 600 && mbps > 0 && mbps <= 1000 && ms > 0 && ms <= 10000)
+                start_live(p.id(), s, secs, mbps, ms, adapt != 0);
         });
     }
 
@@ -971,18 +1063,7 @@ private:
             std::printf("  push       %.1f MiB -> %s\n", total / (1024.0 * 1024.0),
                         to.short_hex().c_str());
 
-        // Retire the threads of earlier pushes before starting one more, so a
-        // responder left up across many runs does not accumulate them. Only the
-        // reactor thread gets here, and it is the only writer of pushers_.
-        pushers_.erase(std::remove_if(pushers_.begin(), pushers_.end(),
-                                      [](Pusher& p) {
-                                          if (!p.finished->load(std::memory_order_acquire))
-                                              return false;
-                                          p.thread.join();
-                                          return true;
-                                      }),
-                       pushers_.end());
-
+        reap_pushers();
         Pusher pusher;
         auto   finished = pusher.finished;
         pusher.thread = std::thread([this, to, s, total, frame, credit, finished] {
@@ -1006,8 +1087,51 @@ private:
         pushers_.push_back(std::move(pusher));
     }
 
-    /// A push in flight, plus the flag its thread sets on the way out so a later
-    /// push can join it instead of leaving the handle behind.
+    /// Serve a "live": send the same video back over the same seconds, and once
+    /// its echoes are in, report what became of it. Off the reactor thread, as a
+    /// push is.
+    void start_live(PeerId to, std::shared_ptr<Session> s, int secs, double mbps, int ms, bool adapt) {
+        if (verbose_)
+            std::printf("  live       %d s at %s%.1f Mbit/s -> %s\n", secs, adapt ? "up to " : "", mbps,
+                        to.short_hex().c_str());
+        reap_pushers();
+        Pusher pusher;
+        auto   finished = pusher.finished;
+        pusher.thread = std::thread([this, to, s, secs, mbps, ms, adapt, finished] {
+            {
+                std::lock_guard<std::mutex> lock(s->live_mutex);
+                s->live_rtts.clear();
+            }
+            const auto      before = node_.path_stats(to);
+            const VideoSent sent   = send_video(node_, to, secs, mbps, ms, adapt, s->alive);
+            // Long enough for the last frame's lifetime, its echo, and a sample of the path.
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms) + 1s);
+            const LiveFigures f = live_figures(node_, to, *s, sent, secs, before);
+            char report[192];
+            std::snprintf(report, sizeof(report), "live-report %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+                          f.delivered, f.expired, f.repair, f.rtt_median_ms, f.rtt_p99_ms, f.mbps, f.full_s);
+            node_.send(to, "ctl", ByteView(std::string(report)));
+            finished->store(true, std::memory_order_release);
+        });
+        pushers_.push_back(std::move(pusher));
+    }
+
+    /// Retire the threads of earlier pushes before starting one more, so a
+    /// responder left up across many runs does not accumulate them. Only the
+    /// reactor thread gets here, and it is the only writer of pushers_.
+    void reap_pushers() {
+        pushers_.erase(std::remove_if(pushers_.begin(), pushers_.end(),
+                                      [](Pusher& p) {
+                                          if (!p.finished->load(std::memory_order_acquire))
+                                              return false;
+                                          p.thread.join();
+                                          return true;
+                                      }),
+                       pushers_.end());
+    }
+
+    /// A push or a live run in flight, plus the flag its thread sets on the way
+    /// out so a later one can join it instead of leaving the handle behind.
     struct Pusher {
         std::thread                        thread;
         std::shared_ptr<std::atomic<bool>> finished = std::make_shared<std::atomic<bool>>(false);
@@ -1042,8 +1166,9 @@ NodeConfig remote_config(const Options& o, bool listen, bool tcp, bool udp) {
     c.transport_fallback_ms  = 0;
     c.max_peers              = 0;
     c.enable_network_monitor = false;
-    // The measuring side reads what its sender dropped of the live frames.
-    if (!listen) c.path_sample_ms = 100;
+    // Each side reads what its sender dropped of the live frames — the responder
+    // too, for the video it sends back — and an adaptive one its estimate.
+    c.path_sample_ms = 100;
     return c;
 }
 
@@ -1103,11 +1228,9 @@ struct Run {
     double up_mb_s = 0, up_cpu_s_gb = 0;
     double down_mb_s = 0, down_cpu_s_gb = 0;
     double small_msgs_s = 0;
-    double live_delivered = 0, live_expired = 0;   ///< % of frames
-    double live_repair = 0;                        ///< repair symbols sent, % of the video
-    double live_rtt_median_ms = 0, live_rtt_p99_ms = 0;
-    double live_mbps = 0;            ///< video produced, mean
-    double live_full_s = -1;         ///< --live-adapt: s until it ran at --live-mbps; <0 never
+    LiveFigures live;                ///< our video
+    LiveFigures back;                ///< --live-duplex: the responder's, as it reported it
+    bool        back_reported = false;
 };
 
 /// One connected client node, plus the endpoint whose handlers it runs.
@@ -1298,62 +1421,46 @@ void measure_small(const Options& o, Wire& w, Run& run) {
 
 /// Video as live messages: 30 frames a second at --live-mbps, a keyframe five
 /// times a frame's size every two seconds, each frame a live message of
-/// --live-ms. The responder echoes every frame that arrives, so the round trip
-/// is measured on one clock: sent → delivered whole → echo back.
+/// --live-ms (send_video). The responder echoes every frame that arrives, so the
+/// round trip is measured on one clock: sent → delivered whole → echo back.
 ///
-/// With --live-adapt the encoder sizes itself to the estimate instead — 90% of
-/// PathStats::bandwidth_bps, read every 100 ms — from 1 Mbit/s up to --live-mbps,
-/// as an application that takes the estimate for the path's capacity would.
+/// With --live-duplex the responder sends the same video back over the same
+/// seconds — a call rather than a broadcast, each way's acknowledgements waiting
+/// behind the other way's frames — measures its own the same way, from our
+/// echoes, and reports it at the end.
 void measure_live(const Options& o, Wire& w, Run& run) {
     if (o.live_secs <= 0) return;
-    constexpr int kFps = 30, kGop = 60, kKeyWeight = 5;
-    const double ceiling = o.live_mbps * 1e6;
-    double       rate    = o.live_adapt ? (std::min)(ceiling, 1e6) : ceiling;
-    const int    frames  = o.live_secs * kFps;
-    SendOptions live;
-    live.lifetime = std::chrono::milliseconds(o.live_ms);
     {
         std::lock_guard<std::mutex> lock(w.session->live_mutex);
         w.session->live_rtts.clear();
+        w.session->live_report.clear();
     }
-    const auto before = w.node->path_stats(w.remote);
-
-    std::string frame;
-    uint64_t video_bytes = 0;
-    auto next = Clock::now();
-    for (int n = 0; n < frames; ++n) {
-        std::this_thread::sleep_until(next);
-        next += std::chrono::microseconds(1000000 / kFps);
-        if (o.live_adapt && n % 3 == 0) {
-            const auto st = w.node->path_stats(w.remote);
-            if (st && st->bandwidth_bps > 0) rate = (std::max)(150e3, (std::min)(st->bandwidth_bps * 0.9, ceiling));
-            if (rate >= ceiling && run.live_full_s < 0) run.live_full_s = n / double(kFps);
-        }
-        const double unit  = rate / 8 * kGop / kFps / (kGop - 1 + kKeyWeight);
-        const size_t bytes = static_cast<size_t>(unit * (n % kGop == 0 ? kKeyWeight : 1));
-        frame.assign((std::max)(bytes, kLiveHeader), 'v');
-        video_bytes += frame.size();
-        const uint64_t sent = static_cast<uint64_t>(now_us());
-        for (int i = 0; i < 4; ++i) frame[i] = static_cast<char>((static_cast<uint32_t>(n) >> (8 * i)) & 0xff);
-        for (int i = 0; i < 8; ++i) frame[4 + i] = static_cast<char>((sent >> (8 * i)) & 0xff);
-        w.node->send(w.remote, "live", ByteView(frame), live);
+    if (o.live_duplex) {
+        char cmd[96];
+        std::snprintf(cmd, sizeof(cmd), "live %d %g %d %d", o.live_secs, o.live_mbps, o.live_ms,
+                      o.live_adapt ? 1 : 0);
+        w.node->send(w.remote, "ctl", ByteView(std::string(cmd)));
     }
+    const auto      before = w.node->path_stats(w.remote);
+    const VideoSent sent   = send_video(*w.node, w.remote, o.live_secs, o.live_mbps, o.live_ms, o.live_adapt,
+                                        w.session->alive);
     // Long enough for the last frame's lifetime, its echo, and a sample of the path.
     std::this_thread::sleep_for(std::chrono::milliseconds(o.live_ms) + 1s);
+    run.live = live_figures(*w.node, w.remote, *w.session, sent, o.live_secs, before);
+    if (!o.live_duplex) return;
 
-    std::vector<double> rtts;
-    {
+    // The far end's video started a one-way trip after ours and ends as late; its
+    // report follows its own last echo.
+    std::string report;
+    wait_for([&] {
         std::lock_guard<std::mutex> lock(w.session->live_mutex);
-        rtts = w.session->live_rtts;
-    }
-    run.live_delivered     = rtts.size() * 100.0 / frames;
-    run.live_mbps          = video_bytes * 8.0 / o.live_secs / 1e6;
-    run.live_rtt_median_ms = percentile(rtts, 0.50);
-    run.live_rtt_p99_ms    = percentile(rtts, 0.99);
-    const auto after = w.node->path_stats(w.remote);
-    if (after) run.live_expired = (after->live_expired - (before ? before->live_expired : 0)) * 100.0 / frames;
-    if (after && video_bytes)
-        run.live_repair = (after->live_repair_bytes - (before ? before->live_repair_bytes : 0)) * 100.0 / video_bytes;
+        report = w.session->live_report;
+        return !report.empty();
+    }, 5s);
+    LiveFigures& b = run.back;
+    run.back_reported = std::sscanf(report.c_str(), "live-report %lf %lf %lf %lf %lf %lf %lf", &b.delivered,
+                                    &b.expired, &b.repair, &b.rtt_median_ms, &b.rtt_p99_ms, &b.mbps,
+                                    &b.full_s) == 7;
 }
 
 Run measure_wire(TransportKind kind, const Options& o) {
@@ -1490,24 +1597,30 @@ int connect_and_measure(const Options& o) {
                 "   into shared datagrams. See the note above bench_small().)\n");
 
     if (o.live_secs > 0) {
-        char title[128];
+        char title[160];
         if (o.live_adapt)
             std::snprintf(title, sizeof(title),
-                          "live — %d s of 30 fps video sized to the estimate, up to %.1f Mbit/s, %d ms lifetime",
-                          o.live_secs, o.live_mbps, o.live_ms);
+                          "live — %d s of 30 fps video sized to the estimate, up to %.1f Mbit/s, %d ms lifetime%s",
+                          o.live_secs, o.live_mbps, o.live_ms, o.live_duplex ? ", both ways" : "");
         else
-            std::snprintf(title, sizeof(title), "live — %d s of 30 fps video at %.1f Mbit/s, %d ms lifetime",
-                          o.live_secs, o.live_mbps, o.live_ms);
+            std::snprintf(title, sizeof(title), "live — %d s of 30 fps video at %.1f Mbit/s, %d ms lifetime%s",
+                          o.live_secs, o.live_mbps, o.live_ms, o.live_duplex ? ", both ways" : "");
         table.head(title);
-        table.line("frames delivered",       tcp.live_delivered,     udp.live_delivered,     "%", false, "%8.1f");
-        table.line("given up by the sender", tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
-        table.line("repair symbols sent",    tcp.live_repair,        udp.live_repair,        "%", true,  "%8.1f");
-        table.line("frame round trip, median", tcp.live_rtt_median_ms, udp.live_rtt_median_ms, "ms", true);
-        table.line("frame round trip, p99",  tcp.live_rtt_p99_ms,    udp.live_rtt_p99_ms,    "ms", true);
-        if (o.live_adapt) {
-            table.line("video sent, mean",       tcp.live_mbps,   udp.live_mbps,   "Mbit/s", false);
-            table.line("at full rate after",     tcp.live_full_s, udp.live_full_s, "s",      true, "%8.1f");
-        }
+        // One block per direction: ours, then — with --live-duplex — the responder's.
+        const auto block = [&](const char* prefix, const LiveFigures& t, const LiveFigures& u) {
+            const auto label = [&](const char* name) { return std::string(prefix) + name; };
+            table.line(label("frames delivered").c_str(),         t.delivered,     u.delivered,     "%", false, "%8.1f");
+            table.line(label("given up by the sender").c_str(),   t.expired,       u.expired,       "%", true,  "%8.1f");
+            table.line(label("repair symbols sent").c_str(),      t.repair,        u.repair,        "%", true,  "%8.1f");
+            table.line(label("frame round trip, median").c_str(), t.rtt_median_ms, u.rtt_median_ms, "ms", true);
+            table.line(label("frame round trip, p99").c_str(),    t.rtt_p99_ms,    u.rtt_p99_ms,    "ms", true);
+            if (o.live_adapt) {
+                table.line(label("video sent, mean").c_str(),   t.mbps,   u.mbps,   "Mbit/s", false);
+                table.line(label("at full rate after").c_str(), t.full_s, u.full_s, "s",      true, "%8.1f");
+            }
+        };
+        block("", tcp.live, udp.live);
+        if (o.live_duplex) block("back: ", tcp.back, udp.back);
         std::printf("  (each frame is a live message: repaired while it can still arrive in time,\n"
                     "   dropped whole once it cannot. The round trip is sent -> delivered whole ->\n"
                     "   echoed back, so it is the frame's delivery plus one small message the other\n"
@@ -1523,6 +1636,18 @@ int connect_and_measure(const Options& o) {
             std::printf("  (--live-adapt: the video ran first, on the fresh connection, at 90%% of\n"
                         "   the estimate from 1 Mbit/s up to --live-mbps. \"At full rate after\" is\n"
                         "   when it first got there, -1 if it never did.)\n");
+        if (o.live_duplex)
+            std::printf("  (--live-duplex: the responder sent the same video back over the same\n"
+                        "   seconds — a call, not a broadcast: each way's acknowledgements wait\n"
+                        "   behind the other way's frames. The \"back\" rows are its frames, measured\n"
+                        "   by it from our echoes the same way and reported at the end.)\n");
+        if (o.live_duplex && ((tcp.connected && !tcp.back_reported) || (udp.connected && !udp.back_reported)))
+            std::printf("  %s(no report of the video back on %s — a responder from before --live-duplex\n"
+                        "   sends none, and its \"back\" rows are zeros.)%s\n",
+                        col("\x1b[33m"),
+                        (tcp.connected && !tcp.back_reported) && (udp.connected && !udp.back_reported)
+                            ? "either wire" : (tcp.connected && !tcp.back_reported) ? "TCP" : "UDP",
+                        col("\x1b[0m"));
     }
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "
@@ -1567,6 +1692,7 @@ void usage() {
         "  --live-ms N       each frame's lifetime, ms          (default 150)\n"
         "  --live-adapt      size the video to the estimate, from 1 Mbit/s, on the\n"
         "                    fresh connection (before the bulk phases)\n"
+        "  --live-duplex     the responder sends the same video back meanwhile: a call\n"
         "  -h, --help        this text\n"
         "\n"
         "both ends must run the same --protocol; the responder must be reachable on\n"
@@ -1661,6 +1787,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (arg == "--live-mbps")    { if (!number(i, n, 1)) return false; o.live_mbps = static_cast<double>(n); }
         else if (arg == "--live-ms")      { if (!number(i, n, 1)) return false; o.live_ms = static_cast<int>(n); }
         else if (arg == "--live-adapt")   { o.live_adapt = true; }
+        else if (arg == "--live-duplex")  { o.live_duplex = true; }
         else {
             std::fprintf(stderr, "bench_transport: unknown option '%s' (try --help)\n", arg.c_str());
             return false;
