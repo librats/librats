@@ -1595,9 +1595,9 @@ bool UdpConnection::send_message(FrameHeader header, ByteView payload) {
 }
 
 bool UdpConnection::send_live(FrameHeader header, ByteView payload, Clock::time_point deadline,
-                              uint64_t tag) {
+                              uint64_t tag, uint8_t rank) {
     if (!established() || closing_) return false;
-    live_send_.push(header, payload, deadline, tag);
+    live_send_.push(header, payload, deadline, tag, rank);
     return true;
 }
 

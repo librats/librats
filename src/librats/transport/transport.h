@@ -120,8 +120,11 @@ public:
     /// that is the only thing ever dropped. May write at once when enough is queued
     /// that waiting for the end of the reactor turn would only cost memory — which
     /// is the one way it can fail: false means that write broke the transport.
-    /// A live message with a nonzero `tag` has its outcome reported to the sink.
-    virtual bool send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag = 0) = 0;
+    /// A live message with a nonzero `tag` has its outcome reported to the sink,
+    /// and leaves ahead of live messages of a higher `rank` (SendOptions::rank,
+    /// below kLiveRanks).
+    virtual bool send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag = 0,
+                      uint8_t rank = 0) = 0;
 
     /// Write out what is queued, as far as the path will take it. Called by the
     /// reactor at the end of every turn that queued something.

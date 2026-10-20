@@ -150,14 +150,16 @@ public:
     /// with nothing, dropped by the transport once it can no longer arrive in time,
     /// and refused if its payload is past SendOptions::kMaxLivePayload. It weighs
     /// on the marks below like any other until it is sent or dropped. A nonzero
-    /// `tag` asks for its outcome (ConnectionDelegate::on_live_outcome).
+    /// `tag` asks for its outcome (ConnectionDelegate::on_live_outcome); `rank`
+    /// is its place among live messages (SendOptions::rank, below kLiveRanks).
     ///
     /// @return whether there is still room for more. False means the queue is
     ///         past its low-water mark — this frame is queued like any other,
     ///         nothing is dropped, but the caller should stop and wait for
     ///         ConnectionDelegate::on_writable_changed rather than keep piling on
     ///         until the connection is dropped as a slow consumer.
-    bool send(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0);
+    bool send(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0,
+              uint8_t rank = 0);
 
     /// Convenience: send raw bytes on an application channel.
     bool send(uint16_t channel, ByteView payload) {

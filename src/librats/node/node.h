@@ -323,7 +323,7 @@ private:
     /// Queue one message on a peer's route, from any thread: `owed` is the peer's
     /// in-transit counter, already charged for it.
     void route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadline deadline,
-                    uint64_t tag, std::shared_ptr<std::atomic<size_t>> owed);
+                    uint64_t tag, uint8_t rank, std::shared_ptr<std::atomic<size_t>> owed);
     /// The send behind both public overloads.
     bool send_to(const PeerId& to, FrameHeader header, ByteView payload, SendOptions options);
     bool broadcast_all(FrameHeader header, ByteView payload, SendOptions options);

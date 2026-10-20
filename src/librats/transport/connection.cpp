@@ -41,7 +41,8 @@ PathStats Connection::sample_path() {
 
 // ── Outbound application frames ─────────────────────────────────────────────
 
-bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
+bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag,
+                      uint8_t rank) {
     if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
 
     // A live message is only ever delivered whole, so the receiver holds all of one
@@ -89,7 +90,7 @@ bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline, u
         return false;
     }
 
-    if (!transport_->send(header, payload, deadline, tag)) {
+    if (!transport_->send(header, payload, deadline, tag, rank)) {
         fail(transport_->error_reason());
         reactor_.close(id_, close_reason_);
         return false;

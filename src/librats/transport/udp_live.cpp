@@ -22,7 +22,8 @@ uint64_t covered(const RangeSet& set, uint64_t lo, uint64_t hi) {
 
 // ── LiveSender ──────────────────────────────────────────────────────────────
 
-void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag) {
+void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag,
+                      uint8_t rank) {
     // The window is full: the oldest message under way gives way to the newest.
     // Its id may not be outrun further, or the receiver would forget it (see the
     // file comment), and of the two the older is the one less worth having.
@@ -38,6 +39,7 @@ void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point de
     framer::encode_header(m.data.data(), header);
     m.data.insert(m.data.end(), payload.begin(), payload.end());
     m.tag  = tag;
+    m.rank = static_cast<uint8_t>((std::min)(size_t{rank}, kRanks - 1));
     m.held = true;
 
     const uint64_t id = base_ + messages_.size();
@@ -62,7 +64,7 @@ void LiveSender::insert(RingBuffer<Entry>& queue, Entry e) {
 
 void LiveSender::enqueue(uint64_t id, Message& m) {
     m.queued = true;
-    insert(order_, Entry{m.deadline, id});
+    insert(orders_[m.rank], Entry{m.deadline, id});
 }
 
 LiveSender::Message* LiveSender::find(uint64_t id) noexcept {
@@ -107,11 +109,13 @@ void LiveSender::settle() noexcept {
         messages_.pop_front();
         ++base_;
     }
-    while (!order_.empty()) {
-        Message* m = find(order_.front().id);
-        if (m && pending(*m)) break;
-        if (m) m->queued = false;
-        order_.pop_front();
+    for (RingBuffer<Entry>& order : orders_) {
+        while (!order.empty()) {
+            Message* m = find(order.front().id);
+            if (m && pending(*m)) break;
+            if (m) m->queued = false;
+            order.pop_front();
+        }
     }
     // A message enters repairs_ once, when it is protected, and leaves it once
     // it has no repair left to send.
@@ -131,8 +135,9 @@ void LiveSender::expire(Clock::time_point now, Clock::duration one_way, cc::Paci
             drop_parity(repairs_.front().id, *find(repairs_.front().id));
             continue;
         }
-        if (order_.empty() || now + one_way < order_.front().deadline) break;
-        Message& m = *find(order_.front().id);
+        const size_t rank = first_due();
+        if (rank == kRanks || now + one_way < orders_[rank].front().deadline) break;
+        Message& m = *find(orders_[rank].front().id);
         // Too late to send again what was lost — but if all of it has gone out and
         // no block has lost more than its repairs, they may still give it back.
         if (m.coding && m.sent == m.data.size() && !m.coding->any_failed()) {
@@ -144,24 +149,39 @@ void LiveSender::expire(Clock::time_point now, Clock::duration one_way, cc::Paci
         }
         resolve(m, /*given_up=*/true);
     }
-    if (rate.paced() && order_.size() > 1) shed(now, one_way, rate);
+    if (rate.paced()) shed(now, one_way, rate);
+}
+
+size_t LiveSender::first_due() const noexcept {
+    size_t first = kRanks;
+    for (size_t r = 0; r < kRanks; ++r) {
+        if (!orders_[r].empty() &&
+            (first == kRanks || orders_[r].front().deadline < orders_[first].front().deadline))
+            first = r;
+    }
+    return first;
 }
 
 void LiveSender::shed(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate) {
-    const auto waiting = [&](size_t i) -> Message* {
-        Message* m = find(order_[i].id);
-        return m && pending(*m) ? m : nullptr;   // else a stale entry
-    };
-    // The last message waiting is never shed: nothing waits for its bytes.
-    size_t last = order_.size();
-    while (last > 0 && !waiting(last - 1)) --last;
-    if (last < 2) return;
-    --last;
+    size_t entries = 0;
+    for (const RingBuffer<Entry>& order : orders_) entries += order.size();
+    if (entries < 2) return;
 
-    uint64_t ahead = 0;   // bytes that leave before the message at i does
-    for (size_t i = 0; i < last; ++i) {
-        Message* m = waiting(i);
-        if (!m) continue;
+    // In the order they leave: by rank, then by deadline.
+    std::vector<Message*>& waiting = shed_scratch_;
+    waiting.clear();
+    for (const RingBuffer<Entry>& order : orders_) {
+        for (size_t i = 0; i < order.size(); ++i) {
+            Message* m = find(order[i].id);
+            if (m && pending(*m)) waiting.push_back(m);   // else a stale entry
+        }
+    }
+    // The last message waiting is never shed: nothing waits for its bytes.
+    if (waiting.size() < 2) return;
+    waiting.pop_back();
+
+    uint64_t ahead = 0;   // bytes that leave before the message at hand does
+    for (Message* m : waiting) {
         const uint64_t owed = (m->data.size() - m->sent) + m->lost_bytes;
         if (m->sent == 0 && now + one_way + rate.time_for(ahead + owed) > m->deadline) {
             resolve(*m, /*given_up=*/true);
@@ -176,7 +196,7 @@ std::optional<LiveSender::Clock::time_point> LiveSender::next_expiry(Clock::dura
     // The front may be stale; then this wakes the connection early, and the
     // expire() that wake-up runs drops it.
     std::optional<Clock::time_point> due;
-    if (!order_.empty())   due = order_.front().deadline - one_way;
+    if (const size_t rank = first_due(); rank < kRanks) due = orders_[rank].front().deadline - one_way;
     if (!repairs_.empty()) due = (std::min)(due.value_or((Clock::time_point::max)()), repairs_.front().deadline - one_way);
     return due;
 }
@@ -184,9 +204,11 @@ std::optional<LiveSender::Clock::time_point> LiveSender::next_expiry(Clock::dura
 bool LiveSender::peek(Piece& out) noexcept {
     settle();
     out = Piece{};
-    if (!order_.empty()) {
-        const Message& m = *find(order_.front().id);
-        out.id       = order_.front().id;
+    const auto order = std::find_if(orders_.begin(), orders_.end(),
+                                    [](const RingBuffer<Entry>& o) { return !o.empty(); });
+    if (order != orders_.end()) {
+        const Message& m = *find(order->front().id);
+        out.id       = order->front().id;
         out.size     = static_cast<uint32_t>(m.data.size());
         out.deadline = m.deadline;
         out.fresh    = !m.decided;
@@ -395,7 +417,7 @@ void LiveSender::drop_parity(uint64_t id, Message& m) {
 void LiveSender::clear() {
     base_    += messages_.size();
     messages_ = RingBuffer<Message>();
-    order_    = RingBuffer<Entry>();
+    for (RingBuffer<Entry>& order : orders_) order = RingBuffer<Entry>();
     repairs_  = RingBuffer<Entry>();
     unsent_   = parity_ = lost_ = 0;
     held_     = 0;
@@ -405,7 +427,8 @@ void LiveSender::clear() {
 void LiveSender::release_memory() noexcept {
     settle();
     messages_.release();
-    order_.release();
+    for (RingBuffer<Entry>& order : orders_) order.release();
+    shed_scratch_ = std::vector<Message*>();
     repairs_.release();
 }
 

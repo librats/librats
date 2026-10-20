@@ -102,10 +102,11 @@ public:
     }
 
     /// A live message, worth delivering until `deadline`; with a `tag`, its
-    /// outcome is asked for.
+    /// outcome is asked for. It leaves ahead of those of a higher `rank`.
     bool send_live(MessageType type, const std::string& payload, Clock::time_point deadline,
-                   uint16_t channel = 0, uint64_t tag = 0) {
-        return conn && conn->send_live(FrameHeader{type, 0, channel}, ByteView(payload), deadline, tag);
+                   uint16_t channel = 0, uint64_t tag = 0, uint8_t rank = 0) {
+        return conn && conn->send_live(FrameHeader{type, 0, channel}, ByteView(payload), deadline,
+                                       tag, rank);
     }
 
     bool established() const { return conn && conn->established(); }

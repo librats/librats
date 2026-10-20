@@ -103,6 +103,12 @@ struct DialProfile {
 /// of ordinary traffic and are dropped before it is, which is what lets fresh
 /// frames through a queue that a burst or an outage has filled.
 ///
+/// Among themselves, live messages leave by `rank`, then by deadline: the nearest
+/// first within a rank, and a lower rank ahead of a higher one whatever their
+/// deadlines. A call's sound must not wait behind its picture's keyframe — a
+/// few hundred packets that take a narrow path a good part of the sound's
+/// lifetime — nor a keyframe behind the frames that depend on it.
+///
 /// The receiving side needs nothing: a live message arrives at the same handler
 /// as any other on its channel. The sending side may ask to hear what became of
 /// one (`tag`): a keyframe that a joining viewer cannot start without is worth
@@ -116,6 +122,8 @@ struct SendOptions {
     /// of one until its last piece is in, and this bounds that. Half the send
     /// queue's high-water mark, so one leaves room for the frames behind it.
     static constexpr size_t kMaxLivePayload = 4 * 1024 * 1024;
+    /// Ranks live messages are scheduled in: 0 (first) to kLiveRanks - 1.
+    static constexpr uint8_t kLiveRanks = 4;
 
     /// Zero (or less): reliable. Otherwise live, for this long from the call.
     std::chrono::milliseconds lifetime{0};
@@ -123,6 +131,9 @@ struct SendOptions {
     /// on — under this tag, to PeerNetwork::on_live_outcome. Ignored for a
     /// reliable one, which is never given up on.
     uint64_t tag = 0;
+    /// A live message's rank: those of a lower one leave first. Past
+    /// kLiveRanks - 1 it is the last rank. Ignored for a reliable one.
+    uint8_t rank = 0;
 
     bool live() const noexcept { return lifetime.count() > 0; }
 };

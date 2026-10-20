@@ -126,6 +126,53 @@ TEST(LiveSenderTest, TheNearestDeadlineGoesFirst) {
     EXPECT_FALSE(s.empty()) << "sent is not delivered: it is held until acknowledged";
 }
 
+// A lower rank goes first whatever its deadline — a call's sound ahead of the
+// keyframe it was captured after — and the nearest deadline within a rank. Ranks
+// past the last are the last.
+TEST(LiveSenderTest, ALowerRankGoesFirstWhateverItsDeadline) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string("keyframe")), kT0 + 100ms, 0, 1);
+    s.push(FrameHeader{}, ByteView(std::string("sound")),    kT0 + 300ms, 0, 0);
+    s.push(FrameHeader{}, ByteView(std::string("delta")),    kT0 + 50ms,  0, 200);
+    s.push(FrameHeader{}, ByteView(std::string("sound 2")),  kT0 + 200ms, 0, 0);
+    s.push(FrameHeader{}, ByteView(std::string("enhance")),  kT0 + 10ms,  0, LiveSender::kRanks - 1);
+    const auto pieces = drain(s);
+    std::vector<uint64_t> ids;
+    for (const auto& piece : pieces) ids.push_back(piece.id);
+    EXPECT_EQ(ids, (std::vector<uint64_t>{3, 1, 0, 4, 2}));
+}
+
+// Whatever its rank, a message that can no longer make it is dropped, and is
+// what the next expiry is set by.
+TEST(LiveSenderTest, WhatExpiresIsFoundInAnyRank) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string("sound")),    kT0 + 300ms, 0, 0);
+    s.push(FrameHeader{}, ByteView(std::string("keyframe")), kT0 + 50ms,  0, 2);
+    EXPECT_EQ(s.next_expiry(10ms), kT0 + 40ms);
+    s.expire(kT0 + 45ms, 10ms);
+    EXPECT_EQ(s.expired(), 1u);
+    const auto pieces = drain(s);
+    ASSERT_EQ(pieces.size(), 1u);
+    EXPECT_EQ(pieces[0].id, 0u);
+}
+
+// Under overload, what leaves ahead of a message is what is of a lower rank or
+// due sooner: that is what it is shed for.
+TEST(LiveSenderTest, UnderOverloadAMessageIsShedForTheLowerRanksAheadOfIt) {
+    const cc::PacingRate rate = cc::PacingRate::per_second(100'000);   // 10 KB per 100 ms
+    const auto payload = std::string(10'000 - framer::kHeaderSize, 'v');
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(payload), kT0 + 150ms, 0, 1);   // would leave by 100 ms alone
+    s.push(FrameHeader{}, ByteView(payload), kT0 + 300ms, 0, 0);   // goes first: the 1 goes by 200
+    s.push(FrameHeader{}, ByteView(payload), kT0 + 300ms, 0, 1);   // the last waiting
+    s.expire(kT0, 0ms, rate);
+    EXPECT_EQ(s.expired(), 1u);
+    const auto pieces = drain(s, 10'000);
+    ASSERT_EQ(pieces.size(), 2u);
+    EXPECT_EQ(pieces[0].id, 1u);
+    EXPECT_EQ(pieces[1].id, 2u);
+}
+
 TEST(LiveSenderTest, OnlyWhatIsStillMissingIsRepairedAndRepairsComeFirst) {
     LiveSender s;
     s.push(FrameHeader{}, ByteView(std::string(2996, 'x')), kT0 + 1s);   // 3000 bytes inner
@@ -603,8 +650,9 @@ TEST(LiveReceiverTest, RepairsHeldForAMessageGivenUpOnAreReleased) {
 namespace {
 
 /// Queue a live message on a, and let it send what it may.
-void send_live(Pair& p, const std::string& payload, Clock::duration lifetime, uint16_t channel = 0) {
-    ASSERT_TRUE(p.a.send_live(MessageType::App, payload, p.now + lifetime, channel));
+void send_live(Pair& p, const std::string& payload, Clock::duration lifetime, uint16_t channel = 0,
+               uint8_t rank = 0) {
+    ASSERT_TRUE(p.a.send_live(MessageType::App, payload, p.now + lifetime, channel, 0, rank));
     p.a.conn->flush(p.now);
 }
 
@@ -832,6 +880,28 @@ TEST(UdpLiveTest, LiveMessagesGoAheadOfABacklog) {
     send_live(p, "frame", 500ms);
     ASSERT_TRUE(p.run_until([&] { return count(p.b.messages, "frame") == 1; }, 2s));
     EXPECT_LE(p.now - sent, 30ms) << "the live message waited behind the backlog";
+}
+
+// A keyframe takes a fresh connection several round trips; a message of a lower
+// rank sent behind it — a call's sound — goes ahead of the rest of it, while one
+// of the same rank and a later deadline waits for all of it.
+TEST(UdpLiveTest, ALowerRankOvertakesAKeyframeUnderWay) {
+    for (const uint8_t sound_rank : {uint8_t{0}, uint8_t{1}}) {
+        Pair p(true, 20ms);
+        ASSERT_TRUE(p.connect());
+        const std::string keyframe(512 * 1024, 'k');
+        send_live(p, keyframe, 2s, 0, 1);
+        p.run(30ms);   // under way
+        send_live(p, "sound", 3s, 0, sound_rank);
+        ASSERT_TRUE(p.run_until([&] { return count(p.b.messages, "sound") == 1; }, 5s));
+        // (Not the order the two were handed over in: a message that came in
+        // one packet is handed over ahead of one put together in the same read.)
+        if (sound_rank == 0) {
+            EXPECT_EQ(count(p.b.messages, keyframe), 0u) << "the sound waited for the keyframe";
+        } else {
+            EXPECT_EQ(count(p.b.messages, keyframe), 1u) << "same rank: the nearer deadline first";
+        }
+    }
 }
 
 TEST(UdpLiveTest, DuplicatedDatagramsDeliverOnce) {

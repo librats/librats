@@ -252,6 +252,26 @@ TEST(SendQueueTest, LiveMessagesGoBetweenInteractiveAndNormal) {
     EXPECT_EQ(q.live_expired(), 0u);
 }
 
+// Live messages leave by rank, a lower one's lanes strictly first; a rank past
+// the last is the last. All of them still between Interactive and Normal.
+TEST(SendQueueTest, LiveMessagesLeaveByRank) {
+    const Deadline later = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    SendQueue q;
+    q.push(lane(MessageType::App), ByteView(std::string("reliable")));
+    q.push(lane(MessageType::Media), ByteView(std::string("keyframe")), later, 0, 1);
+    q.push(lane(MessageType::Media), ByteView(std::string("delta")), later, 0, 2);
+    q.push(lane(MessageType::Media), ByteView(std::string("far")), later, 0, 200);
+    q.push(lane(MessageType::App), ByteView(std::string("app live")), later, 0, 2);
+    q.push(lane(MessageType::Media), ByteView(std::string("sound")), later, 0, 0);
+    q.push(lane(MessageType::Ping), ByteView(std::string("ping")));
+
+    std::vector<std::string> order;
+    for (const auto& f : seal_all(q, kPlain)) order.push_back(f.payload);
+    const std::vector<std::string> expected = {"ping",     "sound", "keyframe", "delta",
+                                               "app live", "far",   "reliable"};
+    EXPECT_EQ(order, expected);
+}
+
 // A byte stream's nonces run in lockstep, so the one place a message can still be
 // dropped is before it is sealed. One whose deadline has passed is dropped there,
 // whatever its size, and the nonce goes to the next message instead.

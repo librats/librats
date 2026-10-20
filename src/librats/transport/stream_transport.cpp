@@ -178,8 +178,9 @@ size_t StreamTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framing;
 }
 
-bool StreamTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
-    queue_.push(header, payload, deadline, tag);
+bool StreamTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag,
+                           uint8_t rank) {
+    queue_.push(header, payload, deadline, tag, rank);
 
     // Enough for a write already: send it now rather than hold it to the end of the
     // turn. Not while the link has said it is full, though — its writable event is

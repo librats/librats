@@ -90,8 +90,9 @@ size_t UdpTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framer::kHeaderSize;
 }
 
-bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
-    const bool queued = is_live(deadline) ? conn_.send_live(header, payload, deadline, tag)
+bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag,
+                        uint8_t rank) {
+    const bool queued = is_live(deadline) ? conn_.send_live(header, payload, deadline, tag, rank)
                                           : conn_.send_message(header, payload);
     if (!queued) return false;
     conn_.want_write(true);

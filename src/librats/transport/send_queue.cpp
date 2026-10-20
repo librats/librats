@@ -1,5 +1,6 @@
 #include "librats/transport/send_queue.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 
@@ -47,9 +48,11 @@ void SendQueue::release_pooled_chunks() {
     pool = nullptr;
 }
 
-void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
+void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag,
+                     uint8_t rank) {
     const bool live = is_live(deadline);
-    const uint32_t index = lane_for(header.type, live);
+    const uint32_t index = lane_for(header.type, live,
+                                    live ? static_cast<uint8_t>((std::min)(size_t{rank}, kLiveRanks - 1)) : 0);
     Lane& lane = lanes_[index];
 
     const size_t inner = framer::kHeaderSize + payload.size();
@@ -172,17 +175,25 @@ void SendQueue::next_chunk(Lane& lane) noexcept {
     }
 }
 
-uint32_t SendQueue::lane_for(MessageType type, bool live) {
+uint32_t SendQueue::lane_for(MessageType type, bool live, uint8_t rank) {
+    const auto is = [&](const Lane& lane) {
+        return lane.type == type && lane.live == live && lane.rank == rank;
+    };
     // Most pushes go to the lane the previous one did — one subsystem streaming.
-    if (last_ != kNone && lanes_[last_].type == type && lanes_[last_].live == live) return last_;
+    if (last_ != kNone && is(lanes_[last_])) return last_;
 
     for (uint32_t i = 0; i < lanes_.size(); ++i)
-        if (lanes_[i].type == type && lanes_[i].live == live) return last_ = i;
+        if (is(lanes_[i])) return last_ = i;
 
     Lane lane;
-    lane.type     = type;
-    lane.live     = live;
-    lane.priority = live ? Priority::Live : priority_of(type);
+    lane.type = type;
+    lane.live = live;
+    lane.rank = rank;
+    // The live ranks sit where Priority::Live is; the priorities after it move up.
+    const auto priority = static_cast<size_t>(live ? Priority::Live : priority_of(type));
+    lane.schedule_class = static_cast<uint8_t>(
+        live ? priority + rank
+             : priority > static_cast<size_t>(Priority::Live) ? priority + kLiveRanks - 1 : priority);
     lanes_.push_back(std::move(lane));
     return last_ = static_cast<uint32_t>(lanes_.size() - 1);
 }
@@ -220,7 +231,7 @@ void SendQueue::retire_front(Lane& lane) {
 
 void SendQueue::activate(uint32_t index) noexcept {
     Lane& lane = lanes_[index];
-    const size_t p = static_cast<size_t>(lane.priority);
+    const size_t p = lane.schedule_class;
     lane.active = true;
     lane.next   = kNone;
     if (ring_tail_[p] == kNone) ring_head_[p] = index;
@@ -229,7 +240,7 @@ void SendQueue::activate(uint32_t index) noexcept {
 }
 
 uint32_t SendQueue::next_lane() noexcept {
-    for (size_t p = 0; p < kPriorityCount; ++p) {
+    for (size_t p = 0; p < kClasses; ++p) {
         const uint32_t index = ring_head_[p];
         if (index == kNone) continue;
         Lane& lane = lanes_[index];

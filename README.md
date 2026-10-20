@@ -436,9 +436,19 @@ keyframe.tag = frame_number + 1;   // any nonzero value of the sender's
 node.send(peer, "video", ByteView(frame), keyframe);
 ```
 
+Live messages leave nearest deadline first — unless they are given ranks: a lower rank goes ahead of a
+higher one whatever their deadlines, so a call's sound need not wait behind a keyframe's few hundred
+packets, nor a keyframe behind the frames that depend on it:
+
+```cpp
+SendOptions sound{100ms};                      // rank 0, the default: first
+SendOptions picture{150ms};
+picture.rank = keyframe ? 1 : 2;               // up to SendOptions::kLiveRanks - 1
+```
+
 From C:
-`rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send. (Tags
-and their outcomes are C++ only for now.)
+`rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send. (Tags,
+their outcomes and ranks are C++ only for now.)
 
 ### 11. Distributed storage (requires `RATS_STORAGE`)
 

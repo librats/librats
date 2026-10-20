@@ -22,8 +22,9 @@
  * another is entitled to have it arrive last, and did before lanes existed.
  *
  * Live messages (SendOptions::lifetime) are the exception, by request: a type's
- * live messages are a lane of their own, scheduled at Priority::Live and outside
- * the order of the type's reliable ones. One whose deadline has passed by the time
+ * live messages of each rank (SendOptions::rank) are a lane of their own,
+ * scheduled at Priority::Live — a lower rank's lanes strictly before a higher
+ * one's — and outside the order of the type's reliable ones. One whose deadline has passed by the time
  * its turn comes is dropped there and then, unsealed — the one point in a byte
  * stream where a message can still vanish without a trace. One sent with a tag
  * leaves word of which it was (take_outcomes): sealed, it is on the stream, as
@@ -91,8 +92,10 @@ public:
     void set_seal_room(size_t bytes) noexcept { seal_room_ = bytes; }
 
     /// Queue one message on its lane: the reliable lane of its type, or — with a
-    /// deadline — the type's live one, where a nonzero `tag` asks for its outcome.
-    void push(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0);
+    /// deadline — the type's live one of `rank` (past the last: the last), where a
+    /// nonzero `tag` asks for its outcome.
+    void push(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0,
+              uint8_t rank = 0);
 
     bool   empty()     const noexcept { return count_ == 0; }
     /// Messages queued.
@@ -121,11 +124,17 @@ public:
 
 private:
     static constexpr uint32_t kNone = UINT32_MAX;
+    /// What lanes are scheduled by: the priorities, with Priority::Live split into
+    /// one class per rank.
+    static constexpr size_t kLiveRanks = SendOptions::kLiveRanks;
+    static constexpr size_t kClasses   = kPriorityCount + kLiveRanks - 1;
 
     struct Lane {
         MessageType        type = MessageType::App;
         bool               live = false;
-        Priority           priority = Priority::Normal;
+        uint8_t            rank = 0;    ///< of a live lane
+        /// Its scheduling class: its priority, or for a live lane its rank's.
+        uint8_t            schedule_class = 0;
         /// Chunks holding this lane's messages, oldest first; in use from `head`.
         std::vector<Bytes> chunks;
         size_t             head   = 0;
@@ -137,14 +146,14 @@ private:
             uint64_t tag = 0;
         };
         RingBuffer<Live>   live_queue;
-        /// Its place in its priority's ring of lanes with something queued.
+        /// Its place in its class's ring of lanes with something queued.
         bool               active = false;
         uint32_t           next   = kNone;
 
         bool empty() const noexcept { return head == chunks.size(); }
     };
 
-    uint32_t lane_for(MessageType type, bool live);     ///< its slot in lanes_, made on first use
+    uint32_t lane_for(MessageType type, bool live, uint8_t rank);   ///< its slot in lanes_, made on first use
     uint8_t* reserve_packed(Lane& lane, size_t bytes);  ///< room at the tail of a pack chunk
     void     retire_front(Lane& lane);   ///< drop a drained pack chunk, pooling it for re-use
     void     next_chunk(Lane& lane) noexcept;   ///< step past a chunk of its own, handed on
@@ -153,16 +162,22 @@ private:
     /// The front of a live lane is sealed (`delivered`) or dropped: off its queue.
     void     settle_live(Lane& lane, bool delivered);
 
-    void     activate(uint32_t index) noexcept;   ///< append to its priority's ring
-    uint32_t next_lane() noexcept;                ///< pop the ring front of the most urgent priority
+    void     activate(uint32_t index) noexcept;   ///< append to its class's ring
+    uint32_t next_lane() noexcept;                ///< pop the ring front of the most urgent class
+
+    static constexpr std::array<uint32_t, kClasses> kNoLanes = [] {
+        std::array<uint32_t, kClasses> rings{};
+        for (uint32_t& ring : rings) ring = kNone;   // fill() is constexpr only from C++20
+        return rings;
+    }();
 
     /// One per type that has ever queued anything here, and one more for each type
-    /// that has queued a live message — a handful, so found by a scan rather than a
-    /// map.
+    /// and rank that has queued a live message — a handful, so found by a scan
+    /// rather than a map.
     std::vector<Lane>                      lanes_;
     uint32_t                               last_ = kNone;  ///< the lane push() last used
-    std::array<uint32_t, kPriorityCount>   ring_head_{kNone, kNone, kNone, kNone, kNone};
-    std::array<uint32_t, kPriorityCount>   ring_tail_{kNone, kNone, kNone, kNone, kNone};
+    std::array<uint32_t, kClasses>         ring_head_ = kNoLanes;
+    std::array<uint32_t, kClasses>         ring_tail_ = kNoLanes;
     size_t                                 seal_room_ = 0;
     size_t                                 count_     = 0;
     size_t                                 bytes_     = 0;

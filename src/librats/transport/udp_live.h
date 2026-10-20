@@ -18,6 +18,11 @@
  * the path never holds anything stale, which is what lets the fresh frame through
  * right after an outage instead of a second's worth of old ones.
  *
+ * Messages leave by rank (SendOptions::rank) and, within a rank, nearest deadline
+ * first (EDF): a call's sound goes ahead of a keyframe sent before it, however
+ * much later its own deadline. Each rank is a queue of its own, by deadline, so
+ * what is due to expire is always at the front of one of them.
+ *
  * A source asking for more than the path carries needs one more judgement, or
  * every message misses: each waits its turn until it is nearly due, starts,
  * and runs out of time half sent (EDF's domino effect under overload). So a
@@ -72,6 +77,7 @@
 #include "librats/transport/udp_wire.h"
 #include "librats/wire/frame.h"
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -94,10 +100,15 @@ public:
     LiveSender(const LiveSender&) = delete;
     LiveSender& operator=(const LiveSender&) = delete;
 
+    /// Ranks of messages, the lowest sent first (SendOptions::rank).
+    static constexpr size_t kRanks = SendOptions::kLiveRanks;
+
     /// Queue `header` + `payload` as one live message, worth delivering until
-    /// `deadline`; a nonzero `tag` asks for its outcome. If kWindow messages are
-    /// already under way, the oldest is given up.
-    void push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag = 0);
+    /// `deadline`, in `rank` (past the last: the last); a nonzero `tag` asks for
+    /// its outcome. If kWindow messages are already under way, the oldest is given
+    /// up.
+    void push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag = 0,
+              uint8_t rank = 0);
 
     /// Drop every message with something still to send that can no longer arrive
     /// in time: its deadline is `one_way` or less from `now` — unless all of it is
@@ -111,9 +122,10 @@ public:
     /// when nothing is waiting to be sent.
     std::optional<Clock::time_point> next_expiry(Clock::duration one_way) const noexcept;
 
-    /// What would go next: from the message whose deadline is nearest, a repair if
-    /// it has one, else what it has not sent yet; with nothing of the kind left, a
-    /// repair symbol, from the message whose deadline is nearest again. `len` is
+    /// What would go next: from the message of the lowest rank whose deadline is
+    /// nearest, a repair if it has one, else what it has not sent yet; with nothing
+    /// of the kind left, a repair symbol, from the message whose deadline is
+    /// nearest whatever its rank. `len` is
     /// all that is available at `offset`; the caller takes what fits — of a repair
     /// symbol, all of it or nothing.
     struct Piece {
@@ -221,18 +233,19 @@ private:
         Clock::time_point deadline{};
         Bytes    data;              ///< the inner message; empty once resolved
         uint64_t tag        = 0;    ///< its outcome is asked for, under this
+        uint8_t  rank       = 0;    ///< below kRanks: which of orders_ it waits in
         uint32_t sent       = 0;    ///< everything below has been sent at least once
         uint32_t lost_bytes = 0;    ///< in `lost`
         RangeSet lost;              ///< to be sent again
         RangeSet acked;
         std::unique_ptr<Coding> coding;   ///< none: not protected
         bool     held    = false;   ///< not yet delivered or given up on
-        bool     queued  = false;   ///< has an entry in order_
+        bool     queued  = false;   ///< has an entry in its rank's order
         bool     decided = false;   ///< protected or not: protect() was called, or it started
     };
-    /// A message with something to send, by deadline. Entries go stale when their
-    /// message stops having anything to send by other means (a late acknowledgement)
-    /// and are dropped as they reach the front.
+    /// A message with something to send, by deadline, in the queue of its rank.
+    /// Entries go stale when their message stops having anything to send by other
+    /// means (a late acknowledgement) and are dropped as they reach the front.
     struct Entry {
         Clock::time_point deadline{};
         uint64_t          id = 0;
@@ -260,13 +273,15 @@ private:
     void           settle() noexcept;
     /// The overload half of expire().
     void           shed(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate);
+    /// The rank whose front is due first; kRanks when none has anything waiting.
+    size_t         first_due() const noexcept;
 
     /// Message base_ + i is messages_[i].
     RingBuffer<Message> messages_;
     uint64_t            base_ = 0;
-    RingBuffer<Entry>   order_;
+    std::array<RingBuffer<Entry>, kRanks> orders_;
     /// Messages with repair symbols still to send, by deadline: what goes once
-    /// nothing in order_ does. Stale entries as in order_.
+    /// nothing in orders_ does, whatever its rank. Stale entries as in orders_.
     RingBuffer<Entry>   repairs_;
     uint64_t            unsent_  = 0;
     uint64_t            parity_  = 0;   ///< bytes of repair symbols still to send
@@ -277,6 +292,7 @@ private:
     uint64_t            unstarted_ = 0;
     uint64_t            parity_sent_ = 0;
     std::vector<LiveOutcome> outcomes_;
+    std::vector<Message*>    shed_scratch_;   ///< shed()'s, kept to spare an allocation
 };
 
 class LiveReceiver {
