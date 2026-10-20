@@ -401,8 +401,10 @@ void BbrController::update_load_rtt() {
 }
 
 void BbrController::update_queue_signals() {
-    // Read only until the pipe is found full, and only off a round trip.
-    if (full_bw_reached_ || ack_rtt_net_ == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)())
+    // Read only until the pipe is found full or while verifying, and only off a
+    // round trip.
+    if ((full_bw_reached_ && !verifying_) || ack_rtt_net_ == (Clock::duration::max)() ||
+        min_rtt_ == (Clock::duration::max)())
         return;
 
     if (now_ - group_start_ > kAckGroup) {
@@ -434,8 +436,11 @@ void BbrController::check_full_bw_reached() {
             standing_since_ = Clock::time_point{};
             return;
         }
+        // The padding filling a queue shows as Startup's does, and ends it before
+        // that queue overflows.
+        const bool rising = group_rises_ >= kVerifyRises && group_rtt_ >= min_rtt_ + burst_bar();
         if (newly_lost_ > 0 || (round_start_ && ++verify_rounds_ > kVerifyRounds) ||
-            now_ - verify_start_ > verify_rtt_ * (kVerifyRounds + 1)) {
+            now_ - verify_start_ > verify_rtt_ * (kVerifyRounds + 1) || rising) {
             end_verify();
             verify_after_ = now_ + kVerifyHold;
             full_bw_now_ = full_bw_reached_ = true;
@@ -1095,7 +1100,20 @@ void BbrController::start_verify() {
     verify_acked_at_ = Clock::time_point{};
     verify_start_    = now_;
     verify_rtt_      = rtt_.srtt;   // a queue was read off it: there is one
+    // The rises counted are the padding's.
+    group_start_    = now_;
+    group_rtt_      = (Clock::duration::max)();
+    prev_group_rtt_ = (Clock::duration::max)();
+    group_rises_    = 0;
     start_round();
+}
+
+uint64_t BbrController::padding_limit() const noexcept {
+    if (!verifying_) return 0;
+    // The flight that delivers the rate that passes, over the round trip the
+    // verification began at.
+    const uint64_t passing = bytes_over(verify_bar_, verify_rtt_);
+    return passing * kVerifyPadding / kUnit + aggregation();
 }
 
 bool BbrController::verified() noexcept {

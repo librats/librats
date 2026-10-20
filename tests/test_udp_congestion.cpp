@@ -1609,6 +1609,73 @@ TEST(BbrTest, ACallOnACleanPathIsNotPadded) {
     EXPECT_EQ(padding, 0u);
 }
 
+// A call sent both ways over 10 Mbit/s: the acknowledgements wait behind the
+// other way's frames and come back in bunches, which opens verifications of the
+// queue each probe builds — and that queue is ours, on a link the two calls
+// nearly fill. Ended only by the loss the padding caused, each verification cost
+// the frames that loss: 472 packets sent again over these eight calls, 48 frames
+// given up each way. Ended as its round trip rises, before the queue overflows:
+// none sent again, 24.
+TEST(BbrTest, AVerificationEndsAsItsQueueRises) {
+    uint64_t expired = 0, back_expired = 0;
+    uint32_t retransmits = 0;
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        SCOPED_TRACE(seed);
+        Sim sim(10, 40ms, 41, 0.0, seed);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        const double weight = 4e6 / 8 * 2 / 64;   // 4 Mbit/s, as Video sizes it
+        for (int frame = 0; frame < 900; ++frame) {   // 30 s
+            const auto size = static_cast<size_t>(frame % 60 == 0 ? 5 * weight : weight);
+            f.tx.send_live(MessageType::App, std::string(size, 'v'), sim.now + 150ms);
+            f.sender().flush(sim.now);
+            f.rx.send_live(MessageType::App, std::string(size, 'w'), sim.now + 150ms);
+            f.receiver().flush(sim.now);
+            sim.run(std::chrono::microseconds(33'333));
+        }
+        expired += f.sender().path_stats().live_expired;
+        back_expired += f.receiver().path_stats().live_expired;
+        retransmits += f.sender().recovery().retransmits();
+    }
+    EXPECT_LT(retransmits, 50u);
+    EXPECT_LT(expired, 36u) << "of 7200 frames";
+    EXPECT_LT(back_expired, 36u) << "of 7200 frames";
+}
+
+// What a verification needs in flight is the rate that passes it over a round
+// trip; on a path that cannot deliver that, the rest of the window is all queue
+// in front of the frames. So padding stops there, short of the window: here a
+// call sized to the estimate on a gigabit whose delay varies 25 ± 10 ms each
+// way, verifying the queue each probe seems to build.
+TEST(BbrTest, AVerificationPadsOnlyWhatItsVerdictNeeds) {
+    size_t padded = 0, short_of_window = 0;
+    for (const uint32_t seed : {1u, 2u, 3u, 4u}) {
+        SCOPED_TRACE(seed);
+        Sim sim(1000, 50ms, 100'000, 0.0, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) d->delay_sd = 10ms;
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.path.hook = [&](Bytes& d, const Address&, bool forward) {
+            if (!forward || !is_padding(d) || bbr(f.sender()).state() != cc::BbrController::State::ProbeBwUp)
+                return false;
+            const auto& cc = f.sender().recovery().congestion();
+            const uint64_t limit = cc.padding_limit();
+            ++padded;
+            EXPECT_LE(f.sender().recovery().bytes_in_flight(), limit);
+            if (limit < cc.cwnd() && cc.cwnd() - limit >= 2 * udp::kMaxDatagram) ++short_of_window;
+            return false;
+        };
+        sim.run(500ms);
+        Video video{sim, f, 1, 150ms};
+        for (int i = 0; i < 300; ++i) {   // 30 s, retargeted every 100 ms
+            const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+            video.mbps = (std::max)(1.0, (std::min)(0.9 * estimate, 8.0));
+            video.play(100ms);
+        }
+    }
+    EXPECT_GT(padded, 0u) << "no verification in a probe";
+    EXPECT_GT(short_of_window, 0u) << "padding ran to the window";
+}
+
 // On 1 Mbit/s a frame is three packets and two acknowledgements, too few for the
 // round trip to rise in. But the queue Startup's bursts build there does not
 // drain before the next frame: it stands, and that ends Startup.

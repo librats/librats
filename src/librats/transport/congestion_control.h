@@ -204,11 +204,12 @@ public:
     /// rather than taken as the path's capacity.
     virtual bool wants_app_limited() const noexcept { return false; }
 
-    /// The controller is verifying whether the path carries more than the
+    /// What may be in flight once padding is counted, 0 for no padding. The
+    /// controller is verifying whether the path carries more than the
     /// application gives it (BBR, bbr.h): while nothing at all is waiting, what
-    /// the pacer and the window allow goes out as padding, so what it measures
-    /// is the path rather than the application.
-    virtual bool wants_padding() const noexcept { return false; }
+    /// the pacer and the window allow goes out as padding up to this much in
+    /// flight, so what it measures is the path rather than the application.
+    virtual uint64_t padding_limit() const noexcept { return 0; }
 
     /// Whether recovery should supplement this controller's window with
     /// proportional rate reduction in recovery (RFC 6937). A window-based

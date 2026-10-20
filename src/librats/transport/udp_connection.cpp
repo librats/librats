@@ -1490,7 +1490,7 @@ void UdpConnection::pump(Clock::time_point now) {
     // not the application's to pad around. A sender that pads has something to
     // send, so what it measures now is the path.
     const bool dry     = !has_sendable_data();
-    const bool padding = dry && waiting == 0 && recovery_.congestion().wants_padding();
+    const bool padding = dry && waiting == 0 && recovery_.congestion().padding_limit() > 0;
     if (padding) pad(now);
     recovery_.note_send_limits(waiting > 0, window_stopped, dry && !padding);
 
@@ -1508,6 +1508,7 @@ void UdpConnection::pad(Clock::time_point now) {
     for (;;) {
         // An unproven peer has earned what it has earned; padding spends none of it.
         if (amplification_room() < kMaxDatagram || !recovery_.cwnd_allows(kMaxDatagram)) return;
+        if (recovery_.bytes_in_flight() + kMaxDatagram > recovery_.congestion().padding_limit()) return;
         if (!recovery_.pace_allows(kMaxDatagram)) {
             recovery_.hold_for_pacer(now, kMaxDatagram);
             return;

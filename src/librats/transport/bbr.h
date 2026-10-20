@@ -103,18 +103,26 @@
  *     delivers no faster than it drains; the radio as fast as it is sent to. So
  *     a standing queue in Startup, and a burst that queued in a probe, start a
  *     verification instead of ending the climb: the sender pads what it sends to
- *     its pacing rate (wants_padding()), with the window over the smoothed round
+ *     its pacing rate (padding_limit()), with the window over the smoothed round
  *     trip as the verification began rather than the one lucky packet the
  *     minimum is on such a path, and reads what the path delivers over a round
  *     trip of acknowledgements. Halfway from the estimate to what it sent, and
  *     the climb goes on — the samples it took raised the estimate; a loss, or
  *     kVerifyRounds short of it, or kVerifyRounds + 1 of the round trip it began
- *     at, and the queue was ours. (Over the smoothed round trip as it went, on a
- *     bottleneck with a deep buffer, the padding's own queue lifted the round
- *     trip, the window grew with it and the queue with that: 50 ms to half a
- *     second before a round ended, the frames behind all of it.) Read by the
- *     round trip alone, a call on 25 ± 10 ms each way at a gigabit stopped at
- *     3 Mbit/s of its 8, a twentieth of its frames late; verified, it gets its 8.
+ *     at, or the round trip rising group after group as Startup's does
+ *     (kVerifyRises), and the queue was ours. (Over the smoothed round trip as
+ *     it went, on a bottleneck with a deep buffer, the padding's own queue
+ *     lifted the round trip, the window grew with it and the queue with that:
+ *     50 ms to half a second before a round ended, the frames behind all of
+ *     it.) It pads only up to a little more than the flight its verdict needs —
+ *     the rate that passes, over that round trip: on a path the video nearly
+ *     fills, what goes past that is all queue, and the loss it ended on was the
+ *     frames'. (Padded to the window and ended only by that loss, a call sent
+ *     both ways over 10 Mbit/s had 0.7% of its frames late, and video to eight
+ *     peers on one uplink 1.3%; bounded so, and ended as its queue rises, 0.2%
+ *     and 0.1%.) Read by the round trip alone, a call on 25 ± 10 ms each way at
+ *     a gigabit stopped at 3 Mbit/s of its 8, a twentieth of its frames late;
+ *     verified, it gets its 8.
  *     A verification is only for a sender the estimate may be holding back — one
  *     that sends at least 1/kVerifyShare of it (a keyframe is several frames,
  *     and must leave in time), not held by its peer (peer_limited) — on a path
@@ -310,12 +318,21 @@ public:
 
     /// Verifying a queue that may be the path's own (see "Flows that do not
     /// fill the pipe"): only for a sender that sent at least 1/kVerifyShare of the
-    /// estimate over the last one to two kAppRateSlot; failed after kVerifyRounds
-    /// rounds, or kVerifyRounds + 1 of the round trip it began at, without
-    /// passing; and once failed, none for kVerifyHold.
+    /// estimate over the last one to two kAppRateSlot; padded up to kVerifyPadding
+    /// (in kUnit) of the flight that passes it, with room for aggregation; failed
+    /// after kVerifyRounds rounds, or kVerifyRounds + 1 of the round trip it began
+    /// at, without passing, or once the round trip has risen kVerifyRises groups
+    /// in a row, past burst_bar() over the minimum; and once failed, none for
+    /// kVerifyHold.
+    /// More rises than Startup's kQueueRises: padding on a path whose delay varies
+    /// as netem's normal jitter does lines six of them up by chance, a few times
+    /// in a hundred calls — each a verification failed, and a climb held for
+    /// kVerifyHold (25 ± 15 ms each way: 2.3% of the frames late, 2.8% with six).
     static constexpr uint64_t                  kVerifyShare = 4;
     static constexpr std::chrono::milliseconds kAppRateSlot{500};
+    static constexpr uint64_t                  kVerifyPadding = 1250;
     static constexpr int                       kVerifyRounds = 2;
+    static constexpr int                       kVerifyRises  = 8;
     static constexpr std::chrono::seconds      kVerifyHold{30};
 
     /// Rounds after its last app-limited sample a sender still counts as one that
@@ -355,7 +372,7 @@ public:
     bool on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight, bool has_data,
                              bool app_limited) override;
     bool wants_app_limited() const noexcept override { return state_ == State::ProbeRtt; }
-    bool wants_padding() const noexcept override { return verifying_; }
+    uint64_t padding_limit() const noexcept override;
     uint64_t bandwidth() const noexcept override { return bw_; }
 
     // — diagnostics (tests, benchmarks) —
@@ -624,7 +641,8 @@ private:
     bool     full_bw_now_     = false;
     bool     full_bw_reached_ = false;
     /// Startup's reading of the round trip (startup_rising, startup_standing),
-    /// kept until the pipe is found full: the group of acknowledgements open since
+    /// kept until the pipe is found full, and a verification's, read afresh from
+    /// its start (kVerifyRises): the group of acknowledgements open since
     /// group_start_, the smallest round trip of it and of the group before, and
     /// how many groups in a row have each been above the one before; and since
     /// when every round trip has stood kStandingBar over the minimum (the epoch:
