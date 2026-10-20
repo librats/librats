@@ -261,11 +261,12 @@ void Reactor::close_conn(ConnId id, CloseReason reason, bool spare_established) 
     });
 }
 
-void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload, Deadline deadline) {
-    execute([this, header, payload = std::move(payload), deadline] {
+void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload, Deadline deadline,
+                        uint64_t tag) {
+    execute([this, header, payload = std::move(payload), deadline, tag] {
         for (auto& [id, conn] : conns_) {
             if (conn->state() == ConnState::Established)
-                conn->send(header, ByteView(*payload), deadline);
+                conn->send(header, ByteView(*payload), deadline, tag);
         }
     });
 }

@@ -308,9 +308,13 @@ public:
     /// Queue one message on its lane. False, queueing nothing, unless established.
     bool send_message(FrameHeader header, ByteView payload);
     /// Queue one live message, worth delivering until `deadline`; its payload is no
-    /// larger than SendOptions::kMaxLivePayload. False, queueing nothing, unless
-    /// established.
-    bool send_live(FrameHeader header, ByteView payload, Clock::time_point deadline);
+    /// larger than SendOptions::kMaxLivePayload, and a nonzero `tag` asks for its
+    /// outcome (take_live_outcomes). False, queueing nothing, unless established.
+    bool send_live(FrameHeader header, ByteView payload, Clock::time_point deadline,
+                   uint64_t tag = 0);
+    /// What became of the tagged live messages settled since the last take. Their
+    /// arrival raises PollIn, as a message's does.
+    std::vector<LiveOutcome> take_live_outcomes() noexcept { return live_send_.take_outcomes(); }
 
     /// Send what the windows and the pacer allow.
     void flush(Clock::time_point now);

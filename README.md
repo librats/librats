@@ -423,8 +423,22 @@ fresh frames after a loss burst or an outage. A source asking for more than the 
 frames, not every frame half sent: one that has not started and could no longer leave in time behind
 what is queued ahead of it is dropped before it costs anything. Over TCP the same call drops a message
 that expires before it is sealed. `PathStats::live_sent` / `live_expired` say how many the sender had to
-drop. From C:
-`rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send.
+drop. To hear what became of one in particular, give it a tag: the sender is told the moment it is
+delivered (acknowledged; over TCP, written to the stream) or given up on — sooner than the receiver could
+say, and for one dropped before a byte of it left, the only word there is:
+
+```cpp
+node.on_live_outcome(MessageType::App, [](const Peer& peer, uint64_t tag, bool delivered) {
+    if (!delivered) { /* frame `tag` never reached `peer`: send it a keyframe */ }
+});
+SendOptions keyframe{150ms};
+keyframe.tag = frame_number + 1;   // any nonzero value of the sender's
+node.send(peer, "video", ByteView(frame), keyframe);
+```
+
+From C:
+`rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send. (Tags
+and their outcomes are C++ only for now.)
 
 ### 11. Distributed storage (requires `RATS_STORAGE`)
 
@@ -497,6 +511,7 @@ void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
 void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&, CloseReason)
 void on_peer_writable(PeerEventHandler cb);      // (const Peer&) — room again
 void on_peer_path(PeerPathHandler cb);           // (const Peer&, const PathStats&) — see Path statistics
+void on_live_outcome(MessageType type, LiveOutcomeHandler cb);  // (const Peer&, tag, delivered) — see Live messages
 void on_dial_failed(DialFailedHandler cb);       // (const Address&) — a connect() that never came up
 void on(std::string_view channel, MessageRouter::Handler cb);  // (const Peer&, ByteView)
 

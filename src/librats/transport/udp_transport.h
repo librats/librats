@@ -51,7 +51,7 @@ public:
     CloseReason error_reason() const override;
 
     size_t max_payload() const noexcept override;
-    bool   send(FrameHeader header, ByteView payload, Deadline deadline) override;
+    bool   send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag = 0) override;
     bool   flush() override;
     size_t backlog() const noexcept override;
 
@@ -65,6 +65,8 @@ private:
     /// Tell the sink what the handshake has done since it last heard. False once
     /// the connection is dead.
     bool report_progress();
+    /// Tell the sink what became of the tagged live messages settled since.
+    void report_outcomes();
 
     UdpMux&        mux_;
     UdpConnection& conn_;

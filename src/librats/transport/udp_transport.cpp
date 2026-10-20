@@ -37,6 +37,11 @@ bool UdpTransport::report_progress() {
     return !conn_.dead();
 }
 
+void UdpTransport::report_outcomes() {
+    if (!told_established_) return;
+    for (const LiveOutcome& outcome : conn_.take_live_outcomes()) sink_->transport_live_outcome(outcome);
+}
+
 bool UdpTransport::start() {
     // An accepted connection: the Initial is in, and with the plaintext handshake
     // so is everything else.
@@ -46,6 +51,7 @@ bool UdpTransport::start() {
 bool UdpTransport::on_readable() {
     report_progress();
     if (told_established_ && conn_.take_moved()) sink_->transport_moved();
+    report_outcomes();
     if (told_established_) {
         bool more = true;
         if (!conn_.deliver(Clock::now(), [&](const Frame& frame) {
@@ -66,6 +72,7 @@ bool UdpTransport::on_readable() {
 bool UdpTransport::on_writable() {
     if (!report_progress()) return false;
     conn_.flush(Clock::now());
+    report_outcomes();
     conn_.want_write(conn_.queued_bytes() > 0);
     mux_.touch(conn_);
     return !conn_.dead();
@@ -83,8 +90,8 @@ size_t UdpTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framer::kHeaderSize;
 }
 
-bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline) {
-    const bool queued = is_live(deadline) ? conn_.send_live(header, payload, deadline)
+bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
+    const bool queued = is_live(deadline) ? conn_.send_live(header, payload, deadline, tag)
                                           : conn_.send_message(header, payload);
     if (!queued) return false;
     conn_.want_write(true);
@@ -99,6 +106,7 @@ bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline)
 
 bool UdpTransport::flush() {
     conn_.flush(Clock::now());
+    report_outcomes();
     mux_.touch(conn_);
     return !conn_.dead();
 }

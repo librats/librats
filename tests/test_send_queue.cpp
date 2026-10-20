@@ -290,3 +290,28 @@ TEST(SendQueueTest, AQueueOfOnlyExpiredMessagesSealsNothing) {
     EXPECT_TRUE(out.empty());
     EXPECT_EQ(q.live_expired(), 3u);
 }
+
+// A tagged live message says what became of it: sealed onto the stream, which
+// delivers it unless the connection dies, or dropped as too late. An untagged one,
+// or a reliable one, says nothing.
+TEST(SendQueueTest, ATaggedLiveMessageSaysWhetherItWasSealedOrDropped) {
+    const Deadline now = std::chrono::steady_clock::now();
+    SendQueue q;
+    q.set_seal_room(kPlain.overhead());
+    q.push(lane(MessageType::Media), ByteView(std::string("stale")), now, 7);
+    q.push(lane(MessageType::Media), ByteView(std::string(6000, 'f')), now + std::chrono::seconds(1), 8);
+    q.push(lane(MessageType::Media), ByteView(std::string("untagged")), now + std::chrono::seconds(1));
+    q.push(lane(MessageType::App), ByteView(std::string("reliable")));
+
+    ChainedSendBuffer out;
+    uint64_t nonce = 0;
+    while (q.seal_next(kPlain, nonce, out, now)) ++nonce;
+    const auto outcomes = q.take_outcomes();
+    ASSERT_EQ(outcomes.size(), 2u);
+    EXPECT_EQ(outcomes[0].type, MessageType::Media);
+    EXPECT_EQ(outcomes[0].tag, 7u);
+    EXPECT_FALSE(outcomes[0].delivered);
+    EXPECT_EQ(outcomes[1].tag, 8u);
+    EXPECT_TRUE(outcomes[1].delivered);
+    EXPECT_TRUE(q.take_outcomes().empty()) << "an outcome was told twice";
+}

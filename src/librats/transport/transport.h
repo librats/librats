@@ -60,6 +60,11 @@ public:
     /// proven at a new address, or it sees us at one (udp_connection.h,
     /// "Migration"). What either side observed of the other's address is stale.
     virtual void transport_moved() {}
+
+    /// What became of a live message sent with a tag. Reported from on_readable(),
+    /// on_writable() or flush() — never from inside send(), which whoever hears
+    /// of it may well call.
+    virtual void transport_live_outcome(const LiveOutcome& /*outcome*/) {}
 };
 
 class Transport {
@@ -115,7 +120,8 @@ public:
     /// that is the only thing ever dropped. May write at once when enough is queued
     /// that waiting for the end of the reactor turn would only cost memory — which
     /// is the one way it can fail: false means that write broke the transport.
-    virtual bool send(FrameHeader header, ByteView payload, Deadline deadline) = 0;
+    /// A live message with a nonzero `tag` has its outcome reported to the sink.
+    virtual bool send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag = 0) = 0;
 
     /// Write out what is queued, as far as the path will take it. Called by the
     /// reactor at the end of every turn that queued something.

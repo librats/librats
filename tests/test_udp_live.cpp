@@ -9,6 +9,7 @@
 
 #include "udp_test_net.h"
 
+#include "librats/core/io_poller.h"   // PollIn
 #include "librats/transport/udp_live.h"
 
 #include <algorithm>
@@ -239,6 +240,44 @@ TEST(LiveSenderTest, AFullWindowGivesUpTheOldest) {
     ASSERT_EQ(pieces.size(), LiveSender::kWindow);
     EXPECT_EQ(pieces.front().id, 3u);
     EXPECT_EQ(pieces.back().id, LiveSender::kWindow + 2);
+}
+
+// A tagged message leaves word of what became of it once that is settled —
+// acknowledged, or given up on however that came about — and an untagged one none.
+TEST(LiveSenderTest, ATaggedMessageSaysWhatBecameOfIt) {
+    const cc::PacingRate rate = cc::PacingRate::per_second(100'000);   // 10 KB per 100 ms
+    const auto big = std::string(10'000 - framer::kHeaderSize, 'v');
+    LiveSender s;
+    s.push(FrameHeader{MessageType::Media}, ByteView(std::string("acked")), kT0 + 1s, 1);
+    s.push(FrameHeader{MessageType::Media}, ByteView(std::string("untagged")), kT0 + 1s);
+    s.push(FrameHeader{MessageType::Media}, ByteView(std::string("late")), kT0 + 50ms, 3);
+    drain(s);
+    EXPECT_FALSE(s.has_outcomes()) << "sent is not settled";
+    s.on_acked(0, 0, inner("acked").size());
+    s.on_acked(1, 0, inner("untagged").size());
+    s.on_lost(2, 0, inner("late").size());
+    s.expire(kT0 + 40ms, 10ms);   // too late to send again
+    // Shed under overload: the second of three that cannot all leave in time.
+    s.push(FrameHeader{MessageType::Media}, ByteView(big), kT0 + 150ms, 4);
+    s.push(FrameHeader{MessageType::Media}, ByteView(big), kT0 + 150ms, 5);
+    s.push(FrameHeader{MessageType::Media}, ByteView(big), kT0 + 150ms, 6);
+    s.expire(kT0 + 40ms, 0ms, rate);
+
+    ASSERT_TRUE(s.has_outcomes());
+    const auto outcomes = s.take_outcomes();
+    ASSERT_EQ(outcomes.size(), 3u);
+    EXPECT_EQ(outcomes[0].type, MessageType::Media);
+    EXPECT_EQ(outcomes[0].tag, 1u);
+    EXPECT_TRUE(outcomes[0].delivered);
+    EXPECT_EQ(outcomes[1].tag, 3u);
+    EXPECT_FALSE(outcomes[1].delivered);
+    EXPECT_EQ(outcomes[2].tag, 5u);
+    EXPECT_FALSE(outcomes[2].delivered);
+    EXPECT_FALSE(s.has_outcomes());
+
+    // The connection going away takes what it held with it, untold.
+    s.clear();
+    EXPECT_FALSE(s.has_outcomes());
 }
 
 TEST(LiveSenderTest, AProbeRepeatsOnlyWhatIsStillWorthIt) {
@@ -668,6 +707,46 @@ TEST(UdpLiveTest, WhatCannotMakeItIsDroppedWholeAndNeverDeliveredInPart) {
     // And the connection is none the worse for it.
     send_live(p, "next", 150ms);
     ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }, 200ms));
+}
+
+// The sender hears what became of a tagged message as soon as it knows: one
+// acknowledged, one given up on at its deadline — and is woken for each.
+TEST(UdpLiveTest, TheSenderHearsWhatBecameOfATaggedMessage) {
+    Pair p(false, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    const auto sent = p.now;
+    ASSERT_TRUE(p.a.send_live(MessageType::Media, std::string(5000, 'k'), p.now + 200ms, 0, 41));
+    p.a.conn->flush(p.now);
+    p.a.events = 0;
+    std::vector<LiveOutcome> outcomes;
+    ASSERT_TRUE(p.run_until([&] {
+        for (const LiveOutcome& o : p.a.conn->take_live_outcomes()) outcomes.push_back(o);
+        return !outcomes.empty();
+    }, 1s));
+    EXPECT_NE(p.a.events & PollIn, 0u) << "nothing woke the sender to read it";
+    EXPECT_LT(p.now - sent, 100ms) << "heard of later than the acknowledgement";
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes[0].type, MessageType::Media);
+    EXPECT_EQ(outcomes[0].tag, 41u);
+    EXPECT_TRUE(outcomes[0].delivered);
+    ASSERT_EQ(p.b.messages.size(), 1u);
+
+    // Nothing of the next gets through: given up on once it can no longer arrive.
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        return from == p.a.addr() && carries_live(d);
+    };
+    ASSERT_TRUE(p.a.send_live(MessageType::Media, "lost", p.now + 150ms, 0, 42));
+    p.a.conn->flush(p.now);
+    outcomes.clear();
+    ASSERT_TRUE(p.run_until([&] {
+        for (const LiveOutcome& o : p.a.conn->take_live_outcomes()) outcomes.push_back(o);
+        return !outcomes.empty();
+    }, 1s));
+    ASSERT_EQ(outcomes.size(), 1u);
+    EXPECT_EQ(outcomes[0].tag, 42u);
+    EXPECT_FALSE(outcomes[0].delivered);
+    EXPECT_EQ(p.b.messages.size(), 1u);
 }
 
 TEST(UdpLiveTest, AMessageAlreadyTooLateIsNeverSent) {

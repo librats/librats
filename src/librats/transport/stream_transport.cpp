@@ -178,17 +178,24 @@ size_t StreamTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framing;
 }
 
-bool StreamTransport::send(FrameHeader header, ByteView payload, Deadline deadline) {
-    queue_.push(header, payload, deadline);
+bool StreamTransport::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
+    queue_.push(header, payload, deadline, tag);
 
     // Enough for a write already: send it now rather than hold it to the end of the
     // turn. Not while the link has said it is full, though — its writable event is
     // what will move things on, and a write now would only be refused.
-    if (!want_write_ && queue_.size() + tx_.size() >= kCoalesceLimit) return flush();
+    if (!want_write_ && queue_.size() + tx_.size() >= kCoalesceLimit) return write_out();
     return true;
 }
 
 bool StreamTransport::flush() {
+    const bool ok = write_out();
+    if (ok)
+        for (const LiveOutcome& outcome : queue_.take_outcomes()) sink_->transport_live_outcome(outcome);
+    return ok;
+}
+
+bool StreamTransport::write_out() {
     // What live messages are judged against; the clock is read only if there are any.
     const Deadline now = queue_.has_live() ? std::chrono::steady_clock::now() : Deadline{};
     for (;;) {

@@ -101,10 +101,11 @@ public:
         return conn && conn->send_message(FrameHeader{type, 0, channel}, payload);
     }
 
-    /// A live message, worth delivering until `deadline`.
+    /// A live message, worth delivering until `deadline`; with a `tag`, its
+    /// outcome is asked for.
     bool send_live(MessageType type, const std::string& payload, Clock::time_point deadline,
-                   uint16_t channel = 0) {
-        return conn && conn->send_live(FrameHeader{type, 0, channel}, ByteView(payload), deadline);
+                   uint16_t channel = 0, uint64_t tag = 0) {
+        return conn && conn->send_live(FrameHeader{type, 0, channel}, ByteView(payload), deadline, tag);
     }
 
     bool established() const { return conn && conn->established(); }

@@ -48,6 +48,11 @@
  * the sender stopped repairing it by then — and the memory of what is being put
  * together is charged to the same account a stream's holes are.
  *
+ * A message pushed with a tag (SendOptions::tag) leaves word of what became of
+ * it — delivered or given up on — once that is settled, for the connection to
+ * pass on to whoever sent it. One the connection drops with everything else as
+ * it goes away leaves none.
+ *
  * Message ids count up from 0 on each connection, and both ends agree on a window
  * of them: the sender never sends an id kWindow or more past the oldest message
  * it is still trying to deliver, so the receiver may forget everything kWindow
@@ -72,6 +77,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace librats {
@@ -89,8 +95,9 @@ public:
     LiveSender& operator=(const LiveSender&) = delete;
 
     /// Queue `header` + `payload` as one live message, worth delivering until
-    /// `deadline`. If kWindow messages are already under way, the oldest is given up.
-    void push(FrameHeader header, ByteView payload, Clock::time_point deadline);
+    /// `deadline`; a nonzero `tag` asks for its outcome. If kWindow messages are
+    /// already under way, the oldest is given up.
+    void push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag = 0);
 
     /// Drop every message with something still to send that can no longer arrive
     /// in time: its deadline is `one_way` or less from `now` — unless all of it is
@@ -172,7 +179,12 @@ public:
     /// Bytes of repair symbols sent since the connection opened.
     uint64_t parity_sent() const noexcept { return parity_sent_; }
 
-    /// Drop everything (the connection is gone).
+    /// What became of the tagged messages settled since the last take, in the
+    /// order they were.
+    bool has_outcomes() const noexcept { return !outcomes_.empty(); }
+    std::vector<LiveOutcome> take_outcomes() noexcept { return std::exchange(outcomes_, {}); }
+
+    /// Drop everything (the connection is gone), outcomes not yet taken included.
     void clear();
     /// Give back the memory of an empty queue.
     void release_memory() noexcept;
@@ -208,6 +220,7 @@ private:
     struct Message {
         Clock::time_point deadline{};
         Bytes    data;              ///< the inner message; empty once resolved
+        uint64_t tag        = 0;    ///< its outcome is asked for, under this
         uint32_t sent       = 0;    ///< everything below has been sent at least once
         uint32_t lost_bytes = 0;    ///< in `lost`
         RangeSet lost;              ///< to be sent again
@@ -241,7 +254,7 @@ private:
     void           mark(uint64_t id, Message& m, uint32_t slot, uint8_t to);
     /// Repairs not yet sent will not be: they could only land too late.
     void           drop_parity(uint64_t id, Message& m);
-    /// Stop holding `m`: delivered, or given up on.
+    /// Stop holding `m`: delivered, or given up on — which its outcome says.
     void           resolve(Message& m, bool given_up);
     /// Pop resolved messages off the front, and stale entries off the orders.
     void           settle() noexcept;
@@ -263,6 +276,7 @@ private:
     uint64_t            expired_ = 0;
     uint64_t            unstarted_ = 0;
     uint64_t            parity_sent_ = 0;
+    std::vector<LiveOutcome> outcomes_;
 };
 
 class LiveReceiver {

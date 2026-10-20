@@ -588,3 +588,62 @@ TEST(NodeTest, DualStackListenerAcceptsV4AndV6) {
     clientV4.stop();
     server.stop();
 }
+
+// The sender of a tagged live message hears what became of it, over either
+// transport, at the handlers for its type only; an untagged one is not told of.
+class NodeLiveOutcomeTest : public ::testing::TestWithParam<TransportKind> {};
+
+TEST_P(NodeLiveOutcomeTest, TheSenderHearsATaggedLiveMessageWasDelivered) {
+    NodeConfig sc = server_config();
+    NodeConfig cc = client_config();
+    cc.enable_udp = GetParam() == TransportKind::Udp;
+    cc.enable_tcp = GetParam() == TransportKind::Tcp;
+    cc.preferred_transport = GetParam();
+    Node server(sc);
+    Node client(cc);
+
+    std::atomic<int> received{0};
+    server.on("video", [&](const Peer&, ByteView) { received++; });
+    std::mutex mu;
+    std::vector<std::pair<uint64_t, bool>> outcomes;
+    std::atomic<int> other_type{0};
+    client.on_live_outcome(MessageType::App, [&](const Peer& peer, uint64_t tag, bool delivered) {
+        EXPECT_EQ(peer.id(), server.local_id());
+        std::lock_guard<std::mutex> l(mu);
+        outcomes.emplace_back(tag, delivered);
+    });
+    client.on_live_outcome(MessageType::Media, [&](const Peer&, uint64_t, bool) { other_type++; });
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const auto infos = client.peers();
+    ASSERT_EQ(infos.size(), 1u);
+    ASSERT_EQ(infos[0].transport, GetParam());
+
+    SendOptions tagged;
+    tagged.lifetime = 2s;
+    tagged.tag      = 77;
+    client.send(server.local_id(), "video", ByteView(big_payload(50'000)), tagged);
+    client.send(server.local_id(), "video", ByteView(std::string("untagged")), SendOptions{2s});
+    ASSERT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> l(mu);
+        return !outcomes.empty() && received.load() == 2;
+    }));
+    std::this_thread::sleep_for(50ms);   // nothing more comes
+    {
+        std::lock_guard<std::mutex> l(mu);
+        ASSERT_EQ(outcomes.size(), 1u);
+        EXPECT_EQ(outcomes[0].first, 77u);
+        EXPECT_TRUE(outcomes[0].second);
+    }
+    EXPECT_EQ(other_type.load(), 0);
+
+    client.stop();
+    server.stop();
+}
+
+INSTANTIATE_TEST_SUITE_P(Transport, NodeLiveOutcomeTest,
+                         ::testing::Values(TransportKind::Udp, TransportKind::Tcp),
+                         [](const auto& info) { return std::string(to_string(info.param)); });

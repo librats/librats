@@ -83,7 +83,7 @@ public:
     CloseReason error_reason() const override { return error_; }
 
     size_t max_payload() const noexcept override;
-    bool   send(FrameHeader header, ByteView payload, Deadline deadline) override;
+    bool   send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag = 0) override;
     bool   flush() override;
     size_t backlog() const noexcept override { return queue_.allocated() + tx_.allocated(); }
 
@@ -101,6 +101,9 @@ private:
     bool   deliver(uint8_t* body, size_t size);  ///< open in place, parse, hand to the sink
     void   queue_handshake(const Bytes& message);
     void   arm_write(bool on);
+    /// Seal and write what the link takes. flush() less telling the sink what
+    /// became of tagged live messages, which send() must not.
+    bool   write_out();
     bool   fail(CloseReason reason);   ///< record why, return false
 
     std::unique_ptr<Link> link_;

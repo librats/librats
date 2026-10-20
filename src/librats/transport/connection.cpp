@@ -41,7 +41,7 @@ PathStats Connection::sample_path() {
 
 // ── Outbound application frames ─────────────────────────────────────────────
 
-bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline) {
+bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
     if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
 
     // A live message is only ever delivered whole, so the receiver holds all of one
@@ -89,7 +89,7 @@ bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline) {
         return false;
     }
 
-    if (!transport_->send(header, payload, deadline)) {
+    if (!transport_->send(header, payload, deadline, tag)) {
         fail(transport_->error_reason());
         reactor_.close(id_, close_reason_);
         return false;
@@ -183,6 +183,10 @@ bool Connection::transport_frame(const Frame& frame) {
 
 void Connection::transport_moved() {
     if (state_ == ConnState::Established) delegate_.on_moved(*this);
+}
+
+void Connection::transport_live_outcome(const LiveOutcome& outcome) {
+    if (state_ == ConnState::Established) delegate_.on_live_outcome(*this, outcome);
 }
 
 // ── Teardown ────────────────────────────────────────────────────────────────

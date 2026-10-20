@@ -25,7 +25,9 @@
  * live messages are a lane of their own, scheduled at Priority::Live and outside
  * the order of the type's reliable ones. One whose deadline has passed by the time
  * its turn comes is dropped there and then, unsealed — the one point in a byte
- * stream where a message can still vanish without a trace.
+ * stream where a message can still vanish without a trace. One sent with a tag
+ * leaves word of which it was (take_outcomes): sealed, it is on the stream, as
+ * good as delivered; dropped, given up on.
  *
  * What makes the scheduling worth anything is *when* a message is sealed. A
  * stream's nonces run in lockstep at both ends, so a message encrypted early can
@@ -56,6 +58,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace librats {
@@ -88,8 +91,8 @@ public:
     void set_seal_room(size_t bytes) noexcept { seal_room_ = bytes; }
 
     /// Queue one message on its lane: the reliable lane of its type, or — with a
-    /// deadline — the type's live one.
-    void push(FrameHeader header, ByteView payload, Deadline deadline = {});
+    /// deadline — the type's live one, where a nonzero `tag` asks for its outcome.
+    void push(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0);
 
     bool   empty()     const noexcept { return count_ == 0; }
     /// Messages queued.
@@ -112,6 +115,10 @@ public:
     uint64_t live_sent()    const noexcept { return live_sent_; }
     uint64_t live_expired() const noexcept { return live_expired_; }
 
+    /// What became of the tagged live messages sealed or dropped since the last
+    /// take, in the order they were.
+    std::vector<LiveOutcome> take_outcomes() noexcept { return std::exchange(outcomes_, {}); }
+
 private:
     static constexpr uint32_t kNone = UINT32_MAX;
 
@@ -124,8 +131,12 @@ private:
         size_t             head   = 0;
         size_t             offset = 0;      ///< read position in chunks[head]
         bool               tail_packs = false;  ///< chunks.back() takes small messages
-        /// A live lane: each queued message's deadline, in queue order.
-        RingBuffer<Deadline> deadlines;
+        /// A live lane: each queued message's deadline and tag, in queue order.
+        struct Live {
+            Deadline deadline{};
+            uint64_t tag = 0;
+        };
+        RingBuffer<Live>   live_queue;
         /// Its place in its priority's ring of lanes with something queued.
         bool               active = false;
         uint32_t           next   = kNone;
@@ -139,6 +150,8 @@ private:
     void     next_chunk(Lane& lane) noexcept;   ///< step past a chunk of its own, handed on
     void     seal_front(Lane& lane, const Session& session, uint64_t nonce, ChainedSendBuffer& out);
     void     drop_front(Lane& lane);     ///< an expired live message, never sealed
+    /// The front of a live lane is sealed (`delivered`) or dropped: off its queue.
+    void     settle_live(Lane& lane, bool delivered);
 
     void     activate(uint32_t index) noexcept;   ///< append to its priority's ring
     uint32_t next_lane() noexcept;                ///< pop the ring front of the most urgent priority
@@ -157,6 +170,7 @@ private:
     size_t                                 live_queued_  = 0;
     uint64_t                               live_sent_    = 0;
     uint64_t                               live_expired_ = 0;
+    std::vector<LiveOutcome>               outcomes_;
 };
 
 } // namespace librats

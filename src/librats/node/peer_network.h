@@ -43,6 +43,9 @@ public:
     using PeerDisconnectHandler  = std::function<void(const PeerId&, CloseReason)>;
     using DialFailedHandler      = std::function<void(const Address&)>;
     using PeerPathHandler        = std::function<void(const Peer&, const PathStats&)>;
+    /// What became of a live message sent with a tag: delivered, or given up on
+    /// (see LiveOutcome).
+    using LiveOutcomeHandler     = std::function<void(const Peer&, uint64_t tag, bool delivered)>;
 
     virtual const PeerId&       local_id() const = 0;
     virtual uint16_t            listen_port() const = 0;     ///< our advertised listen port (shared by both transports)
@@ -101,6 +104,14 @@ public:
     /// The latest path sample for a peer, from any thread; nullopt if the peer is
     /// not connected, sampling is off, or no sample has been taken yet.
     virtual std::optional<PathStats> path_stats(const PeerId& /*id*/) const { return std::nullopt; }
+    /// What becomes of each live message of `type` sent with a tag
+    /// (SendOptions::tag), once per peer it went to: the moment it is delivered or
+    /// given up on, as far as the sender can tell — sooner than a receiver could
+    /// say, and for a message given up on before a byte of it left, the only word
+    /// there is. Nothing for a message to a peer that disconnects first. Runs on
+    /// a reactor thread; register before start(). Default: not offered (nothing
+    /// is reported).
+    virtual void on_live_outcome(MessageType /*type*/, LiveOutcomeHandler /*handler*/) {}
 };
 
 struct NodeContext;  // node/node_context.h — bundles network + events + services

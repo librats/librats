@@ -22,7 +22,7 @@ uint64_t covered(const RangeSet& set, uint64_t lo, uint64_t hi) {
 
 // ── LiveSender ──────────────────────────────────────────────────────────────
 
-void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point deadline) {
+void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point deadline, uint64_t tag) {
     // The window is full: the oldest message under way gives way to the newest.
     // Its id may not be outrun further, or the receiver would forget it (see the
     // file comment), and of the two the older is the one less worth having.
@@ -37,6 +37,7 @@ void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point de
     m.data.resize(framer::kHeaderSize);
     framer::encode_header(m.data.data(), header);
     m.data.insert(m.data.end(), payload.begin(), payload.end());
+    m.tag  = tag;
     m.held = true;
 
     const uint64_t id = base_ + messages_.size();
@@ -82,12 +83,15 @@ void LiveSender::resolve(Message& m, bool given_up) {
         ++expired_;
         if (m.sent == 0) ++unstarted_;
     }
+    if (m.tag != 0)
+        outcomes_.push_back(LiveOutcome{static_cast<MessageType>(m.data[0]), m.tag, !given_up});
     --held_;
     // Freed now rather than when the slot is reused: a ring keeps what it pops.
     m.held       = false;
     m.data       = Bytes();
     m.sent       = 0;
     m.lost_bytes = 0;
+    m.tag        = 0;
     m.lost       = RangeSet();
     m.acked      = RangeSet();
     m.coding.reset();
@@ -395,6 +399,7 @@ void LiveSender::clear() {
     repairs_  = RingBuffer<Entry>();
     unsent_   = parity_ = lost_ = 0;
     held_     = 0;
+    outcomes_.clear();
 }
 
 void LiveSender::release_memory() noexcept {

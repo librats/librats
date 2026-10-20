@@ -82,6 +82,11 @@ public:
     /// Default: ignore.
     virtual void on_moved(Connection& /*conn*/) {}
 
+    /// What became of a live message sent on an established connection with a
+    /// tag (send()). Runs on the reactor thread, never from inside send(), so a
+    /// handler may send. Default: ignore.
+    virtual void on_live_outcome(Connection& /*conn*/, const LiveOutcome& /*outcome*/) {}
+
     /// An outbound dial died before there was ever a Connection to report it on —
     /// an unresolvable host, no route, no socket. Without this a dial policy that
     /// reserved the ConnId (see Reactor::connect) would wait out a timeout for an
@@ -144,14 +149,15 @@ public:
     /// With a `deadline` the message is live instead (see SendOptions): ordered
     /// with nothing, dropped by the transport once it can no longer arrive in time,
     /// and refused if its payload is past SendOptions::kMaxLivePayload. It weighs
-    /// on the marks below like any other until it is sent or dropped.
+    /// on the marks below like any other until it is sent or dropped. A nonzero
+    /// `tag` asks for its outcome (ConnectionDelegate::on_live_outcome).
     ///
     /// @return whether there is still room for more. False means the queue is
     ///         past its low-water mark — this frame is queued like any other,
     ///         nothing is dropped, but the caller should stop and wait for
     ///         ConnectionDelegate::on_writable_changed rather than keep piling on
     ///         until the connection is dropped as a slow consumer.
-    bool send(FrameHeader header, ByteView payload, Deadline deadline = {});
+    bool send(FrameHeader header, ByteView payload, Deadline deadline = {}, uint64_t tag = 0);
 
     /// Convenience: send raw bytes on an application channel.
     bool send(uint16_t channel, ByteView payload) {
@@ -260,6 +266,7 @@ private:
     void transport_established(const PeerId& remote) override;
     bool transport_frame(const Frame& frame) override;
     void transport_moved() override;
+    void transport_live_outcome(const LiveOutcome& outcome) override;
 
     /// A transport entry point returned `ok`; turn a failure into teardown, and
     /// tell a stopped caller if the call let the queue drain.

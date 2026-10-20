@@ -556,6 +556,10 @@ Deadline deadline_of(const SendOptions& options) {
     return std::chrono::steady_clock::now() + (std::min)(options.lifetime, SendOptions::kMaxLifetime);
 }
 
+/// The tag a message sent with `options` reports its outcome under; none for a
+/// reliable one.
+uint64_t tag_of(const SendOptions& options) { return options.live() ? options.tag : 0; }
+
 } // namespace
 
 bool Node::send(const PeerId& to, std::string_view channel, ByteView payload, SendOptions options) {
@@ -578,14 +582,16 @@ bool Node::send_to(const PeerId& to, FrameHeader header, ByteView payload, SendO
     // what the reactor has managed to look at so far.
     const size_t in_transit =
         dest->owed->fetch_add(payload.size(), std::memory_order_relaxed) + payload.size();
-    route_send(dest->route, header, payload.to_bytes(), deadline_of(options), dest->owed);
+    route_send(dest->route, header, payload.to_bytes(), deadline_of(options), tag_of(options),
+               dest->owed);
     return dest->writable && in_transit <= send_low_water();
 }
 
 bool Node::broadcast_all(FrameHeader header, ByteView payload, SendOptions options) {
     auto data = std::make_shared<const Bytes>(payload.to_bytes());
     const Deadline deadline = deadline_of(options);
-    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data, deadline); });
+    const uint64_t tag = tag_of(options);
+    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data, deadline, tag); });
     return peers_.all_writable();
 }
 
@@ -621,12 +627,12 @@ std::vector<PeerId> Node::connected_peers() const {
 // ── Routed send/close (used by Node and Peer) ───────────────────────────────
 
 void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadline deadline,
-                      std::shared_ptr<std::atomic<size_t>> owed) {
+                      uint64_t tag, std::shared_ptr<std::atomic<size_t>> owed) {
     Reactor& reactor = reactors_->by_index(route.reactor);
     ConnId conn = route.conn;
     auto data = std::make_shared<Bytes>(std::move(payload));
     const size_t weight = data->size();
-    reactor.execute([&reactor, conn, header, data, deadline, owed, weight] {
+    reactor.execute([&reactor, conn, header, data, deadline, tag, owed, weight] {
         // Discharged whether or not the connection is still there, and *before*
         // the frame is queued rather than after: from here on these bytes are
         // counted by the send queue instead, and the connection weighs both
@@ -634,7 +640,7 @@ void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadli
         // window where they were counted twice — and, worse, one where they were
         // counted by neither, which is what an opening must never be reported on.
         if (owed) owed->fetch_sub(weight, std::memory_order_relaxed);
-        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data), deadline);
+        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data), deadline, tag);
     });
 }
 
@@ -809,6 +815,14 @@ void Node::on_path_sample(Connection& conn, const PathStats& stats) {
     if (!peers_.set_path(conn.remote_id(), route, stats) || peer_path_.empty()) return;
     Peer handle = make_peer(conn.remote_id(), route);
     for (auto& cb : peer_path_) cb(handle, stats);
+}
+
+void Node::on_live_outcome(Connection& conn, const LiveOutcome& outcome) {
+    if (conn.remote_id().is_zero()) return;
+    // Whichever of a peer's links the message went on: it was sent to the peer.
+    Peer handle = make_peer(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()});
+    for (auto& [type, cb] : live_outcome_)
+        if (type == outcome.type) cb(handle, outcome.tag, outcome.delivered);
 }
 
 void Node::on_moved(Connection& conn) {

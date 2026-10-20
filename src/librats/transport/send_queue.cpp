@@ -47,7 +47,7 @@ void SendQueue::release_pooled_chunks() {
     pool = nullptr;
 }
 
-void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline) {
+void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline, uint64_t tag) {
     const bool live = is_live(deadline);
     const uint32_t index = lane_for(header.type, live);
     Lane& lane = lanes_[index];
@@ -75,7 +75,7 @@ void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline) {
         std::memcpy(record + kRecordHeader + framer::kHeaderSize, payload.data(), payload.size());
 
     if (live) {
-        lane.deadlines.push_back(deadline);
+        lane.live_queue.push_back(Lane::Live{deadline, tag});
         ++live_queued_;
         ++live_sent_;
     }
@@ -91,7 +91,7 @@ bool SendQueue::seal_next(const Session& session, uint64_t nonce, ChainedSendBuf
         // What can no longer arrive in time goes now, before it costs a nonce and
         // a place on the wire.
         if (lane.live)
-            while (!lane.empty() && lane.deadlines.front() <= now) drop_front(lane);
+            while (!lane.empty() && lane.live_queue.front().deadline <= now) drop_front(lane);
         if (lane.empty()) continue;   // and out of its ring: next_lane() took it off
         seal_front(lane, session, nonce, out);
         // Back of its ring, behind the other lanes of its priority: that is the turn-
@@ -131,10 +131,7 @@ void SendQueue::seal_front(Lane& lane, const Session& session, uint64_t nonce, C
         if (lane.offset == chunk.size()) retire_front(lane);
     }
 
-    if (lane.live) {
-        lane.deadlines.pop_front();
-        --live_queued_;
-    }
+    if (lane.live) settle_live(lane, /*delivered=*/true);
     --count_;
     bytes_ -= inner;
 }
@@ -154,11 +151,17 @@ void SendQueue::drop_front(Lane& lane) {
         if (lane.offset == chunk.size()) retire_front(lane);
     }
 
-    lane.deadlines.pop_front();
-    --live_queued_;
+    settle_live(lane, /*delivered=*/false);
     ++live_expired_;
     --count_;
     bytes_ -= inner;
+}
+
+void SendQueue::settle_live(Lane& lane, bool delivered) {
+    const uint64_t tag = lane.live_queue.front().tag;
+    if (tag != 0) outcomes_.push_back(LiveOutcome{lane.type, tag, delivered});
+    lane.live_queue.pop_front();
+    --live_queued_;
 }
 
 void SendQueue::next_chunk(Lane& lane) noexcept {

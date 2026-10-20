@@ -263,6 +263,12 @@ public:
     /// NodeConfig::path_sample_ms (100 ms if that is 0). The handler runs on a
     /// reactor thread, once per peer per interval, so keep it cheap.
     void on_peer_path(PeerNetwork::PeerPathHandler cb) override { peer_path_.push_back(std::move(cb)); }
+    /// Subscribe to what becomes of the live messages of `type` sent with a tag
+    /// (SendOptions::tag): delivered, or given up on. The handler runs on a
+    /// reactor thread, once per tagged message per peer it went to.
+    void on_live_outcome(MessageType type, PeerNetwork::LiveOutcomeHandler cb) override {
+        live_outcome_.emplace_back(type, std::move(cb));
+    }
     /// The latest path sample for a peer — safe from any thread. nullopt when the
     /// peer is not connected, no sample has been taken yet, or sampling is off
     /// (NodeConfig::path_sample_ms == 0 and no on_peer_path handler).
@@ -301,6 +307,7 @@ private:
     void on_writable_changed(Connection& conn, bool writable) override;
     void on_path_sample(Connection& conn, const PathStats& stats) override;
     void on_moved(Connection& conn) override;
+    void on_live_outcome(Connection& conn, const LiveOutcome& outcome) override;
     void on_dial_aborted(uint8_t reactor_index, ConnId id,
                          const std::string& host, uint16_t port) override;
 
@@ -316,7 +323,7 @@ private:
     /// Queue one message on a peer's route, from any thread: `owed` is the peer's
     /// in-transit counter, already charged for it.
     void route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadline deadline,
-                    std::shared_ptr<std::atomic<size_t>> owed);
+                    uint64_t tag, std::shared_ptr<std::atomic<size_t>> owed);
     /// The send behind both public overloads.
     bool send_to(const PeerId& to, FrameHeader header, ByteView payload, SendOptions options);
     bool broadcast_all(FrameHeader header, ByteView payload, SendOptions options);
@@ -375,6 +382,7 @@ private:
     std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
     std::vector<PeerNetwork::PeerEventHandler>      peer_writable_;
     std::vector<PeerNetwork::PeerPathHandler>       peer_path_;
+    std::vector<std::pair<MessageType, PeerNetwork::LiveOutcomeHandler>> live_outcome_;
 
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;

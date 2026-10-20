@@ -104,7 +104,9 @@ struct DialProfile {
 /// frames through a queue that a burst or an outage has filled.
 ///
 /// The receiving side needs nothing: a live message arrives at the same handler
-/// as any other on its channel.
+/// as any other on its channel. The sending side may ask to hear what became of
+/// one (`tag`): a keyframe that a joining viewer cannot start without is worth
+/// sending again the moment it is given up on — and not before.
 struct SendOptions {
     /// Longest lifetime a live message may have; a longer one is shortened to it.
     /// Past this a message is not live, it is late.
@@ -117,6 +119,10 @@ struct SendOptions {
 
     /// Zero (or less): reliable. Otherwise live, for this long from the call.
     std::chrono::milliseconds lifetime{0};
+    /// Nonzero: report what becomes of this live message — delivered, or given up
+    /// on — under this tag, to PeerNetwork::on_live_outcome. Ignored for a
+    /// reliable one, which is never given up on.
+    uint64_t tag = 0;
 
     bool live() const noexcept { return lifetime.count() > 0; }
 };

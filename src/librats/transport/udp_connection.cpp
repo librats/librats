@@ -1594,9 +1594,10 @@ bool UdpConnection::send_message(FrameHeader header, ByteView payload) {
     return true;
 }
 
-bool UdpConnection::send_live(FrameHeader header, ByteView payload, Clock::time_point deadline) {
+bool UdpConnection::send_live(FrameHeader header, ByteView payload, Clock::time_point deadline,
+                              uint64_t tag) {
     if (!established() || closing_) return false;
-    live_send_.push(header, payload, deadline);
+    live_send_.push(header, payload, deadline, tag);
     return true;
 }
 
@@ -1842,6 +1843,12 @@ void UdpConnection::die(CloseReason reason, bool keep_inbox) {
 }
 
 void UdpConnection::flush_events() {
+    // Settled where acknowledgements and deadlines are handled, read where
+    // messages are: by the transport, on PollIn — unless nobody reads any more.
+    if (live_send_.has_outcomes()) {
+        if (reading_) raise(PollIn);
+        else          live_send_.take_outcomes();
+    }
     if (events_ == 0) return;
     const uint32_t events = events_;
     events_ = 0;

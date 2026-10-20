@@ -63,6 +63,17 @@ struct Frame {
     ByteView    payload;
 };
 
+/// What became of a live message sent with a tag (SendOptions::tag), as far as
+/// its sender can tell. Delivered: every piece of it acknowledged, or enough of
+/// them for the receiver to rebuild the rest — over a byte stream, written to
+/// it. Given up on: its lifetime ran out first. One with a piece taken for lost
+/// that was only late may have arrived all the same.
+struct LiveOutcome {
+    MessageType type      = MessageType::App;
+    uint64_t    tag       = 0;
+    bool        delivered = false;
+};
+
 namespace framer {
 
 constexpr size_t   kLengthPrefixSize = 4;
