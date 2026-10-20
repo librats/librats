@@ -1022,6 +1022,21 @@ Clock::duration UdpConnection::one_way() const noexcept {
     return rtt.have_rtt ? rtt.srtt / 2 : Clock::duration::zero();
 }
 
+void UdpConnection::expire_live(Clock::time_point now) {
+    // Nothing goes out that can no longer arrive in time, and while something
+    // still can, a path gone quiet is probed without backing off.
+    const uint64_t unstarted = live_send_.unstarted();
+    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
+    recovery_.set_impatient(live_send_.has_pending());
+    // A message given up before any of it went was judged by the round trip
+    // alone, and with nothing in flight no round trip comes back to correct it.
+    // Once a queue since drained — a burst into a deep buffer — lifted the
+    // estimate past twice a message's lifetime, every message after was given up
+    // unsent, for good: a call silent for the rest of its life on a path back at
+    // 40 ms. A PING brings back the round trip that ends it.
+    if (live_send_.unstarted() != unstarted && recovery_.bytes_in_flight() == 0) ping_owed_ = true;
+}
+
 size_t UdpConnection::estimate_packet(Clock::time_point now) const noexcept {
     // What the next packet will weigh, so the window and the pacer are asked about
     // the packet actually going out: a small message must not wait for the tokens
@@ -1435,10 +1450,7 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end, Clock::time_point
 void UdpConnection::pump(Clock::time_point now) {
     // A responder says nothing before its answer to the Initial is out.
     if (!established() || (role_ == ConnRole::Inbound && !answered_)) return;
-    // Nothing goes out that can no longer arrive in time, and while something
-    // still can, a path gone quiet is probed without backing off.
-    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
-    recovery_.set_impatient(live_send_.has_pending());
+    expire_live(now);
     const size_t queued_before = queued_bytes();
     recovery_.begin_sending(now, has_sendable_data());
     recovery_.clear_pacer_hold();
@@ -1707,8 +1719,7 @@ void UdpConnection::tick(Clock::time_point now) {
         recv_window_ = initial_window_;
     live_recv_.expire(now, account_);
 
-    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
-    recovery_.set_impatient(live_send_.has_pending());
+    expire_live(now);
     switch (recovery_.on_timer(now, *this)) {
         case Recovery::Timeout::Probe:
             send_probe(now);

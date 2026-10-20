@@ -167,6 +167,8 @@ public:
     /// Messages pushed, and messages given up on, since the connection opened.
     uint64_t sent()    const noexcept { return sent_; }
     uint64_t expired() const noexcept { return expired_; }
+    /// Of those, the ones given up before a byte of them went.
+    uint64_t unstarted() const noexcept { return unstarted_; }
     /// Bytes of repair symbols sent since the connection opened.
     uint64_t parity_sent() const noexcept { return parity_sent_; }
 
@@ -259,6 +261,7 @@ private:
     size_t              held_    = 0;   ///< messages still held
     uint64_t            sent_    = 0;
     uint64_t            expired_ = 0;
+    uint64_t            unstarted_ = 0;
     uint64_t            parity_sent_ = 0;
 };
 

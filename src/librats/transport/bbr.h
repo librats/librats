@@ -102,19 +102,28 @@
  *     burst lifted by it — and different only in what it delivers. A bottleneck
  *     delivers no faster than it drains; the radio as fast as it is sent to. So
  *     a standing queue in Startup, and a burst that queued in a probe, start a
- *     verification instead of ending the climb: the sender pads what it sends to its
- *     pacing rate (wants_padding()), with the window over the smoothed round
- *     trip rather than the one lucky packet the minimum is on such a path, and
- *     reads what the path delivers over a round trip of acknowledgements.
- *     Halfway from the estimate to what it sent, and the climb goes on — the
- *     samples it took raised the estimate; a loss, or kVerifyRounds short of it,
- *     and the queue was ours. Read by the round trip alone, a call on 25 ± 10 ms
- *     each way at a gigabit stopped at 3 Mbit/s of its 8, a twentieth of its
- *     frames late; verified, it gets its 8. A verification is only for a sender the
- *     estimate may be holding back — one that sends at least 1/kVerifyShare of it
- *     (a keyframe is several frames, and must leave in time), not held by its
- *     peer (peer_limited) — and a queue found to be ours is believed unverified
- *     for kVerifyHold: on a link the video nearly fills, every verification is a
+ *     verification instead of ending the climb: the sender pads what it sends to
+ *     its pacing rate (wants_padding()), with the window over the smoothed round
+ *     trip as the verification began rather than the one lucky packet the
+ *     minimum is on such a path, and reads what the path delivers over a round
+ *     trip of acknowledgements. Halfway from the estimate to what it sent, and
+ *     the climb goes on — the samples it took raised the estimate; a loss, or
+ *     kVerifyRounds short of it, or kVerifyRounds + 1 of the round trip it began
+ *     at, and the queue was ours. (Over the smoothed round trip as it went, on a
+ *     bottleneck with a deep buffer, the padding's own queue lifted the round
+ *     trip, the window grew with it and the queue with that: 50 ms to half a
+ *     second before a round ended, the frames behind all of it.) Read by the
+ *     round trip alone, a call on 25 ± 10 ms each way at a gigabit stopped at
+ *     3 Mbit/s of its 8, a twentieth of its frames late; verified, it gets its 8.
+ *     A verification is only for a sender the estimate may be holding back — one
+ *     that sends at least 1/kVerifyShare of it (a keyframe is several frames,
+ *     and must leave in time), not held by its peer (peer_limited) — on a path
+ *     whose acknowledgements come back late by themselves (lateness()), as a
+ *     radio's do: where they do not, a queue read off the round trip is one, and
+ *     verifying it only put padding in front of the frames (a call alone on
+ *     10 Mbit/s lost a few each time, one to each of several peers a few per
+ *     peer). And a queue found to be ours is believed unverified for
+ *     kVerifyHold: on a link the video nearly fills, every verification is a
  *     queue of padding in front of its frames, a few of them late. A rising round
  *     trip ends Startup unverified: jitter does not do that.
  *   - ProbeRTT is skipped while app-limited round trips keep coming in within
@@ -302,7 +311,8 @@ public:
     /// Verifying a queue that may be the path's own (see "Flows that do not
     /// fill the pipe"): only for a sender that sent at least 1/kVerifyShare of the
     /// estimate over the last one to two kAppRateSlot; failed after kVerifyRounds
-    /// rounds without passing; and once failed, none for kVerifyHold.
+    /// rounds, or kVerifyRounds + 1 of the round trip it began at, without
+    /// passing; and once failed, none for kVerifyHold.
     static constexpr uint64_t                  kVerifyShare = 4;
     static constexpr std::chrono::milliseconds kAppRateSlot{500};
     static constexpr int                       kVerifyRounds = 2;
@@ -627,12 +637,14 @@ private:
 
     // Verifying a queue that may be the path's own: the rate that passes,
     // what had been delivered when it began (the packets it sent come after),
-    // the rounds it has run; the first acknowledgement of a packet it sent and
-    // what had been delivered then, where its measure starts; and until when a
-    // failed one is believed.
+    // when that was and the round trip then, the rounds it has run; the first
+    // acknowledgement of a packet it sent and what had been delivered then, where
+    // its measure starts; and until when a failed one is believed.
     bool              verifying_     = false;
     uint64_t          verify_bar_    = 0;
     uint64_t          verify_from_   = 0;
+    Clock::time_point verify_start_{};
+    Clock::duration   verify_rtt_{};
     int               verify_rounds_ = 0;
     Clock::time_point verify_acked_at_{};
     uint64_t          verify_acked_  = 0;

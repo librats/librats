@@ -322,6 +322,13 @@ bool has_frame(const Bytes& d, uint8_t type) {
     return false;
 }
 
+/// A packet of padding (UdpConnection::pad): full size, a PING and nothing sent
+/// for the application.
+bool is_padding(const Bytes& d) {
+    return d.size() >= udp::kMaxDatagram && has_frame(d, udp::kPing) && !has_frame(d, udp::kLive) &&
+           !has_frame(d, udp::kLiveRepair) && !has_frame(d, udp::kStream);
+}
+
 /// Lose chosen packets of one flow's data, by their index among the packets that
 /// carry new data from the moment this is armed — and, for an index listed twice,
 /// the first repair of what that packet carried as well. Packets are never resent
@@ -1548,6 +1555,60 @@ TEST(BbrTest, AVerificationThatFindsTheQueueOursIsBelievedForAWhile) {
     }
 }
 
+// Over a deep buffer — a home router's, half a second of it — a verification's
+// window was sized over the smoothed round trip, which its own padding's queue
+// lifted: the window grew with the queue and the queue with the window, to half
+// a second before a round of it ended, the frames behind all of it (142 frames
+// of these 4800 given up). Sized over the round trip it began at, 63; ended after
+// a few of those as well, 30, and a sixth less padding.
+TEST(BbrTest, AVerificationOverADeepBufferDoesNotFeedOnItsOwnQueue) {
+    uint64_t expired = 0;
+    size_t   padding = 0, video_bytes = 0;
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        SCOPED_TRACE(seed);
+        Sim sim(20, 40ms, 1000, 0.0, seed);
+        for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) {
+            d->late       = 0.1;
+            d->late_by    = 20ms;
+            d->late_holds = true;
+        }
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.path.hook = [&](Bytes& d, const Address&, bool forward) {
+            if (forward && is_padding(d)) padding += d.size();
+            return false;
+        };
+        sim.run(500ms);
+        Video video{sim, f, 1, 150ms};
+        for (int i = 0; i < 200; ++i) {   // 20 s, retargeted every 100 ms
+            const double estimate = f.sender().path_stats().bandwidth_bps / 1e6;
+            video.mbps = (std::max)(1.0, (std::min)(0.9 * estimate, 8.0));
+            video.play(100ms);
+        }
+        EXPECT_EQ(video.mbps, 8.0) << "the call is held at " << video.mbps << " Mbit/s";
+        expired += f.sender().path_stats().live_expired;
+        video_bytes += f.delivered();
+    }
+    EXPECT_LT(expired, 45u) << "of 4800 frames";
+    EXPECT_LT(padding, video_bytes * 6 / 100) << "padding " << padding << " B, video " << video_bytes << " B";
+}
+
+// A path that hands nothing back late has no radio to take for a queue: a queue
+// read off its round trip is one. Verified all the same, each probe that found it
+// was a queue of padding in front of the frames — a few late each time, and to
+// each of several peers a few per peer (here 150 KB of padding in 30 s).
+TEST(BbrTest, ACallOnACleanPathIsNotPadded) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    size_t padding = 0;
+    sim.path.hook = [&](Bytes& d, const Address&, bool forward) {
+        if (forward && is_padding(d)) padding += d.size();
+        return false;
+    };
+    sim.run(500ms);
+    Video{sim, f, 4, 150ms}.play(30s);
+    EXPECT_EQ(padding, 0u);
+}
+
 // On 1 Mbit/s a frame is three packets and two acknowledgements, too few for the
 // round trip to rise in. But the queue Startup's bursts build there does not
 // drain before the next frame: it stands, and that ends Startup.
@@ -1751,6 +1812,26 @@ TEST(UdpLossRecoveryTest, AJitteryLinkStillProtectsLargeFrames) {
         expired += f.sender().path_stats().live_expired - before.live_expired;
     }
     EXPECT_LT(expired, 300u) << "of 4800 frames";
+}
+
+// A buffer something else filled lifts the round trip past twice a frame's
+// lifetime, then drains. A frame that could not arrive by the round trip was
+// given up before a byte of it went, and with nothing sent nothing came back to
+// show the round trip had come down: the call stayed silent for good on a path
+// back at 40 ms. A PING brings the round trip back.
+TEST(UdpLossRecoveryTest, ACallSpeaksAgainOnceItsRoundTripComesBack) {
+    Sim sim(20, 40ms, 1000);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 2, 150ms};
+    video.play(3s);
+    for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) d->delay += 200ms;
+    video.play(2s);
+    for (Direction* d : {&sim.path.fwd(), &sim.path.rev()}) d->delay -= 200ms;
+    video.play(1s);
+    const size_t before = f.rx.messages_in;
+    video.play(5s);
+    EXPECT_GT(f.rx.messages_in - before, 140u) << "of 150 frames";
 }
 
 // ProbeRTT empties a queue to measure the path's own delay. An app-limited flow

@@ -78,7 +78,10 @@ void LiveSender::resolve(Message& m, bool given_up) {
     unsent_ -= m.data.size() - m.sent;
     lost_   -= m.lost_bytes;
     if (m.coding) parity_ -= uint64_t{m.coding->repairs() - m.coding->next} * m.coding->layout.symbol;
-    if (given_up) ++expired_;
+    if (given_up) {
+        ++expired_;
+        if (m.sent == 0) ++unstarted_;
+    }
     --held_;
     // Freed now rather than when the slot is reused: a ring keeps what it pops.
     m.held       = false;

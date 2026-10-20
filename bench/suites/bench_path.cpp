@@ -1777,6 +1777,31 @@ void peers_table() {
                 "   figures are over its own frames. Loss and jitter both ways, as above.)\n");
 }
 
+/// Bufferbloat: a buffer of half a second at the link's rate, the depth of many
+/// a home router's, with nothing to drop a burst that overshoots — what it
+/// queues stays queued, in front of every frame after it.
+void deep_table() {
+    using X = Besides;
+    const Scene deep = Scene{}.over(20, 40).buffer(12);
+    heading("realtime over a deep buffer — 20 Mbit, 40 ms, half a second of buffer",
+            {"median", "p99", "late", "dropped", "freeze ms", "frozen s", "recover", "video", "fec"});
+    realtime_row("sized to the estimate, up to 8",  Scene(deep).following());
+    realtime_row("  a tenth 20 ms late",            Scene(deep).following().jittery(0.1, 20));
+    realtime_row("  a third 15 ms late",            Scene(deep).following().jittery(0.3, 15));
+    realtime_row("  sd 10 ms, in order",            Scene(deep).following().varied(10));
+    realtime_row("  + bulk flow on the path",       Scene(deep).following().with(X::PathBulk));
+    realtime_row("  10 Mbit, a tenth 20 ms late",   Scene(deep).over(10, 40).following().jittery(0.1, 20));
+    realtime_row("6 of 20 Mbit",                    Scene(deep).sending(6, 30));
+    realtime_row("  a tenth 20 ms late",            Scene(deep).sending(6, 30).jittery(0.1, 20));
+    realtime_row("  + bulk flow on the path",       Scene(deep).sending(6, 30).with(X::PathBulk));
+    realtime_row("adaptive <=8",                    Scene(deep).adaptive());
+    realtime_row("  + bulk flow on the path",       Scene(deep).adaptive().with(X::PathBulk));
+    std::printf("  (columns as in the first realtime table. A verification of a queue that may\n"
+                "   be the path's own pads to the pacing rate: over a buffer like this its own\n"
+                "   queue is what it must not feed on. A bulk flow fills the buffer: its round\n"
+                "   trip, half a second, is past the frames' lifetime until it is gone.)\n");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2008,6 +2033,7 @@ int main(int argc, char** argv) {
     near_rate_table();
     climb_table();
     peers_table();
+    deep_table();
 
     std::printf("\nnote: acknowledgements in bunches, reordering, variable delay and competing\n"
                 "traffic only in the rows that say so. These are not predictions about a real\n"

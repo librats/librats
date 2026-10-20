@@ -434,7 +434,8 @@ void BbrController::check_full_bw_reached() {
             standing_since_ = Clock::time_point{};
             return;
         }
-        if (newly_lost_ > 0 || (round_start_ && ++verify_rounds_ > kVerifyRounds)) {
+        if (newly_lost_ > 0 || (round_start_ && ++verify_rounds_ > kVerifyRounds) ||
+            now_ - verify_start_ > verify_rtt_ * (kVerifyRounds + 1)) {
             end_verify();
             verify_after_ = now_ + kVerifyHold;
             full_bw_now_ = full_bw_reached_ = true;
@@ -980,9 +981,10 @@ uint64_t BbrController::window_bdp(uint64_t bw, uint64_t gain) const noexcept {
     // lets it be — so the path's own is at least the rest. A verification sends faster
     // than anything measured yet, and on a path whose minimum is a lucky packet
     // two BDPs over it would hold it to less than it is verifying; the pacer, not
-    // the window, keeps it to its rate.
+    // the window, keeps it to its rate. Over the round trip it began at: the
+    // smoothed one grows with the verification's own queue, and the window with it.
     Clock::duration rtt = (std::max)(min_rtt_, load_rtt_ - min_rtt_);
-    if (verifying_ && rtt_.have_rtt) rtt = (std::max)(rtt, rtt_.srtt);
+    if (verifying_) rtt = (std::max)(rtt, verify_rtt_);
     return bytes_over(bw, rtt) * gain / kUnit;
 }
 
@@ -1078,10 +1080,11 @@ uint64_t BbrController::app_rate() const noexcept {
 bool BbrController::may_verify() const noexcept {
     // Startup and a probe are what a queue read off the round trip ends; one the
     // peer holds back pads nothing (UdpConnection::pump), and one sending a small
-    // share of the estimate is not held back by it.
+    // share of the estimate is not held back by it. A path that hands nothing back
+    // late has no radio to take for a queue.
     const bool peer_lately = peer_limited_ && round_count_ - peer_limited_round_ <= 1;
     return (state_ == State::Startup || state_ == State::ProbeBwUp) && now_ >= verify_after_ &&
-           !peer_lately && app_rate() * kVerifyShare >= max_bw_;
+           !peer_lately && app_rate() * kVerifyShare >= max_bw_ && lateness() > Clock::duration::zero();
 }
 
 void BbrController::start_verify() {
@@ -1090,6 +1093,8 @@ void BbrController::start_verify() {
     verify_from_     = sampler_.delivered();
     verify_rounds_   = 0;
     verify_acked_at_ = Clock::time_point{};
+    verify_start_    = now_;
+    verify_rtt_      = rtt_.srtt;   // a queue was read off it: there is one
     start_round();
 }
 

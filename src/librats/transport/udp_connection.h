@@ -492,6 +492,8 @@ private:
     /// What the one-way delay is taken to be: half the smoothed round trip. A live
     /// message that cannot arrive by its deadline at that is no longer sent.
     Clock::duration one_way() const noexcept;
+    /// Drop the live messages that can no longer arrive in time by one_way().
+    void expire_live(Clock::time_point now);
     /// The unfinished-message bounds of every lane: their sum, the largest, the
     /// next largest, and whose is the largest (see max_unfinished).
     struct Spread {
