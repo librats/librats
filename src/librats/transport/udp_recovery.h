@@ -247,6 +247,10 @@ public:
     /// reordering is a fact about the path, whatever is waiting to cross it.
     void set_impatient(bool impatient) noexcept;
 
+    /// The rate live data has lately been offered at, for the controller
+    /// (CongestionController::on_live_offered).
+    void set_live_offered(uint64_t bytes_per_second) noexcept { cc_->on_live_offered(bytes_per_second); }
+
     /// Frames of the newest packet still in flight that carried data — what
     /// a probe with nothing new to say repeats, so its acknowledgement lands past
     /// every hole in front of it. False when there is none.

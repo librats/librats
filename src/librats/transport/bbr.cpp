@@ -74,7 +74,15 @@ const char* BbrController::to_string(State s) noexcept {
 }
 
 uint32_t BbrController::cwnd() const noexcept {
-    return static_cast<uint32_t>((std::min<uint64_t>)(cwnd_, kMaxWindow));
+    uint64_t cwnd = cwnd_;
+    if (live_floor() && rtt_.have_rtt) cwnd = (std::max)(cwnd, live_floor_window(live_offered_, rtt_.srtt));
+    return static_cast<uint32_t>((std::min<uint64_t>)(cwnd, kMaxWindow));
+}
+
+PacingRate BbrController::pacing_rate() const noexcept {
+    uint64_t rate = pacing_rate_;
+    if (live_floor()) rate = (std::max)(rate, live_offered_);
+    return PacingRate::per_second(rate);
 }
 
 // ── Hooks ───────────────────────────────────────────────────────────────────

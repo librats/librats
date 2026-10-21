@@ -58,7 +58,7 @@ public:
     RenoController(const RttEstimate& rtt, Clock::time_point now);
 
     CongestionAlgorithm algorithm() const noexcept override { return CongestionAlgorithm::Reno; }
-    uint32_t   cwnd() const noexcept override { return cwnd_; }
+    uint32_t   cwnd() const noexcept override;
     PacingRate pacing_rate() const noexcept override;
 
     void on_packet_sent(Clock::time_point now, uint64_t bytes, uint64_t bytes_in_flight) override;
@@ -72,6 +72,10 @@ public:
     bool on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight, bool has_data,
                              bool app_limited) override;
     bool uses_rate_reduction() const noexcept override { return true; }
+    void on_live_offered(uint64_t bytes_per_second) noexcept override {
+        live_offered_ = bytes_per_second;
+    }
+    uint64_t bandwidth() const noexcept override;
 
     /// Where slow start stops. Starts at the ceiling and comes down either when
     /// HyStart++ sees the round-trip time rise or when something is lost.
@@ -79,6 +83,11 @@ public:
 
 private:
     bool in_slow_start() const noexcept { return cwnd_ < ssthresh_; }
+    /// The first slow start, before a loss or a rising round trip said anything
+    /// about the path: the window is never below what live data offered needs
+    /// (cc::live_floor_window()). Not one after a timeout — that is the path
+    /// saying it could not take what was sent.
+    bool finding_path() const noexcept { return ssthresh_ == kMaxWindow && !css_; }
     void on_loss(bool timeout, uint64_t bytes_in_flight);
     void grow_window(uint64_t acked_bytes);
     void hystart_on_ack(uint64_t largest_acked, uint64_t next_pn);
@@ -87,6 +96,7 @@ private:
 
     uint32_t cwnd_     = kInitialWindow;
     uint32_t ssthresh_ = kMaxWindow;
+    uint64_t live_offered_ = 0;   ///< bytes/s, on_live_offered()
     /// A timeout has collapsed the window and nothing has been acknowledged since.
     bool     timed_out_ = false;
 

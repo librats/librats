@@ -107,6 +107,27 @@ struct PacingRate {
     }
 };
 
+/// A live feed of constant rate — an MPEG-TS stream, a call's sound — comes at
+/// its full rate from its first message, while a controller that has yet to find
+/// the path (BBR's Startup, Reno's first slow start) sends a few packets a round
+/// trip and doubles that each one. Live messages that live a few round trips are
+/// given up meanwhile: a feed of 8 Mbit/s over 100 ms lost 6% of itself on
+/// joining, all within half a second. So until such a controller has a verdict on
+/// the path it paces no slower than live data is offered
+/// (CongestionController::on_live_offered), and its window lets that through:
+/// load the feed puts on the path whatever the controller does, as a sender of
+/// fixed rate (SRT, RIST) would, never more — and loss or a queue end the phase
+/// as for any other flow. What queued before the rate was known drains as the
+/// controller's own growth passes it. (A quarter over drained it sooner, but
+/// seven such connections starting at once on one uplink made a third more of
+/// their frames late.)
+///
+/// The least window: what `offered` (bytes/s) keeps in flight over `rtt`, twice,
+/// as those phases allow themselves.
+inline uint64_t live_floor_window(uint64_t offered, Clock::duration rtt) noexcept {
+    return 2 * mul_div(offered, to_ns(rtt), 1000000000ull);
+}
+
 /// Everything one acknowledgement changed.
 struct AckEvent {
     Clock::time_point now{};
@@ -223,8 +244,17 @@ public:
     /// The rate, in bytes per second, this controller believes the path delivers —
     /// what an application sizing its own output to the path is told (PathStats).
     /// A model-based controller has the figure; a window-based one has only a
-    /// window, and returns 0 for it to be read as one window per round trip.
+    /// window, and gives one window per round trip — its own window: the live
+    /// floor (on_live_offered) is the feed's rate, not the path's, and a source
+    /// sizing itself to a figure that included it would raise the floor with it.
+    /// 0 when there is no figure yet: then one cwnd() per round trip is read.
     virtual uint64_t bandwidth() const noexcept { return 0; }
+
+    /// The rate, in bytes per second, live data has lately been handed to the
+    /// connection at (udp::OfferedRate); 0 for none. Until the controller has a
+    /// verdict on the path it paces no slower than that, with a window no smaller
+    /// than live_floor_window().
+    virtual void on_live_offered(uint64_t bytes_per_second) noexcept { (void)bytes_per_second; }
 };
 
 /// Build the controller `algorithm` names. `rtt` and `sampler` belong to the

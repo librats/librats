@@ -1422,6 +1422,127 @@ TEST(BbrTest, AnAppLimitedFlowIsPacedFromTheMeasuredRoundTrip) {
     EXPECT_GT(st.pacing_bps, 10e6) << "Startup paces above the estimate, not below it";
 }
 
+// ── A live feed's start ─────────────────────────────────────────────────────
+
+namespace {
+
+/// A live feed of constant rate on a flow, as an MPEG-TS stream is carried: six
+/// TS packets a message, `mbps` from the first, each message worth `lifetime`.
+struct Feed {
+    static constexpr size_t kMessage = 6 * 188;
+
+    Sim&            sim;
+    Flow&           flow;
+    double          mbps;
+    Clock::duration lifetime;
+    double          credit = 0;
+
+    void play(Clock::duration d) {
+        const std::string message(kMessage, 'f');
+        const auto        until = sim.now + d;
+        while (sim.now < until) {
+            for (credit += mbps * 1e6 / 8 / 1000; credit >= kMessage; credit -= kMessage)
+                flow.tx.send_live(MessageType::App, message, sim.now + lifetime);
+            flow.sender().flush(sim.now);
+            sim.run(1ms);
+        }
+    }
+};
+
+/// A round trip of 100 ms as each controller knows it.
+cc::RttEstimate rtt_of_100ms() {
+    cc::RttEstimate rtt;
+    rtt.have_rtt = true;
+    rtt.srtt = rtt.min_rtt = rtt.latest = 100ms;
+    return rtt;
+}
+
+} // namespace
+
+// Startup sends a few packets a round trip and doubles that each one; a feed of
+// constant rate is at its rate from its first message. Until the controller has
+// a verdict on the path, it sends no slower than live data is offered, through a
+// window that lets that out — and no faster: the floor is the feed's own load.
+TEST(BbrTest, InStartupSendsNoSlowerThanLiveDataIsOffered) {
+    const cc::RttEstimate rtt = rtt_of_100ms();
+    cc::DeliveryRateSampler sampler;
+    cc::BbrController bbr(rtt, sampler, Clock::time_point{}, 1);
+    const uint64_t pacing = bbr.pacing_rate().bytes_over(1s);
+    const uint32_t cwnd   = bbr.cwnd();
+    ASSERT_LT(pacing, 1'000'000u);
+
+    bbr.on_live_offered(1'000'000);   // 8 Mbit/s
+    EXPECT_EQ(bbr.pacing_rate().bytes_over(1s), 1'000'000u);
+    EXPECT_EQ(bbr.cwnd(), 200'000u) << "twice what 100 ms of the feed holds";
+    EXPECT_EQ(bbr.bandwidth(), 0u) << "the feed's rate taken for the path's";
+
+    bbr.on_live_offered(0);
+    EXPECT_EQ(bbr.pacing_rate().bytes_over(1s), pacing);
+    EXPECT_EQ(bbr.cwnd(), cwnd);
+}
+
+// Reno likewise, in its first slow start only: after a timeout the path has said
+// it could not take what was sent. What it tells the application of the path is
+// its own window still: told the floor's, a source sizing itself to the figure
+// raised its rate, the floor with it, until a loss.
+TEST(UdpLossRecoveryTest, RenoSlowStartsNoSlowerThanLiveDataIsOfferedUntilThePathSaysNo) {
+    const cc::RttEstimate rtt = rtt_of_100ms();
+    cc::RenoController reno(rtt, Clock::time_point{});
+    const uint64_t bandwidth = reno.bandwidth();
+    EXPECT_EQ(bandwidth, uint64_t{cc::kInitialWindow} * 10) << "a window per 100 ms";
+    reno.on_live_offered(1'000'000);
+    EXPECT_EQ(reno.cwnd(), 200'000u);
+    EXPECT_EQ(reno.pacing_rate().bytes_over(1s), 1'000'000u) << "the feed's own rate";
+    EXPECT_EQ(reno.bandwidth(), bandwidth);
+    reno.on_timeout(Clock::time_point{}, 200'000);
+    EXPECT_EQ(reno.cwnd(), cc::kMss);
+}
+
+// An 8 Mbit/s feed from the moment the connection is up, over 100 ms: Startup
+// paced it at a few hundred kbit/s at first, and the pacing rate is what a message
+// not yet started is judged by — every one that could not leave in time at it was
+// given up, though a few round trips on it would have: 6% of the feed in its
+// first half second. Sent at the feed's own rate from the start, nothing is.
+TEST(BbrTest, AFeedOfConstantRateLosesNothingOnJoining) {
+    for (const auto rtt : {50ms, 100ms}) {
+        SCOPED_TRACE(rtt.count());
+        Sim sim(20, rtt, 300);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(300ms);
+        ASSERT_TRUE(f.tx.established());
+        Feed{sim, f, 8, 200ms}.play(3s);
+        const PathStats ps = f.sender().path_stats();
+        EXPECT_EQ(ps.live_expired, 0u) << "of " << ps.live_sent;
+        EXPECT_GT(f.rx.messages_in, ps.live_sent * 95 / 100);   // the rest on the way
+    }
+}
+
+TEST(UdpLossRecoveryTest, AFeedOfConstantRateLosesNothingOnJoiningRenoEither) {
+    Sim sim(20, 100ms, 300);
+    Flow& f = sim.add(CongestionAlgorithm::Reno);
+    sim.run(300ms);
+    ASSERT_TRUE(f.tx.established());
+    Feed{sim, f, 8, 200ms}.play(3s);
+    const PathStats ps = f.sender().path_stats();
+    EXPECT_EQ(ps.live_expired, 0u) << "of " << ps.live_sent;
+    EXPECT_GT(f.rx.messages_in, ps.live_sent * 95 / 100);
+}
+
+// A feed the path cannot carry: the floor holds only until Startup has its
+// verdict — the loss and the queue end it as they would any flow — and from then
+// on the model's rate is the path's, not the feed's.
+TEST(BbrTest, AFeedThePathCannotCarryStillEndsStartup) {
+    Sim sim(6, 100ms, 62);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(300ms);
+    Feed feed{sim, f, 8, 200ms};
+    feed.play(2s);
+    EXPECT_TRUE(bbr(f.sender()).full_bw_reached()) << "still in Startup";
+    feed.play(5s);
+    EXPECT_LT(bbr(f.sender()).bw() * 8, 7e6) << "the estimate is the feed's, not the path's";
+    EXPECT_LT(f.sender().path_stats().pacing_bps, 8e6);
+}
+
 // ── Flows that do not fill the pipe ─────────────────────────────────────────
 
 namespace {

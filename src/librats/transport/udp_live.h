@@ -188,6 +188,9 @@ public:
     uint64_t expired() const noexcept { return expired_; }
     /// Of those, the ones given up before a byte of them went.
     uint64_t unstarted() const noexcept { return unstarted_; }
+    /// Bytes of the messages pushed since the connection opened, frame headers
+    /// included: what OfferedRate is fed.
+    uint64_t pushed_bytes() const noexcept { return pushed_bytes_; }
     /// Bytes of repair symbols sent since the connection opened.
     uint64_t parity_sent() const noexcept { return parity_sent_; }
 
@@ -288,11 +291,54 @@ private:
     uint64_t            lost_    = 0;
     size_t              held_    = 0;   ///< messages still held
     uint64_t            sent_    = 0;
+    uint64_t            pushed_bytes_ = 0;
     uint64_t            expired_ = 0;
     uint64_t            unstarted_ = 0;
     uint64_t            parity_sent_ = 0;
     std::vector<LiveOutcome> outcomes_;
     std::vector<Message*>    shed_scratch_;   ///< shed()'s, kept to spare an allocation
+};
+
+/// The rate live messages are handed to a connection at, in bytes per second:
+/// what a feed of constant rate asks of the path from its first message, before
+/// the congestion controller has found what the path holds
+/// (cc::live_floor_window()).
+///
+/// The connection samples LiveSender::pushed_bytes() whenever it runs — always
+/// soon after a push, which it flushes — so neither needs a clock of its own. The
+/// rate is over the last kSpan, or since the feed started if that is shorter; the
+/// bytes the first sample of a feed finds are not counted, since when they came
+/// is not known. A second is long enough that a video's keyframe weighs in as
+/// part of its rate rather than as a burst, and short enough that a feed which
+/// stopped is forgotten soon: after kSpan with nothing pushed the rate is 0 and
+/// whatever comes next starts afresh.
+class OfferedRate {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    static constexpr Clock::duration kSpan = std::chrono::seconds(1);
+    /// A feed younger than this has no rate yet: a few messages close together
+    /// are no rate to go by.
+    static constexpr Clock::duration kMinSpan = std::chrono::milliseconds(10);
+
+    /// `pushed` bytes since the connection opened, as of `now`.
+    void sample(Clock::time_point now, uint64_t pushed);
+
+    uint64_t bytes_per_second() const noexcept { return rate_; }
+
+private:
+    /// A point is kept every kSpan / kSteps: the window slides that finely.
+    static constexpr int kSteps = 8;
+
+    struct Point {
+        Clock::time_point at{};
+        uint64_t          pushed = 0;
+    };
+
+    RingBuffer<Point> points_;   ///< oldest first; the front is where the rate counts from
+    Clock::time_point changed_{};   ///< when pushed_ last grew
+    uint64_t          pushed_ = 0;
+    uint64_t          rate_   = 0;
 };
 
 class LiveReceiver {

@@ -171,6 +171,16 @@
  * first answer from the path, not as the outage's repairs complete (see on_ack);
  * what the timeout wrote off is not reported to it again as loss (Recovery).
  *
+ * ── A live feed's start ──────────────────────────────────────────────────────
+ * Startup grows from the initial window, a few packets a round trip; a live feed
+ * of constant rate is at its full rate from its first message, and on a long
+ * path its messages' lifetime is up before Startup reaches it. So while Startup
+ * has measured less than live data is offered at, the pacing rate is never below
+ * that rate, nor the window below what it needs (cc::live_floor_window()): the
+ * feed's own load, no more. Once the model has measured as much it is ahead of
+ * the feed and the floor is gone, as it is from Drain on. Only the getters apply
+ * it, so the model's own window and rate are what they would be without it.
+ *
  * ── A round trip longer than the minimum ─────────────────────────────────────
  * The window is cwnd_gain BDPs over the minimum round trip, which takes the
  * path's round trip at any rate to be the minimum and whatever we queue. On a
@@ -359,7 +369,7 @@ public:
 
     CongestionAlgorithm algorithm() const noexcept override { return CongestionAlgorithm::Bbr; }
     uint32_t   cwnd() const noexcept override;
-    PacingRate pacing_rate() const noexcept override { return PacingRate::per_second(pacing_rate_); }
+    PacingRate pacing_rate() const noexcept override;
 
     void on_packet_sent(Clock::time_point now, uint64_t bytes, uint64_t bytes_in_flight) override;
     void on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) override;
@@ -374,6 +384,9 @@ public:
     bool wants_app_limited() const noexcept override { return state_ == State::ProbeRtt; }
     uint64_t padding_limit() const noexcept override;
     uint64_t bandwidth() const noexcept override { return bw_; }
+    void on_live_offered(uint64_t bytes_per_second) noexcept override {
+        live_offered_ = bytes_per_second;
+    }
 
     // — diagnostics (tests, benchmarks) —
     State           state()           const noexcept { return state_; }
@@ -403,6 +416,10 @@ private:
         ProbeStopping,   ///< probe over; waiting out the round its packets fill
         Refilling,
     };
+
+    /// Whether the pacing rate and the window are held up to what the live data
+    /// offered needs ("A live feed's start" above).
+    bool live_floor() const noexcept { return state_ == State::Startup && live_offered_ > bw_; }
 
     // — model and state, in the order the draft runs them per acknowledgement —
     void update_model_and_state();
@@ -560,6 +577,8 @@ private:
     bool     pacing_from_rtt_ = false;
     uint64_t cwnd_        = kInitialWindow;
     uint64_t prior_cwnd_  = 0;
+    /// Bytes per second live data has lately been offered at (on_live_offered).
+    uint64_t live_offered_ = 0;
     uint64_t max_inflight_ = kInitialWindow;
 
     // Recovery.

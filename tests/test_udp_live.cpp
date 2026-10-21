@@ -439,6 +439,69 @@ TEST(LiveSenderTest, AProbeRepeatsARepairSymbolOnlyWhileItIsWorthIt) {
     EXPECT_FALSE(s.repeat_parity(0, 0, kT0 + 50ms, p));
 }
 
+// ── What live data is offered at ────────────────────────────────────────────
+
+namespace {
+
+/// `ms` milliseconds of a feed pushing `per_ms` bytes each, sampled after each as
+/// the connection samples it.
+void feed(udp::OfferedRate& rate, Clock::time_point& now, uint64_t& pushed, uint64_t per_ms, int ms) {
+    for (int i = 0; i < ms; ++i) {
+        now += 1ms;
+        pushed += per_ms;
+        rate.sample(now, pushed);
+    }
+}
+
+} // namespace
+
+TEST(LiveSenderTest, CountsTheBytesPushed) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string(100, 'p')), kT0 + 100ms);
+    s.push(FrameHeader{}, ByteView(std::string(50, 'p')), kT0 + 100ms);
+    EXPECT_EQ(s.pushed_bytes(), 150 + 2 * framer::kHeaderSize);
+}
+
+TEST(OfferedRateTest, AFeedIsMeasuredFromItsFirstSample) {
+    udp::OfferedRate rate;
+    Clock::time_point now = kT0;
+    uint64_t pushed = 0;
+    rate.sample(now, pushed);   // a connection that has carried nothing live
+    now += 5s;
+    pushed = 50'000;            // the feed's first sample: when that came is not known
+    rate.sample(now, pushed);
+    feed(rate, now, pushed, 1000, 9);
+    EXPECT_EQ(rate.bytes_per_second(), 0u) << "a rate from 9 ms of a feed";
+    feed(rate, now, pushed, 1000, 1);
+    EXPECT_EQ(rate.bytes_per_second(), 1'000'000u) << "the bytes before it, or the 5 s, counted";
+}
+
+TEST(OfferedRateTest, IsOverTheLastSecond) {
+    udp::OfferedRate rate;
+    Clock::time_point now = kT0;
+    uint64_t pushed = 0;
+    feed(rate, now, pushed, 1000, 3000);
+    EXPECT_EQ(rate.bytes_per_second(), 1'000'000u);
+    feed(rate, now, pushed, 500, 500);
+    EXPECT_GT(rate.bytes_per_second(), 500'000u);
+    EXPECT_LT(rate.bytes_per_second(), 1'000'000u);
+    feed(rate, now, pushed, 500, 1500);
+    EXPECT_EQ(rate.bytes_per_second(), 500'000u);
+}
+
+TEST(OfferedRateTest, AFeedThatStoppedIsForgottenAndOneThatStartsAgainCountsAfresh) {
+    udp::OfferedRate rate;
+    Clock::time_point now = kT0;
+    uint64_t pushed = 0;
+    feed(rate, now, pushed, 1000, 2000);
+    feed(rate, now, pushed, 0, 999);
+    EXPECT_GT(rate.bytes_per_second(), 0u) << "a pause under a second is part of the rate";
+    feed(rate, now, pushed, 0, 1);
+    EXPECT_EQ(rate.bytes_per_second(), 0u);
+    feed(rate, now, pushed, 250, 11);   // the first sample starts it, the next 10 ms measure it
+    EXPECT_EQ(rate.bytes_per_second(), 250'000u) << "the silence counted";
+}
+
 // ── The receiver ────────────────────────────────────────────────────────────
 
 TEST(LiveReceiverTest, PutsPiecesTogetherInAnyOrderAndDeliversOnce) {
@@ -1046,7 +1109,10 @@ TEST(UdpLiveTest, AProtectedMessageGoesOutWholeASymbolToAFrame) {
     const auto sent = p.now;
     send_live(p, std::string(15000, 'n'), 500ms);
     ASSERT_TRUE(p.run_until([&] { return !p.b.messages.empty(); }, 1s));
-    EXPECT_LE(p.now - sent, 25ms) << "the message waited for an acknowledgement";
+    // One way and 13 symbols at the pacing rate are 25 ms or so — how fast Startup
+    // paces is what it measured of the frames before. Waiting for an
+    // acknowledgement would be a round trip, 20 ms, more.
+    EXPECT_LT(p.now - sent, 30ms) << "the message waited for an acknowledgement";
     p.run(10ms);
     EXPECT_EQ(p.a.conn->path_stats().live_repair_bytes - repairs, 1155u) << "one repair, of 13 symbols";
     for (const udp::Frame& f : frames)

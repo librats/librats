@@ -47,6 +47,7 @@ void LiveSender::push(FrameHeader header, ByteView payload, Clock::time_point de
     messages_.push_back(std::move(m));
     ++held_;
     ++sent_;
+    pushed_bytes_ += messages_.back().data.size();
     enqueue(id, messages_.back());
 }
 
@@ -422,6 +423,33 @@ void LiveSender::clear() {
     unsent_   = parity_ = lost_ = 0;
     held_     = 0;
     outcomes_.clear();
+}
+
+// ── OfferedRate ─────────────────────────────────────────────────────────────
+
+void OfferedRate::sample(Clock::time_point now, uint64_t pushed) {
+    if (pushed == 0) return;   // nothing live ever, as on most connections: nothing kept
+    if (pushed != pushed_) {
+        // The first bytes after a silence (or ever) start the feed afresh, counted
+        // from here: when within the silence they came is not known.
+        if (now - changed_ >= kSpan) points_.clear();
+        pushed_  = pushed;
+        changed_ = now;
+    } else if (now - changed_ >= kSpan) {
+        rate_ = 0;   // the feed stopped: nothing kept until it starts again
+        points_.clear();
+        points_.release();
+        return;
+    }
+    if (points_.size() == 0 || now - points_.back().at >= kSpan / kSteps)
+        points_.push_back(Point{now, pushed});
+    // Keep one point at or before the window's start to count from.
+    while (points_.size() > 1 && points_[1].at <= now - kSpan) points_.pop_front();
+
+    const Point& from = points_.front();
+    rate_ = now - from.at >= kMinSpan
+                ? cc::mul_div(pushed - from.pushed, 1000000000ull, cc::to_ns(now - from.at))
+                : 0;
 }
 
 void LiveSender::release_memory() noexcept {

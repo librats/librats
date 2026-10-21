@@ -598,6 +598,7 @@ private:
     std::vector<std::unique_ptr<Lane>> lanes_;
     std::array<size_t, kPriorityCount> rr_{};   ///< per priority: the lane that goes first next
     udp::LiveSender   live_send_;
+    udp::OfferedRate  live_offered_;   ///< what live_send_ is pushed at
     udp::fec::LossEstimate live_loss_;   ///< what live_repairs() goes by
     uint64_t          sent_new_total_ = 0; ///< new stream bytes ever sent, all lanes
     uint64_t          peer_max_data_  = kInitialWindow;

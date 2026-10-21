@@ -1026,6 +1026,10 @@ void UdpConnection::expire_live(Clock::time_point now) {
     // Nothing goes out that can no longer arrive in time, and while something
     // still can, a path gone quiet is probed without backing off.
     const uint64_t unstarted = live_send_.unstarted();
+    // Judged at the rate the controller paces at — which, while it is still
+    // finding the path, is no lower than what the live data is offered at.
+    live_offered_.sample(now, live_send_.pushed_bytes());
+    recovery_.set_live_offered(live_offered_.bytes_per_second());
     live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
     recovery_.set_impatient(live_send_.has_pending());
     // A message given up before any of it went was judged by the round trip

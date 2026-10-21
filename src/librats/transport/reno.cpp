@@ -22,6 +22,17 @@ RenoController::RenoController(const RttEstimate& rtt, Clock::time_point now)
     // virtual time hands us.
     : rtt_(rtt), last_data_send_(now) {}
 
+uint32_t RenoController::cwnd() const noexcept {
+    if (!finding_path() || !rtt_.have_rtt) return cwnd_;
+    const uint64_t floor = live_floor_window(live_offered_, rtt_.srtt);
+    return static_cast<uint32_t>((std::min<uint64_t>)((std::max<uint64_t>)(cwnd_, floor), kMaxWindow));
+}
+
+uint64_t RenoController::bandwidth() const noexcept {
+    if (!rtt_.have_rtt) return 0;
+    return mul_div(cwnd_, 1000000000ull, to_ns(rtt_.srtt));
+}
+
 PacingRate RenoController::pacing_rate() const noexcept {
     // No round-trip estimate, no rate: there is nothing to derive a pace from,
     // and the window at that point is four packets, which cannot hurt anyone.
@@ -32,7 +43,12 @@ PacingRate RenoController::pacing_rate() const noexcept {
     const bool doubling = in_slow_start() && !css_;
     const uint32_t num = doubling ? kPaceGainSlowStartNum : kPaceGainSteadyNum;
     const uint32_t den = doubling ? kPaceGainSlowStartDen : kPaceGainSteadyDen;
-    return PacingRate{static_cast<uint64_t>(cwnd_) * num / den, rtt_.srtt};
+    const PacingRate own{static_cast<uint64_t>(cwnd_) * num / den, rtt_.srtt};
+    // The live floor paces at the feed's own rate, as BBR's does: derived from
+    // the floor's window it would be twice that and more.
+    if (finding_path() && live_offered_ > own.bytes_over(std::chrono::seconds(1)))
+        return PacingRate::per_second(live_offered_);
+    return own;
 }
 
 void RenoController::on_packet_sent(Clock::time_point now, uint64_t, uint64_t) {
