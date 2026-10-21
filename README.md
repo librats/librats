@@ -718,6 +718,11 @@ int main(void) {
 | Files | `rats_enable_file_transfer`, `rats_on_file_{offer,progress,complete}`, `rats_send_file` / `rats_send_directory`, `rats_accept_file` / `rats_reject_file`, `rats_{cancel,pause,resume}_file` |
 | Ping, reconnect | `rats_enable_ping`, `rats_peer_rtt_ms`; `rats_enable_reconnect`, `rats_add_reconnect` / `rats_remove_reconnect` |
 | BitTorrent | `rats_enable_bittorrent`, `rats_bt_add_magnet` / `rats_bt_add_torrent_file` / `rats_bt_remove_torrent` (`RATS_SEARCH_FEATURES` builds) |
+
+A library built on librats in C++ that offers a C API of its own attaches its subsystem to the
+caller's node with `rats_attach_subsystem()` (`bindings/rats_extend.h`, C++ only), before
+`rats_start()` and once per name; the node owns it from then on, and the caller keeps the rest of
+this API on the same node.
 | Process-wide | `rats_set_log_level` / `rats_set_log_file`, `rats_version` / `rats_version_string` / `rats_abi`, `rats_error_str`, `rats_close_reason_str` |
 
 ## 🏢 Architecture

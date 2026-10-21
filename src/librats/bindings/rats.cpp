@@ -1,4 +1,5 @@
 #include "librats/bindings/rats.h"
+#include "librats/bindings/rats_extend.h"
 
 #include "librats/node/node.h"
 #include "librats/peer/peer_info.h"
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -55,6 +57,9 @@ struct rats_node {
 #ifdef RATS_SEARCH_FEATURES
     Bittorrent*          bittorrent = nullptr;
 #endif
+
+    /// Names of the subsystems other libraries attached (rats_attach_subsystem).
+    std::set<std::string> extensions;
 };
 
 namespace {
@@ -453,6 +458,17 @@ rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void*
     node->node->on(channel, [cb, user](const Peer& peer, ByteView data) {
         cb(user, peer.id().to_hex().c_str(), data.data(), data.size());
     });
+    return RATS_OK;
+}
+
+/* ─── Extensions (rats_extend.h) ──────────────────────────────────────────── */
+
+rats_error_t rats_attach_subsystem(rats_t node, const char* name,
+                                   std::unique_ptr<Subsystem> subsystem) {
+    if (!name || !*name || !subsystem) return RATS_ERR_INVALID_ARG;
+    if (node->started) return RATS_ERR_ALREADY_STARTED;
+    if (!node->extensions.insert(name).second) return RATS_ERR_DECLINED;
+    node->node->add_subsystem(std::move(subsystem));
     return RATS_OK;
 }
 

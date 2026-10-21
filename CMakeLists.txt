@@ -453,6 +453,7 @@ if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES
         src/librats/bindings/rats.h
         src/librats/bindings/rats.cpp
+        src/librats/bindings/rats_extend.h
     )
 endif()
 

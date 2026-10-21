@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
 #include "librats/bindings/rats.h"
+#include "librats/bindings/rats_extend.h"
+#include "librats/node/node_context.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -743,6 +746,55 @@ TEST(NodeCApiTest, RelayingIsReachableFromTheCApi) {
     EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_ERR_DECLINED) << "already connected";
 
     rats_destroy(a); rats_destroy(b); rats_destroy(hub);
+}
+
+// A library's own subsystem on a C caller's node (rats_extend.h), here one that
+// records what the node did with it.
+struct Lifecycle {
+    std::atomic<int> attached{0}, started{0}, stopped{0}, destroyed{0};
+};
+
+class RecordingSubsystem final : public librats::Subsystem {
+public:
+    explicit RecordingSubsystem(Lifecycle& life) : life_(life) {}
+    ~RecordingSubsystem() override { ++life_.destroyed; }
+    void attach(librats::NodeContext&) override { ++life_.attached; }
+    void start() override { ++life_.started; }
+    void stop() override { ++life_.stopped; }
+
+private:
+    Lifecycle& life_;
+};
+
+TEST(NodeCApiTest, ALibraryAttachesASubsystemOfItsOwn) {
+    Lifecycle media, other, late, twice;
+    rats_t node = make_server();
+
+    EXPECT_EQ(rats_attach_subsystem(node, "media", std::make_unique<RecordingSubsystem>(media)),
+              RATS_OK);
+    EXPECT_EQ(rats_attach_subsystem(node, "media", std::make_unique<RecordingSubsystem>(twice)),
+              RATS_ERR_DECLINED);
+    EXPECT_EQ(twice.destroyed, 1) << "what is refused is destroyed";
+    EXPECT_EQ(rats_attach_subsystem(node, "other", std::make_unique<RecordingSubsystem>(other)),
+              RATS_OK);
+    EXPECT_EQ(rats_attach_subsystem(node, "", std::make_unique<RecordingSubsystem>(twice)),
+              RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_attach_subsystem(node, "none", nullptr), RATS_ERR_INVALID_ARG);
+
+    ASSERT_EQ(rats_start(node), RATS_OK);
+    EXPECT_EQ(media.attached, 1);
+    EXPECT_EQ(media.started, 1);
+    EXPECT_EQ(other.started, 1);
+    EXPECT_EQ(rats_attach_subsystem(node, "late", std::make_unique<RecordingSubsystem>(late)),
+              RATS_ERR_ALREADY_STARTED);
+    EXPECT_EQ(late.destroyed, 1);
+
+    rats_stop(node);
+    EXPECT_EQ(media.stopped, 1);
+    EXPECT_EQ(media.destroyed, 0) << "the node owns it until it is destroyed";
+    rats_destroy(node);
+    EXPECT_EQ(media.destroyed, 1);
+    EXPECT_EQ(other.destroyed, 1);
 }
 
 #ifndef RATS_SEARCH_FEATURES
