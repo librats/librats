@@ -802,6 +802,7 @@ struct Options {
     int    live_ms       = 150;
     bool   live_adapt    = false;  ///< sized to the estimate, first thing on the connection
     bool   live_duplex   = false;  ///< the responder sends the same video back: a call
+    bool   live_fresh    = false;  ///< fixed-rate video, first thing on the connection
 
     bool   help          = false;
 };
@@ -1482,7 +1483,9 @@ Run measure_wire(TransportKind kind, const Options& o) {
     measure_rtt(o, w, run);
     // A source that sizes itself to the estimate is measured on a connection
     // nothing has filled yet: after the bulk phases the estimate is the path's.
-    if (o.live_adapt && o.live_secs > 0) {
+    // So is a feed of fixed rate with --live-fresh: one joining a path its
+    // controller has yet to find.
+    if ((o.live_adapt || o.live_fresh) && o.live_secs > 0) {
         std::printf(" live ...");
         std::fflush(stdout);
         measure_live(o, w, run);
@@ -1496,7 +1499,7 @@ Run measure_wire(TransportKind kind, const Options& o) {
     std::printf(" small ...");
     std::fflush(stdout);
     measure_small(o, w, run);
-    if (o.live_secs > 0 && !o.live_adapt) {
+    if (o.live_secs > 0 && !o.live_adapt && !o.live_fresh) {
         std::printf(" live ...");
         std::fflush(stdout);
         measure_live(o, w, run);
@@ -1636,6 +1639,10 @@ int connect_and_measure(const Options& o) {
             std::printf("  (--live-adapt: the video ran first, on the fresh connection, at 90%% of\n"
                         "   the estimate from 1 Mbit/s up to --live-mbps. \"At full rate after\" is\n"
                         "   when it first got there, -1 if it never did.)\n");
+        else if (o.live_fresh)
+            std::printf("  (--live-fresh: the video ran first, on the fresh connection, at its\n"
+                        "   full rate from the first frame: a feed joining a path its congestion\n"
+                        "   controller has yet to find.)\n");
         if (o.live_duplex)
             std::printf("  (--live-duplex: the responder sent the same video back over the same\n"
                         "   seconds — a call, not a broadcast: each way's acknowledgements wait\n"
@@ -1692,6 +1699,8 @@ void usage() {
         "  --live-ms N       each frame's lifetime, ms          (default 150)\n"
         "  --live-adapt      size the video to the estimate, from 1 Mbit/s, on the\n"
         "                    fresh connection (before the bulk phases)\n"
+        "  --live-fresh      the fixed-rate video on the fresh connection instead,\n"
+        "                    at its full rate from the first frame\n"
         "  --live-duplex     the responder sends the same video back meanwhile: a call\n"
         "  -h, --help        this text\n"
         "\n"
@@ -1787,6 +1796,7 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (arg == "--live-mbps")    { if (!number(i, n, 1)) return false; o.live_mbps = static_cast<double>(n); }
         else if (arg == "--live-ms")      { if (!number(i, n, 1)) return false; o.live_ms = static_cast<int>(n); }
         else if (arg == "--live-adapt")   { o.live_adapt = true; }
+        else if (arg == "--live-fresh")   { o.live_fresh = true; }
         else if (arg == "--live-duplex")  { o.live_duplex = true; }
         else {
             std::fprintf(stderr, "bench_transport: unknown option '%s' (try --help)\n", arg.c_str());
