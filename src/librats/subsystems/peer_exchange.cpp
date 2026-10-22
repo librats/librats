@@ -26,6 +26,16 @@ uint16_t get_u16(const uint8_t* p) {
     return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
 }
 
+/// A response's entry: { [u8 ip_len][ip][u16 port][32B peer_id] }.
+void put_entry(Bytes& out, const Address& addr, const PeerId& id) {
+    const ByteView ip = addr.ip.bytes();  // 4 (v4) or 16 (v6) raw bytes
+    out.push_back(static_cast<uint8_t>(ip.size()));
+    out.insert(out.end(), ip.begin(), ip.end());
+    put_u16(out, addr.port);
+    const auto& id_bytes = id.bytes();
+    out.insert(out.end(), id_bytes.begin(), id_bytes.end());
+}
+
 } // namespace
 
 PeerExchange::PeerExchange() : PeerExchange(Config()) {}
@@ -38,6 +48,12 @@ void PeerExchange::attach(NodeContext& ctx) {
     network_->on(MessageType::Pex,
                          [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
+    // The request may have gone on the link that lost.
+    network_->on_peer_rerouted([this](const Peer& peer) { on_connected(peer); });
+    network_->on_peer_disconnected([this](const PeerId& peer, CloseReason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        introduced_.erase(peer);  // a peer that comes back is joining again
+    });
     network_->on_dial_failed([this](const Address& addr) { on_dial_failed(addr); });
 }
 
@@ -56,6 +72,7 @@ void PeerExchange::stop() {
     punch_.store(nullptr);
     std::lock_guard<std::mutex> lock(mutex_);
     pending_dials_.clear();
+    introduced_.clear();
 }
 
 // ── Outgoing request (on connect) ────────────────────────────────────────────
@@ -89,6 +106,7 @@ void PeerExchange::handle_request(const Peer& requester, uint16_t max) {
     const size_t limit = std::min<size_t>(max, config_.max_addresses_per_response);
     if (limit == 0) return;
     const PeerId& self = network_->local_id();
+    const std::vector<PeerInfo> peers = network_->peers();
 
     Bytes out;
     out.push_back(kVersion);
@@ -96,26 +114,50 @@ void PeerExchange::handle_request(const Peer& requester, uint16_t max) {
     const size_t count_pos = out.size();
     put_u16(out, 0);  // count placeholder, back-patched below
 
-    uint16_t count = 0;
-    for (const PeerInfo& p : network_->peers()) {
-        if (count >= limit) break;
+    std::vector<PeerId> listed;
+    for (const PeerInfo& p : peers) {
+        if (listed.size() >= limit) break;
         if (p.id == requester.id() || p.id == self) continue;  // not the asker, not us
         const Address* addr = pick_shareable(p.addresses);
         if (!addr) continue;
-
-        const ByteView ip = addr->ip.bytes();  // 4 (v4) or 16 (v6) raw bytes
-        out.push_back(static_cast<uint8_t>(ip.size()));
-        out.insert(out.end(), ip.begin(), ip.end());
-        put_u16(out, addr->port);
-        const auto& id_bytes = p.id.bytes();
-        out.insert(out.end(), id_bytes.begin(), id_bytes.end());
-        ++count;
+        put_entry(out, *addr, p.id);
+        listed.push_back(p.id);
     }
-    if (count == 0) return;  // nothing worth sending
+    if (config_.introduce_requesters) introduce(requester.id(), peers, listed);
+    if (listed.empty()) return;  // nothing worth sending
 
+    const auto count = static_cast<uint16_t>(listed.size());
     out[count_pos]     = static_cast<uint8_t>(count >> 8);
     out[count_pos + 1] = static_cast<uint8_t>(count & 0xFF);
     network_->send(requester.id(), MessageType::Pex, ByteView(out));
+}
+
+void PeerExchange::introduce(const PeerId& peer, const std::vector<PeerInfo>& peers,
+                             const std::vector<PeerId>& listed) {
+    const Address* addr = nullptr;
+    for (const PeerInfo& p : peers) {
+        if (p.id == peer) addr = pick_shareable(p.addresses);
+    }
+    // Not dialable (its identify still on the way, or it does not listen): the others
+    // could not reach it from a name alone. It reaches them from our answer instead.
+    if (!addr) return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!introduced_.insert(peer).second) return;  // once per connection
+    }
+
+    Bytes out;
+    out.push_back(kVersion);
+    out.push_back(kResponse);
+    put_u16(out, 1);
+    put_entry(out, *addr, peer);
+    for (const PeerInfo& p : peers) {
+        // Those it was told of dial it themselves: told of it too, they would dial
+        // back, and two links race where one would do.
+        if (p.id == peer || std::find(listed.begin(), listed.end(), p.id) != listed.end())
+            continue;
+        network_->send(p.id, MessageType::Pex, ByteView(out));
+    }
 }
 
 void PeerExchange::handle_response(ByteView body) {

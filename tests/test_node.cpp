@@ -461,6 +461,37 @@ TEST(NodeTest, SimultaneousCrossConnectConvergesOnOneLinkAtBothEnds) {
     }
 }
 
+// What one end says on "connected" may go on the link that loses the race and be
+// lost with it; on_peer_rerouted is the word to say it again. Here each end greets
+// the other on connect and again when rerouted, and every round each is greeted —
+// whichever link survives, however many of the rounds took the other first.
+TEST(NodeTest, WhatWasSaidOnALinkThatLostTheRaceIsSaidAgain) {
+    NodeConfig cfg = server_config();
+    cfg.transport_fallback_ms = 1;
+
+    for (int round = 0; round < 5; ++round) {
+        Node a(cfg), b(cfg);
+        std::atomic<int> greeted_a{0}, greeted_b{0};
+        for (auto [node, greeted] : {std::pair{&a, &greeted_a}, std::pair{&b, &greeted_b}}) {
+            node->on("hello", [greeted](const Peer&, ByteView) { ++*greeted; });
+            const auto greet = [](const Peer& peer) {
+                peer.send("hello", ByteView(std::string("hi")));
+            };
+            node->on_peer_connected(greet);
+            node->on_peer_rerouted(greet);
+        }
+        ASSERT_TRUE(a.start()) << "round " << round;
+        ASSERT_TRUE(b.start()) << "round " << round;
+        a.connect("127.0.0.1", b.listen_port());
+        b.connect("127.0.0.1", a.listen_port());
+
+        EXPECT_TRUE(wait_for([&] { return greeted_a > 0 && greeted_b > 0; }))
+            << "round " << round << ": a greeted " << greeted_a << ", b " << greeted_b;
+        a.stop();
+        b.stop();
+    }
+}
+
 // One Node instance can be started, stopped, and started again — sockets rebind
 // and threads relaunch cleanly across cycles.
 TEST(NodeTest, RestartCycles) {

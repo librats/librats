@@ -96,6 +96,14 @@ public:
     /// poll — it weighs those in-flight bytes too. False for an unknown peer.
     /// Default: always writable, all a mock that merely moves messages can claim.
     virtual bool                peer_writable(const PeerId& /*id*/) const { return true; }
+    /// A connected peer's traffic moved to another connection: a cross-connect or a
+    /// reconnect settled on a link other than the one "connected" fired for, and that
+    /// one is closed. What was sent on it and not yet delivered is lost, with no
+    /// disconnect to say so — a subsystem that tells a peer something once, on
+    /// connect (what it offers, what it asks for, a request), tells it again here.
+    /// What did arrive may so arrive twice. Runs on a reactor thread. Default: not
+    /// offered (a mock's peers never move).
+    virtual void                on_peer_rerouted(PeerEventHandler /*handler*/) {}
     /// A periodic sample of each connected peer's path (see PathStats) — what a
     /// sender that sizes its own output to the path, a live encoder above all,
     /// steers by. Registering one turns sampling on. Runs on a reactor thread.

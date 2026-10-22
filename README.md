@@ -520,6 +520,7 @@ std::optional<PathStats> path_stats(const PeerId& id) const;  // latest path sam
 void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
 void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&, CloseReason)
 void on_peer_writable(PeerEventHandler cb);      // (const Peer&) — room again
+void on_peer_rerouted(PeerEventHandler cb);      // (const Peer&) — moved to another link; say again what you said on connect
 void on_peer_path(PeerPathHandler cb);           // (const Peer&, const PathStats&) — see Path statistics
 void on_live_outcome(MessageType type, LiveOutcomeHandler cb);  // (const Peer&, tag, delivered) — see Live messages
 void on_dial_failed(DialFailedHandler cb);       // (const Address&) — a connect() that never came up

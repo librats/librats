@@ -103,6 +103,40 @@ TEST(PexE2E, DiscoversPeerThroughCommonNode) {
     hub.stop();
 }
 
+// The other half of a mesh that joins through one node: B, already in, never asks
+// again (and cannot be dialed: the hub has no address to hand out for it), so the only
+// way it hears of A, who joins after it, is the hub introducing A when A asks.
+TEST(PexE2E, IntroducesAPeerThatAsksToTheOthers) {
+    Node hub(listening_config());
+    NodeConfig dial_only = listening_config();
+    dial_only.enable_listen = false;
+    Node b(dial_only);
+    Node a(listening_config());
+
+    PeerExchange::Config introducing;
+    introducing.introduce_requesters = true;
+    hub.add_subsystem(std::make_unique<PeerExchange>(introducing));
+    PeerExchange::Config silent;
+    silent.request_on_connect = false;
+    b.add_subsystem(std::make_unique<PeerExchange>(silent));
+    a.add_subsystem(std::make_unique<PeerExchange>());
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(b.start());
+    ASSERT_TRUE(a.start());
+
+    b.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 1; }));
+    a.connect("127.0.0.1", hub.listen_port());
+    EXPECT_TRUE(wait_for([&] { return b.peer(a.local_id()).has_value(); }))
+        << "B never heard of A from the hub";
+    EXPECT_TRUE(wait_for([&] { return a.peer(b.local_id()).has_value(); }));
+
+    a.stop();
+    b.stop();
+    hub.stop();
+}
+
 // A peer learned through PEX whose advertised address will not dial (the NAT case)
 // must be handed to HolePunch rather than written off.
 TEST(PexE2E, PunchesPeerThatWillNotDial) {

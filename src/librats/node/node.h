@@ -257,6 +257,9 @@ public:
     /// half of send() returning false; an application that never checks that
     /// return never needs this. The handler runs on a reactor thread.
     void on_peer_writable(PeerNetwork::PeerEventHandler cb) override { peer_writable_.push_back(std::move(cb)); }
+    /// Subscribe to "this peer's traffic moved to another connection" (see
+    /// PeerNetwork::on_peer_rerouted). The handler runs on a reactor thread.
+    void on_peer_rerouted(PeerNetwork::PeerEventHandler cb) override { peer_rerouted_.push_back(std::move(cb)); }
     /// Subscribe to periodic path samples of every connected peer (see PathStats):
     /// the estimate to size a live sender to, the queue in front of its next
     /// message, round trip and loss. Registering turns sampling on, every
@@ -381,6 +384,7 @@ private:
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
     std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
     std::vector<PeerNetwork::PeerEventHandler>      peer_writable_;
+    std::vector<PeerNetwork::PeerEventHandler>      peer_rerouted_;
     std::vector<PeerNetwork::PeerPathHandler>       peer_path_;
     std::vector<std::pair<MessageType, PeerNetwork::LiveOutcomeHandler>> live_outcome_;
 

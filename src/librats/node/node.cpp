@@ -746,13 +746,19 @@ void Node::on_established(Connection& conn) {
         send_identify(conn);
 
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
-    // merely swapped the live route keeps the peer connected from the app's view.
+    // merely swapped the live route keeps the peer connected from the app's view —
+    // but what was sent on the route it replaced may not have arrived, so those who
+    // said something on "connected" hear that they may have to say it again.
     if (outcome.result == PeerTable::AddResult::NewPeer) {
         LOG_INFO("node", "Peer " << conn.remote_id().short_hex() << " connected ("
                  << (conn.role() == ConnRole::Inbound ? "inbound" : "outbound")
                  << " over " << to_string(conn.transport()) << ")");
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
+    } else if (outcome.result == PeerTable::AddResult::Replaced) {
+        LOG_DEBUG("node", "Peer " << conn.remote_id().short_hex() << " moved to another link");
+        Peer handle = make_peer(conn.remote_id(), route);
+        for (auto& cb : peer_rerouted_) cb(handle);
     }
 }
 

@@ -14,6 +14,17 @@
  * not already have. Both sides must run PeerExchange — the responder needs it to
  * answer the request.
  *
+ * Pulling alone leaves a gap: a peer the node cannot name in its answer — not yet
+ * identified, so with no address to give, or one that does not listen — never hears
+ * of the asker, and two that join through the same node at once can each ask before
+ * the other is named. With `introduce_requesters` the node closes it: a peer that
+ * asks is one joining the mesh, so it is introduced — a response naming it alone —
+ * to every peer its answer left out, once per connection; those it named dial it
+ * themselves, and telling them too would only race two links where one does. The
+ * introduction is an ordinary response (no wire change), dialed by the same rules.
+ * A request is asked again when the link it went on loses a cross-connect race
+ * (on_peer_rerouted): it, or its answer, may have gone with that link.
+ *
  * It rides on the node's identify layer: identify is what fills in each peer's
  * dialable address (an inbound peer's listen port is otherwise unknown), and PEX
  * simply forwards those addresses on. A discovered peer we dial becomes an
@@ -58,6 +69,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace librats {
@@ -91,6 +103,12 @@ public:
         std::chrono::milliseconds punch_window{std::chrono::seconds(30)};
         /// Bound on dials awaiting their verdict — one entry is an address and an id.
         size_t max_pending_dials          = 512;
+
+        /// Tell the peers an answer left out about the peer that asked, so that a
+        /// small mesh whose members join through one another closes even when two
+        /// join at once (see above). Costs a message to each of those per peer
+        /// joining — for a mesh of a few, not a swarm; off by default.
+        bool   introduce_requesters       = false;
     };
 
     PeerExchange();
@@ -105,6 +123,10 @@ private:
     void on_connected(const Peer& peer);
     void handle(const Peer& peer, ByteView payload);
     void handle_request(const Peer& requester, uint16_t max);
+    /// Name `peer` to those of `peers` its answer did not list, once per connection
+    /// (introduce_requesters).
+    void introduce(const PeerId& peer, const std::vector<PeerInfo>& peers,
+                   const std::vector<PeerId>& listed);
     void handle_response(ByteView body);
     /// An outbound dial resolved as failed. Ours ⇒ punch the peer it was meant for.
     void on_dial_failed(const Address& address);
@@ -131,6 +153,7 @@ private:
     std::mutex mutex_;
     std::unordered_map<Address, std::chrono::steady_clock::time_point> recent_dials_;
     std::unordered_map<Address, PendingDial>                           pending_dials_;
+    std::unordered_set<PeerId, PeerId::Hash>                           introduced_;
 };
 
 } // namespace librats
