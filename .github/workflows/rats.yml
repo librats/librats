@@ -68,7 +68,9 @@ jobs:
       
       - name: Build
         run: |
-          cmake --build build --config ${{ matrix.build-type }} --parallel
+          # A job per core: a bare --parallel is make's unbounded -j, every file at once,
+          # and ~400 MB a test file in Debug outgrows the runner's memory.
+          cmake --build build --config ${{ matrix.build-type }} --parallel 4
       
       - name: Run tests
         working-directory: build
