@@ -116,6 +116,14 @@ size_t UdpTransport::backlog() const noexcept { return conn_.queued_bytes(); }
 
 PathStats UdpTransport::path_stats() const { return conn_.path_stats(); }
 
+void UdpTransport::set_send_ceiling(uint64_t bits_per_second) {
+    conn_.set_send_ceiling(bits_per_second);
+    // What the pacer holds is held to the new rate from now. Outcomes wait for
+    // the next report: this may run inside a delegate's own callback.
+    conn_.flush(Clock::now());
+    mux_.touch(conn_);
+}
+
 void UdpTransport::on_maintenance_tick() { conn_.release_memory(); }
 
 void UdpTransport::close(CloseReason reason) {

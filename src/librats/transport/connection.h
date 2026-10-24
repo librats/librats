@@ -232,6 +232,10 @@ public:
     /// one caller, which is what gives "since the previous call" its meaning.
     PathStats sample_path();
 
+    /// Send no faster than `bits_per_second` (0: no ceiling); see
+    /// PeerNetwork::set_send_ceiling. Reactor thread.
+    void set_send_ceiling(uint64_t bits_per_second) { transport_->set_send_ceiling(bits_per_second); }
+
     /// Record the address this outbound connection was dialed at (so the peer's
     /// reconnect address is known). Set by the Reactor after adopt(); reactor thread.
     void set_dial_address(std::string host, uint16_t port) {

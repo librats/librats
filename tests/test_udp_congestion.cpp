@@ -1108,6 +1108,39 @@ TEST(UdpPacingTest, NoReleasePutsMoreThanOneBurstOnTheWire) {
     }
 }
 
+// A sender that knows several connections share its uplink sets each a ceiling
+// (PeerNetwork::set_send_ceiling): the connection then leaves no faster than it,
+// whatever the controller would pace at — and since it is the ceiling, not the
+// path, that holds packets back, the controller does not take it for the path.
+// Lifted, the rate is the path's again at once.
+TEST(UdpPacingTest, ACeilingHoldsTheRateBelowThePathAndIsNotTakenForIt) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        Sim sim(20, 40ms, 400);
+        Flow& f   = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(4s);
+
+        f.sender().set_send_ceiling(5'000'000);
+        sim.run(1s);
+        size_t at = f.delivered();
+        sim.run(3s);
+        const double held = mbps_of(f.delivered() - at, 3s);
+        EXPECT_LT(held, 5.0 * 1.02) << to_string(algo) << " sent past its ceiling";
+        EXPECT_GT(held, 5.0 * 0.85) << to_string(algo) << " sent well below its ceiling";
+        if (algo == CongestionAlgorithm::Bbr) {
+            EXPECT_GT(bbr(f.sender()).max_bw() * 8, 15'000'000u)
+                << "BBR took the ceiling for the path: " << bbr(f.sender()).max_bw() * 8 << " bit/s";
+        }
+        EXPECT_TRUE(f.sender().path_stats().app_limited) << to_string(algo);
+
+        f.sender().set_send_ceiling(0);
+        f.sender().flush(sim.now);
+        at = f.delivered();
+        sim.run(2s);
+        EXPECT_GT(mbps_of(f.delivered() - at, 2s), 15.0) << to_string(algo) << " did not come back";
+    }
+}
+
 // The same bound when the path comes back from an outage. The timeout writes off
 // the whole flight, so everything that goes out next is a repair, and BBR hands
 // back its window on the first acknowledgement. With repairs let past the pacer

@@ -1030,7 +1030,7 @@ void UdpConnection::expire_live(Clock::time_point now) {
     // finding the path, is no lower than what the live data is offered at.
     live_offered_.sample(now, live_send_.pushed_bytes());
     recovery_.set_live_offered(live_offered_.bytes_per_second());
-    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
+    live_send_.expire(now, one_way(), recovery_.pacing_rate());
     recovery_.set_impatient(live_send_.has_pending());
     // A message given up before any of it went was judged by the round trip
     // alone, and with nothing in flight no round trip comes back to correct it.
@@ -1380,7 +1380,7 @@ uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_poin
     // window after — an ack delay more for the last piece — and the second copy
     // takes the one-way delay. The window is the one the path has taught
     // Recovery: on a path that reorders, a loss waits that out before it is known.
-    const cc::PacingRate rate = recovery_.congestion().pacing_rate();
+    const cc::PacingRate rate = recovery_.pacing_rate();
     const Clock::duration out   = rate.paced() ? rate.time_for(layout.size) : Clock::duration::zero();
     const Clock::duration again = rtt.srtt + recovery_.reorder_window() + Recovery::kMaxAckDelay + one_way();
     const double target = now + out + again <= deadline ? kLiveLossTargetWithArq : kLiveLossTarget;
@@ -1459,7 +1459,8 @@ void UdpConnection::pump(Clock::time_point now) {
     recovery_.begin_sending(now, has_sendable_data());
     recovery_.clear_pacer_hold();
 
-    bool window_stopped = false;
+    bool window_stopped  = false;
+    bool ceiling_stopped = false;
     for (;;) {
         // Stopped by the peer's window with data waiting: say so, once per limit —
         // it is the only way a receiver learns its window is what holds us back.
@@ -1479,7 +1480,8 @@ void UdpConnection::pump(Clock::time_point now) {
                 with_data      = false;
             } else if (!recovery_.pace_allows(size) && !repairs_go_at_once()) {
                 recovery_.hold_for_pacer(now, size);
-                with_data = false;
+                with_data       = false;
+                ceiling_stopped = recovery_.ceiling_binds();
             }
         }
         if (!with_data && !control) break;
@@ -1493,10 +1495,13 @@ void UdpConnection::pump(Clock::time_point now) {
     // Padding only when nothing at all is waiting: data the peer holds back is
     // not the application's to pad around. A sender that pads has something to
     // send, so what it measures now is the path.
+    // Nor under a ceiling the application set: what padding would measure is
+    // the path past it, and the room it would take is the application's.
     const bool dry     = !has_sendable_data();
-    const bool padding = dry && waiting == 0 && recovery_.congestion().padding_limit() > 0;
+    const bool padding = dry && waiting == 0 && recovery_.congestion().padding_limit() > 0 &&
+                         recovery_.pacing_ceiling() == 0;
     if (padding) pad(now);
-    recovery_.note_send_limits(waiting > 0, window_stopped, dry && !padding);
+    recovery_.note_send_limits(waiting > 0, window_stopped, dry && !padding, ceiling_stopped);
 
     // Sending — or dropping what expired — made room.
     if (want_write_ && queued_bytes() < queued_before) raise(PollOut);

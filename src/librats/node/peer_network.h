@@ -112,6 +112,15 @@ public:
     /// The latest path sample for a peer, from any thread; nullopt if the peer is
     /// not connected, sampling is off, or no sample has been taken yet.
     virtual std::optional<PathStats> path_stats(const PeerId& /*id*/) const { return std::nullopt; }
+    /// Send to `id` no faster than `bits_per_second`, whatever its congestion
+    /// controller paces at; 0 lifts the ceiling. For a sender that knows several
+    /// connections share one uplink narrower than each path beyond it — copies of
+    /// a stream to several peers — and keeps their bursts from filling its queue
+    /// together, which no one connection's controller sees. Kept for the peer
+    /// across a change of link; forgotten when it disconnects. Paced on UDP
+    /// connections (TCP leaves pacing to the kernel). Any thread. Default: not
+    /// offered (a mock's sends are not paced).
+    virtual void set_send_ceiling(const PeerId& /*id*/, uint64_t /*bits_per_second*/) {}
     /// What becomes of each live message of `type` sent with a tag
     /// (SendOptions::tag), once per peer it went to: the moment it is delivered or
     /// given up on, as far as the sender can tell — sooner than a receiver could

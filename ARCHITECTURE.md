@@ -236,7 +236,11 @@ and it is the one place the wires differ.
   - **`Recovery` (`udp_recovery.{h,cpp}`)** is everything about packets: the sent
     log, RTT, RACK loss detection with its reorder timer, one reduction per loss
     episode (lasting until its repairs are through), probes before timeouts,
-    proportional rate reduction for Reno, and the pacer. It never looks inside a
+    proportional rate reduction for Reno, and the pacer — at the controller's
+    rate, or below it at a ceiling the application set for the peer
+    (`PeerNetwork::set_send_ceiling`: connections that share one uplink kept
+    within it together; held by the ceiling, rate samples are app-limited, so
+    the controller does not take it for the path). It never looks inside a
     packet: frames go back to the connection when their packet's fate is known.
   - **`SendStream` / `RecvStream` (`udp_streams.{h,cpp}`)** are byte-offset
     bookkeeping: what is owed again, what arrived out of order. Flow control is

@@ -68,6 +68,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace librats {
@@ -276,6 +277,7 @@ public:
     /// peer is not connected, no sample has been taken yet, or sampling is off
     /// (NodeConfig::path_sample_ms == 0 and no on_peer_path handler).
     std::optional<PathStats> path_stats(const PeerId& id) const override { return peers_.path(id); }
+    void set_send_ceiling(const PeerId& id, uint64_t bits_per_second) override;
     /// Register a handler for inbound messages on a named channel. Additive:
     /// multiple handlers may coexist. The handler runs on a reactor thread.
     void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
@@ -387,6 +389,11 @@ private:
     std::vector<PeerNetwork::PeerEventHandler>      peer_rerouted_;
     std::vector<PeerNetwork::PeerPathHandler>       peer_path_;
     std::vector<std::pair<MessageType, PeerNetwork::LiveOutcomeHandler>> live_outcome_;
+
+    // Send ceilings by peer (set_send_ceiling), for the link that carries it now
+    // and any it moves to.
+    mutable std::mutex                                       ceilings_mutex_;
+    std::unordered_map<PeerId, uint64_t, PeerId::Hash>      ceilings_;
 
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;

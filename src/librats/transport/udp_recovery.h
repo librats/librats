@@ -45,7 +45,11 @@
  *     the silence after a tail loss is a question, answered with one packet — and
  *     then the retransmission timeout, which writes off the flight and backs off.
  *   - The pacer: a token bucket a millisecond deep, bounded to kPaceMaxBurst per
- *     release, keeping the lateness of a coarse host clock (see pace_accrue).
+ *     release, keeping the lateness of a coarse host clock (see pace_accrue). It
+ *     releases at the controller's pacing rate, or at a ceiling the application
+ *     set if that is lower (set_pacing_ceiling: several connections sharing one
+ *     uplink the application knows), and while the ceiling is what holds packets
+ *     back the rate samples measure it, not the path: they are app-limited.
  *
  * Like everything on this path it holds no locks, never reads the clock (every
  * entry point takes `now`), and belongs to one connection on one reactor thread.
@@ -192,6 +196,15 @@ public:
     void hold_for_pacer(Clock::time_point now, size_t bytes) noexcept;
     void clear_pacer_hold() noexcept { pace_due_ = Clock::time_point{}; }
 
+    /// Release no faster than `bytes_per_second` (0: no ceiling), whatever the
+    /// controller paces at.
+    void set_pacing_ceiling(uint64_t bytes_per_second) noexcept { ceiling_ = bytes_per_second; }
+    uint64_t pacing_ceiling() const noexcept { return ceiling_; }
+    /// What the pacer releases at: the controller's rate, or the ceiling below it.
+    cc::PacingRate pacing_rate() const noexcept;
+    /// The ceiling is lower than what the controller would pace at.
+    bool ceiling_binds() const noexcept;
+
     /// Packet `next_pn()` of `bytes` just left, carrying the frames add_frame()
     /// recorded since the last one. `data` says it carries stream data — what the
     /// controller hears of; a packet of control frames alone is in flight but no
@@ -209,8 +222,10 @@ public:
     /// After a round of sending: whether data was left waiting with the window the
     /// only thing in its way, and whether there was nothing left to send at all
     /// (which makes the next rate samples measure the application, not the path)
-    /// — with data waiting all the same, held by the peer.
-    void note_send_limits(bool data_waiting, bool window_stopped, bool nothing_to_send);
+    /// — with data waiting all the same, held by the peer. `ceiling_stopped`: the
+    /// pacing ceiling held data back, which the samples measure as surely.
+    void note_send_limits(bool data_waiting, bool window_stopped, bool nothing_to_send,
+                          bool ceiling_stopped = false);
 
     // ── Acknowledgements ────────────────────────────────────────────────────
 
@@ -452,6 +467,7 @@ private:
     uint64_t          pace_tokens_ = 0;
     Clock::time_point pace_last_{};
     Clock::time_point pace_due_{};         ///< epoch = holding nothing back
+    uint64_t          ceiling_ = 0;        ///< bytes/s, 0 = none (set_pacing_ceiling)
     /// How late the connection typically gets to a release it was holding: what
     /// tells a host with a coarse timer from one that was late once.
     Clock::duration   pace_late_{};

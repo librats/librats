@@ -650,6 +650,26 @@ void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadli
     });
 }
 
+void Node::set_send_ceiling(const PeerId& id, uint64_t bits_per_second) {
+    {
+        std::lock_guard lock(ceilings_mutex_);
+        if (bits_per_second == 0) {
+            ceilings_.erase(id);
+        } else {
+            ceilings_[id] = bits_per_second;
+        }
+    }
+    const auto dest = peers_.destination(id);
+    if (!dest) return;
+    // Posted, never run inline: the caller may be a handler on that very
+    // reactor, holding locks of its own.
+    Reactor& reactor = reactors_->by_index(dest->route.reactor);
+    const ConnId conn = dest->route.conn;
+    reactor.post([&reactor, conn, bits_per_second] {
+        if (auto* c = reactor.find(conn)) c->set_send_ceiling(bits_per_second);
+    });
+}
+
 size_t Node::send_low_water() const noexcept {
     const size_t limit = config_.send_queue_limit != 0 ? config_.send_queue_limit
                                                        : Connection::kDefaultSendHighWater;
@@ -731,8 +751,17 @@ void Node::on_established(Connection& conn) {
     // as what is already queued — the two halves of one backlog, and the reason a
     // caller told "no room" is always the one told when the room comes back. The
     // route check keeps the loser of a race off the survivor's counter.
-    if (const auto dest = peers_.destination(conn.remote_id()); dest && dest->route == route)
+    if (const auto dest = peers_.destination(conn.remote_id()); dest && dest->route == route) {
         conn.set_in_transit(dest->owed);
+        // And the ceiling its sends were given, which goes with the peer.
+        uint64_t ceiling = 0;
+        {
+            std::lock_guard lock(ceilings_mutex_);
+            if (const auto it = ceilings_.find(conn.remote_id()); it != ceilings_.end())
+                ceiling = it->second;
+        }
+        if (ceiling != 0) conn.set_send_ceiling(ceiling);
+    }
 
     // Tell the peer how to reach us, and what address we see it at. Skipped for a
     // rejected duplicate (its connection was just closed above); sent on the
@@ -800,6 +829,10 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // it observed may well have been made for its link alone, and keeping it would
     // let a long-gone peer keep voting on how our NAT behaves.
     nat_status_.forget(id);
+    {
+        std::lock_guard lock(ceilings_mutex_);
+        ceilings_.erase(id);
+    }
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id, reason);
 }

@@ -1361,6 +1361,47 @@ TEST(TransportUdpTest, CarriesABulkTransfer) {
     server.stop();
 }
 
+// A ceiling set for a peer (PeerNetwork::set_send_ceiling) holds what is sent to
+// it, whether set before the peer connects — it goes with the peer to the link
+// that comes up — or lifted while it is connected.
+TEST(TransportUdpTest, ASendCeilingHoldsWhatGoesToThePeer) {
+    NodeConfig server_cfg = base_config();
+    server_cfg.enable_tcp = false;
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    client_cfg.enable_tcp    = false;
+
+    Node server(server_cfg), client(client_cfg);
+    std::atomic<size_t> total{0};
+    server.on("bulk", [&](Peer, ByteView payload) { total += payload.size(); });
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    client.set_send_ceiling(server.local_id(), 2'000'000);
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; }));
+
+    constexpr size_t kChunk = 16 * 1024, kChunks = 32;  // 512 KiB: 2.1 s at 2 Mbit/s
+    const std::string chunk(kChunk, 'z');
+    const auto send_all = [&] {
+        const size_t before = total.load();
+        const auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < kChunks; ++i) client.broadcast("bulk", ByteView(chunk));
+        EXPECT_TRUE(wait_for([&] { return total.load() == before + kChunk * kChunks; }, 30s));
+        return std::chrono::steady_clock::now() - start;
+    };
+    const auto held = send_all();
+    EXPECT_GT(held, 1600ms) << "the ceiling did not hold: "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(held).count()
+                            << " ms";
+
+    client.set_send_ceiling(server.local_id(), 0);
+    EXPECT_LT(send_all(), 500ms) << "the ceiling was not lifted";
+
+    client.stop();
+    server.stop();
+}
+
 // The mux is one socket in one address family, and a dial outside it can never
 // be carried. That has to be settled before the Syn goes out: the kernel refuses
 // each such datagram individually and says nothing a stream can act on, so an

@@ -57,6 +57,7 @@ public:
     size_t backlog() const noexcept override;
 
     PathStats path_stats() const override;
+    void      set_send_ceiling(uint64_t bits_per_second) override;
     void      on_maintenance_tick() override;
     void      close(CloseReason reason) override;
 

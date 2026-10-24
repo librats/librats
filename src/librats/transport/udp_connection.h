@@ -359,6 +359,13 @@ public:
     /// — not their repair symbols, which only fill time nothing else wants.
     size_t queued_bytes() const noexcept;
     PathStats path_stats() const noexcept;
+
+    /// Release no faster than `bits_per_second` (0: no ceiling), whatever the
+    /// controller paces at; see Recovery::set_pacing_ceiling. Takes effect at the
+    /// next flush().
+    void set_send_ceiling(uint64_t bits_per_second) noexcept {
+        recovery_.set_pacing_ceiling(bits_per_second / 8);
+    }
     void      release_memory();
 
     const udp::Recovery& recovery() const noexcept { return recovery_; }

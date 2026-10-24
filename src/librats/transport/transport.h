@@ -141,6 +141,11 @@ public:
     /// is the sampler's.
     virtual PathStats path_stats() const = 0;
 
+    /// Release no faster than `bits_per_second` (0: no ceiling), whatever the
+    /// congestion controller paces at. A transport that does not pace — a stream's
+    /// kernel does — ignores it.
+    virtual void set_send_ceiling(uint64_t /*bits_per_second*/) {}
+
     /// Periodic, from the reactor's maintenance sweep: give back memory an idle
     /// peer no longer needs. Never breaks the transport.
     virtual void on_maintenance_tick() = 0;

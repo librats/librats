@@ -55,11 +55,14 @@ bool Recovery::cwnd_allows(size_t bytes) const noexcept {
 }
 
 bool Recovery::pace_allows(size_t bytes) const noexcept {
-    if (!cc_->pacing_rate().paced()) return true;   // no rate to pace against
+    if (!pacing_rate().paced()) return true;   // no rate to pace against
     // An empty pipe is never held back: neither the one packet a collapsed window
     // allows nor the first after an idle period can congest anything, and both
-    // would deadlock against a rate derived from an empty pipe.
-    if (flight_bytes_ == 0) return true;
+    // would deadlock against a rate derived from an empty pipe. A ceiling is no
+    // such rate: on a path whose acks come back within the packet's own time —
+    // a LAN — the pipe empties after every packet, and a ceiling let past an
+    // empty one would hold nothing.
+    if (flight_bytes_ == 0 && !ceiling_binds()) return true;
     return pace_tokens_ >= bytes;
 }
 
@@ -125,7 +128,8 @@ void Recovery::on_packet_sent(Clock::time_point now, size_t bytes, bool ack_elic
     sent_.push_back(pkt);
 }
 
-void Recovery::note_send_limits(bool data_waiting, bool window_stopped, bool nothing_to_send) {
+void Recovery::note_send_limits(bool data_waiting, bool window_stopped, bool nothing_to_send,
+                                bool ceiling_stopped) {
     // Something is waiting and the window is what keeps it waiting — not the
     // pacer, which time resolves, and not the receiver, which only it can.
     if (data_waiting && window_stopped) cwnd_limited_ = true;
@@ -136,6 +140,19 @@ void Recovery::note_send_limits(bool data_waiting, bool window_stopped, bool not
     // the application, and until what is in flight now is delivered every rate
     // sample measures the application rather than the path.
     if (nothing_to_send && flight_bytes_ < cc_->cwnd()) sampler_.mark_app_limited(flight_bytes_);
+    // Held by the application's ceiling: what is in flight measures the ceiling.
+    if (ceiling_stopped) sampler_.mark_app_limited(flight_bytes_);
+}
+
+cc::PacingRate Recovery::pacing_rate() const noexcept {
+    const cc::PacingRate rate = cc_->pacing_rate();
+    return ceiling_binds() ? cc::PacingRate::per_second(ceiling_) : rate;
+}
+
+bool Recovery::ceiling_binds() const noexcept {
+    if (ceiling_ == 0) return false;
+    const cc::PacingRate rate = cc_->pacing_rate();
+    return !rate.paced() || rate.bytes_over(std::chrono::seconds(1)) > ceiling_;
 }
 
 // ── Pacing ──────────────────────────────────────────────────────────────────
@@ -149,7 +166,7 @@ void Recovery::pace_accrue(Clock::time_point now) {
     if (dt > cap) dt = cap;
     pace_last_ = now;
 
-    const cc::PacingRate rate = cc_->pacing_rate();
+    const cc::PacingRate rate = pacing_rate();
     if (!rate.paced()) {
         // Not pacing yet: keep the floor, so the first packet after the first
         // round trip is not held by a bucket that never had a chance to fill.
@@ -185,7 +202,7 @@ void Recovery::pace_accrue(Clock::time_point now) {
 }
 
 Clock::duration Recovery::pace_wait(size_t bytes) const noexcept {
-    const cc::PacingRate rate = cc_->pacing_rate();
+    const cc::PacingRate rate = pacing_rate();
     if (!rate.paced() || pace_tokens_ >= bytes) return Clock::duration::zero();
     return rate.time_for(static_cast<uint64_t>(bytes) - pace_tokens_);
 }
