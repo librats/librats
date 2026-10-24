@@ -33,6 +33,13 @@ class RATS_API PeerNetwork {
 public:
     virtual ~PeerNetwork() = default;
     using MessageHandler = std::function<void(const Peer&, ByteView)>;
+    /// A message handler that is also told each message's deadline: for a live
+    /// one (SendOptions::lifetime), the moment it was due to arrive here by the
+    /// time its sender gave it, on this node's clock (Frame::deadline) — what a
+    /// node passing it on gives the next hop, so that a message relayed does not
+    /// get its lifetime afresh at each. The epoch for a reliable message, and for
+    /// a live one that came over TCP or a byte-stream relay, which do not say.
+    using DeadlineMessageHandler = std::function<void(const Peer&, ByteView, Deadline)>;
 
     using PeerEventHandler       = std::function<void(const Peer&)>;
     /// A peer went away, and why. The reason matters as much as the event: an
@@ -72,6 +79,14 @@ public:
     virtual std::vector<PeerId>  connected_peers() const = 0;
     virtual std::vector<PeerInfo> peers() const = 0;  ///< snapshot incl. dialable addresses
     virtual void                on(MessageType type, MessageHandler handler) = 0;
+    /// on(), with each message's deadline. One handler per type, of either kind.
+    /// Default: every deadline the epoch, all a mock that merely moves messages
+    /// can say.
+    virtual void on_with_deadline(MessageType type, DeadlineMessageHandler handler) {
+        on(type, [handler = std::move(handler)](const Peer& peer, ByteView payload) {
+            handler(peer, payload, Deadline{});
+        });
+    }
 
     // Lifecycle hooks. Multiple subsystems (and the application) may subscribe;
     // all run on a reactor thread. Register before start().

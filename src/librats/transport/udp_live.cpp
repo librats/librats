@@ -18,6 +18,20 @@ uint64_t covered(const RangeSet& set, uint64_t lo, uint64_t hi) {
     return (hi - lo) - gaps;
 }
 
+/// The milliseconds a LIVE frame says its message had left, as a duration, no
+/// more than a live message may ever have.
+std::chrono::milliseconds left_of(uint64_t lifetime) noexcept {
+    return std::chrono::milliseconds(
+        (std::min<uint64_t>)(lifetime, static_cast<uint64_t>(SendOptions::kMaxLifetime.count())));
+}
+
+/// The deadline of a message whose packet came in at `now`, after a trip of
+/// `trip`, with `lifetime` milliseconds left as it left.
+LiveReceiver::Clock::time_point deadline_of(uint64_t lifetime, LiveReceiver::Clock::time_point now,
+                                            LiveReceiver::Clock::duration trip) noexcept {
+    return now - trip + left_of(lifetime);
+}
+
 } // namespace
 
 // ── LiveSender ──────────────────────────────────────────────────────────────
@@ -523,13 +537,13 @@ bool LiveReceiver::charge(Assembly& a, size_t bytes, HoldAccount& account) {
 }
 
 size_t LiveReceiver::start(uint64_t id, uint64_t size, uint64_t lifetime, Clock::time_point now,
-                           Clock::duration slack, HoldAccount& account) {
+                           Clock::duration slack, Clock::duration trip, HoldAccount& account) {
     // Room for all of it, at once.
     Assembly a;
     if (!charge(a, cost(static_cast<size_t>(size)), account)) return assembling_.size();
-    a.id      = id;
-    a.expires = now + std::chrono::milliseconds((std::min<uint64_t>)(
-                    lifetime, static_cast<uint64_t>(SendOptions::kMaxLifetime.count()))) + slack;
+    a.id       = id;
+    a.deadline = deadline_of(lifetime, now, trip);
+    a.expires  = now + left_of(lifetime) + slack;
     a.data.resize(static_cast<size_t>(size));
     assembling_.push_back(std::move(a));
     return assembling_.size() - 1;
@@ -539,11 +553,13 @@ void LiveReceiver::finish(size_t index, HoldAccount& account) {
     Assembly& a = assembling_[index];
     if (!a.have.covers(0, a.data.size())) return;
     mark_done(a.id);
-    assembled_.push_back(remove(index, account));
+    const Clock::time_point deadline = a.deadline;
+    assembled_.push_back(Assembled{remove(index, account), deadline});
 }
 
 LiveReceiver::Result LiveReceiver::on_frame(const LiveFrame& f, Clock::time_point now,
-                                            Clock::duration slack, HoldAccount& account) {
+                                            Clock::duration slack, HoldAccount& account,
+                                            Clock::duration trip) {
     if (!admit(f.id, account)) return Result::Taken;
 
     size_t index = find(f.id);
@@ -553,14 +569,17 @@ LiveReceiver::Result LiveReceiver::on_frame(const LiveFrame& f, Clock::time_poin
             // inbox, with no assembly and nothing to hold.
             uint8_t len[8];
             const size_t n = static_cast<size_t>(put_varint(len, f.size) - len);
-            const ByteSpan into = inbox_.prepare(n + f.data.size());
+            const Ticks ticks = deadline_of(f.lifetime, now, trip).time_since_epoch().count();
+            const size_t head = n + sizeof ticks;
+            const ByteSpan into = inbox_.prepare(head + f.data.size());
             std::memcpy(into.data(), len, n);
-            std::memcpy(into.data() + n, f.data.data(), f.data.size());
-            inbox_.commit(n + f.data.size());
+            std::memcpy(into.data() + n, &ticks, sizeof ticks);
+            std::memcpy(into.data() + head, f.data.data(), f.data.size());
+            inbox_.commit(head + f.data.size());
             mark_done(f.id);
             return Result::Taken;
         }
-        index = start(f.id, f.size, f.lifetime, now, slack, account);
+        index = start(f.id, f.size, f.lifetime, now, slack, trip, account);
         if (index == assembling_.size()) return Result::Refused;
     } else if (assembling_[index].data.size() != f.size) {
         return Result::Invalid;
@@ -575,7 +594,8 @@ LiveReceiver::Result LiveReceiver::on_frame(const LiveFrame& f, Clock::time_poin
 }
 
 LiveReceiver::Result LiveReceiver::on_repair(const LiveRepairFrame& f, Clock::time_point now,
-                                             Clock::duration slack, HoldAccount& account) {
+                                             Clock::duration slack, HoldAccount& account,
+                                             Clock::duration trip) {
     if (!admit(f.id, account)) return Result::Taken;
     const fec::Layout layout(static_cast<uint32_t>(f.size), static_cast<uint32_t>(f.symbol));
     if (f.index >= uint64_t{layout.blocks} * fec::kMaxRows) return Result::Invalid;
@@ -583,7 +603,7 @@ LiveReceiver::Result LiveReceiver::on_repair(const LiveRepairFrame& f, Clock::ti
 
     size_t at = find(f.id);
     if (at == assembling_.size()) {
-        at = start(f.id, f.size, f.lifetime, now, slack, account);
+        at = start(f.id, f.size, f.lifetime, now, slack, trip, account);
         if (at == assembling_.size()) return Result::Refused;
     } else if (assembling_[at].data.size() != f.size ||
                (assembling_[at].fec && assembling_[at].fec->layout.symbol != f.symbol)) {
@@ -673,7 +693,7 @@ std::optional<LiveReceiver::Clock::time_point> LiveReceiver::next_expiry() const
 
 size_t LiveReceiver::buffered() const noexcept {
     size_t n = inbox_.size() + assembling_bytes_;
-    for (size_t i = 0; i < assembled_.size(); ++i) n += assembled_[i].size();
+    for (size_t i = 0; i < assembled_.size(); ++i) n += assembled_[i].data.size();
     return n;
 }
 
@@ -682,7 +702,7 @@ void LiveReceiver::clear(HoldAccount& account) {
     assembling_.clear();
     assembling_bytes_ = 0;
     inbox_     = ReceiveBuffer();
-    assembled_ = RingBuffer<Bytes>();
+    assembled_ = RingBuffer<Assembled>();
     ++epoch_;
 }
 

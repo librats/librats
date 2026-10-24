@@ -695,9 +695,10 @@ bool UdpConnection::deliver(Clock::time_point now, Fn&& fn) {
     for (size_t i = 0; i <= n; ++i) {
         if (i == live_at && live_recv_.has_messages()) {
             bool stopped = false;
-            live_recv_.deliver([&](ByteView inner) {
-                const auto msg = framer::parse_message(inner);
+            live_recv_.deliver([&](ByteView inner, Clock::time_point deadline) {
+                auto msg = framer::parse_message(inner);
                 if (!msg.ok) { bad = true; return false; }
+                msg.frame.deadline = deadline;
                 return fn(msg.frame);
             }, stopped);
             if (bad) return protocol_error();

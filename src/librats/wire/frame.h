@@ -30,6 +30,7 @@
 
 #include "librats/util/rats_export.h"
 #include "librats/core/bytes.h"
+#include "librats/core/types.h"
 
 #include <cstdint>
 
@@ -61,6 +62,11 @@ struct FrameHeader {
 struct Frame {
     FrameHeader header;
     ByteView    payload;
+    /// A live message's deadline as its sender gave it, on this node's clock:
+    /// when it arrived, less the time the trip took (half the round trip), plus
+    /// the time it had left as it left. The epoch for a reliable message, and for
+    /// a live one that came over a byte stream, which does not say.
+    Deadline    deadline{};
 };
 
 /// What became of a live message sent with a tag (SendOptions::tag), as far as

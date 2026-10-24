@@ -300,6 +300,9 @@ public:
     bool                broadcast(MessageType type, ByteView payload, SendOptions options = {}) override;
     std::vector<PeerId> connected_peers() const override;
     void                on(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
+    void                on_with_deadline(MessageType type, PeerNetwork::DeadlineMessageHandler cb) override {
+        router_.on_type(type, std::move(cb));
+    }
 
 private:
     friend class Peer;

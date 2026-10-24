@@ -26,7 +26,13 @@ void MessageRouter::on_channel(std::string_view name, Handler handler) {
 }
 
 void MessageRouter::on_type(MessageType type, Handler handler) {
+    by_type_with_deadline_[static_cast<uint8_t>(type)] = nullptr;
     by_type_[static_cast<uint8_t>(type)] = std::move(handler);
+}
+
+void MessageRouter::on_type(MessageType type, DeadlineHandler handler) {
+    by_type_[static_cast<uint8_t>(type)] = nullptr;
+    by_type_with_deadline_[static_cast<uint8_t>(type)] = std::move(handler);
 }
 
 bool MessageRouter::dispatch(const Peer& peer, const Frame& frame) const {
@@ -36,7 +42,12 @@ bool MessageRouter::dispatch(const Peer& peer, const Frame& frame) const {
         it->second(peer, frame.payload);
         return true;
     }
-    const auto& handler = by_type_[static_cast<uint8_t>(frame.header.type)];
+    const uint8_t type = static_cast<uint8_t>(frame.header.type);
+    if (const auto& handler = by_type_with_deadline_[type]) {
+        handler(peer, frame.payload, frame.deadline);
+        return true;
+    }
+    const auto& handler = by_type_[type];
     if (!handler) return false;
     handler(peer, frame.payload);
     return true;

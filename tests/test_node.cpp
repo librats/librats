@@ -678,3 +678,46 @@ TEST_P(NodeLiveOutcomeTest, TheSenderHearsATaggedLiveMessageWasDelivered) {
 INSTANTIATE_TEST_SUITE_P(Transport, NodeLiveOutcomeTest,
                          ::testing::Values(TransportKind::Udp, TransportKind::Tcp),
                          [](const auto& info) { return std::string(to_string(info.param)); });
+
+// A handler that asks for deadlines hears a live message's — over UDP, which
+// carries the time it has left; TCP does not — and none for a reliable one.
+TEST_P(NodeLiveOutcomeTest, AHandlerHearsWhenALiveMessageIsDue) {
+    NodeConfig cc = client_config();
+    cc.enable_udp = GetParam() == TransportKind::Udp;
+    cc.enable_tcp = GetParam() == TransportKind::Tcp;
+    cc.preferred_transport = GetParam();
+    Node server(server_config());
+    Node client(cc);
+
+    std::mutex mu;
+    std::vector<std::pair<std::string, Deadline>> received;
+    server.on_with_deadline(MessageType::Media, [&](const Peer&, ByteView bytes, Deadline deadline) {
+        std::lock_guard<std::mutex> l(mu);
+        received.emplace_back(std::string(bytes.begin(), bytes.end()), deadline);
+    });
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    client.send(server.local_id(), MessageType::Media, ByteView(std::string("reliable")));
+    const Deadline due = std::chrono::steady_clock::now() + 2s;
+    client.send(server.local_id(), MessageType::Media, ByteView(std::string("live")), SendOptions{2s});
+    ASSERT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> l(mu);
+        return received.size() == 2;
+    }));
+    std::lock_guard<std::mutex> l(mu);
+    std::sort(received.begin(), received.end());   // the two need not keep their order
+    EXPECT_EQ(received[0].first, "live");
+    if (GetParam() == TransportKind::Udp) {
+        EXPECT_LT(std::chrono::abs(received[0].second - due), 50ms);
+    } else {
+        EXPECT_EQ(received[0].second, Deadline{});
+    }
+    EXPECT_EQ(received[1].first, "reliable");
+    EXPECT_EQ(received[1].second, Deadline{});
+
+    client.stop();
+    server.stop();
+}

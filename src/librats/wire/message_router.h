@@ -28,12 +28,17 @@ namespace librats {
 class RATS_API MessageRouter {
 public:
     using Handler = std::function<void(const Peer&, ByteView)>;
+    /// One that is also told the message's deadline (Frame::deadline).
+    using DeadlineHandler = std::function<void(const Peer&, ByteView, Deadline)>;
 
     /// Deterministic 16-bit channel id (FNV-1a) for a channel name.
     static uint16_t channel_id(std::string_view name);
 
     void on_channel(std::string_view name, Handler handler);
+    /// Each type has one handler: registering one replaces the one before, of
+    /// either kind.
     void on_type(MessageType type, Handler handler);
+    void on_type(MessageType type, DeadlineHandler handler);
 
     /// Dispatch one decoded frame to its handler, if any. Returns true if handled.
     bool dispatch(const Peer& peer, const Frame& frame) const;
@@ -42,6 +47,7 @@ private:
     std::unordered_map<uint16_t, Handler>     by_channel_;
     std::unordered_map<uint16_t, std::string> channel_names_;  // for collision checks
     std::array<Handler, 256>                  by_type_{};
+    std::array<DeadlineHandler, 256>          by_type_with_deadline_{};
 };
 
 } // namespace librats

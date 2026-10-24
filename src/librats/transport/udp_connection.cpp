@@ -546,7 +546,7 @@ bool UdpConnection::on_live(const LiveFrame& f, Clock::time_point now, bool& ref
     last_data_recv_ = now;
     // What is being put together is given up a probe timeout after its sender
     // stopped repairing it: slack for a repair that left just in time.
-    switch (live_recv_.on_frame(f, now, recovery_.probe_timeout(), account_)) {
+    switch (live_recv_.on_frame(f, now, recovery_.probe_timeout(), account_, one_way())) {
         case LiveReceiver::Result::Taken:
             if (live_recv_.has_messages()) raise(PollIn);
             return true;
@@ -564,7 +564,7 @@ bool UdpConnection::on_live(const LiveFrame& f, Clock::time_point now, bool& ref
 bool UdpConnection::on_live_repair(const LiveRepairFrame& f, Clock::time_point now, bool& refused) {
     if (!reading_ || refused) return true;
     last_data_recv_ = now;
-    switch (live_recv_.on_repair(f, now, recovery_.probe_timeout(), account_)) {
+    switch (live_recv_.on_repair(f, now, recovery_.probe_timeout(), account_, one_way())) {
         case LiveReceiver::Result::Taken:
             if (live_recv_.has_messages()) raise(PollIn);
             return true;

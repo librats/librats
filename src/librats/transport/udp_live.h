@@ -48,10 +48,14 @@
  * ever arrives.
  *
  * The receiver puts each message together from its pieces and hands it over the
- * moment it is whole, in no order. A message is given up on when the time it had
- * left (plus a round trip of slack) has passed since its first piece came in —
- * the sender stopped repairing it by then — and the memory of what is being put
- * together is charged to the same account a stream's holes are.
+ * moment it is whole, in no order, with its deadline on the receiver's clock:
+ * when its first piece came in, less the trip it took (half the round trip),
+ * plus the time it had left as that piece left — what a node passing it on
+ * gives the next hop, so that a message relayed does not get its lifetime
+ * afresh at each. A message is given up on when the time it had left (plus a
+ * round trip of slack) has passed since its first piece came in — the sender
+ * stopped repairing it by then — and the memory of what is being put together
+ * is charged to the same account a stream's holes are.
  *
  * A message pushed with a tag (SendOptions::tag) leaves word of what became of
  * it — delivered or given up on — once that is settled, for the connection to
@@ -81,6 +85,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -362,13 +367,15 @@ public:
     LiveReceiver& operator=(const LiveReceiver&) = delete;
 
     /// Take one LIVE frame, charging what is held to `account`. A message still
-    /// incomplete is given up on its lifetime plus `slack` from now.
+    /// incomplete is given up on its lifetime plus `slack` from now. `trip` is how
+    /// long the packet took to come, as far as is known: what its deadline is
+    /// reckoned back by.
     Result on_frame(const LiveFrame& frame, Clock::time_point now, Clock::duration slack,
-                    HoldAccount& account);
+                    HoldAccount& account, Clock::duration trip = {});
     /// Take one LIVE_REPAIR frame, likewise. What a repair symbol stands in for is
     /// rebuilt the moment there are enough of them.
     Result on_repair(const LiveRepairFrame& frame, Clock::time_point now, Clock::duration slack,
-                     HoldAccount& account);
+                     HoldAccount& account, Clock::duration trip = {});
 
     /// Give up on what has outlived its message's lifetime.
     void expire(Clock::time_point now, HoldAccount& account);
@@ -378,7 +385,8 @@ public:
     /// Bytes held: messages complete and not yet delivered, and those being put together.
     size_t buffered() const noexcept;
 
-    /// Hand every complete message to `fn(ByteView inner)`, until it returns false.
+    /// Hand every complete message to `fn(ByteView inner, Clock::time_point
+    /// deadline)`, until it returns false.
     /// `stopped` says the walk ended early — `fn` said so, or closed the
     /// connection, which cleared what it was walking.
     template <typename Fn>
@@ -400,6 +408,7 @@ private:
     };
     struct Assembly {
         uint64_t          id = 0;
+        Clock::time_point deadline{};
         Clock::time_point expires{};
         Bytes             data;
         RangeSet          have;
@@ -419,7 +428,7 @@ private:
     /// Begin putting together a message of `size` bytes, if there is room for all of
     /// it. Its index, or assembling_.size() if there is not.
     size_t start(uint64_t id, uint64_t size, uint64_t lifetime, Clock::time_point now,
-                 Clock::duration slack, HoldAccount& account);
+                 Clock::duration slack, Clock::duration trip, HoldAccount& account);
     bool charge(Assembly& a, size_t bytes, HoldAccount& account);
     /// Bytes [lo, hi) of `a` are in: a symbol they complete counts towards its block.
     void note_source(Assembly& a, uint64_t lo, uint64_t hi, HoldAccount& account);
@@ -438,9 +447,18 @@ private:
     std::vector<uint64_t>        done_;
     std::vector<Assembly>        assembling_;   ///< a few at most: scanned, not mapped
     size_t                       assembling_bytes_ = 0;
-    /// Messages that came in one frame, as [varint length][message], back to back.
+    /// A message put together from pieces, and its deadline.
+    struct Assembled {
+        Bytes             data;
+        Clock::time_point deadline{};
+    };
+    /// A message's deadline, as written into the inbox.
+    using Ticks = Clock::rep;
+
+    /// Messages that came in one frame, as [varint length][deadline: Ticks]
+    /// [message], back to back.
     ReceiveBuffer                inbox_;
-    RingBuffer<Bytes>            assembled_;    ///< put together from pieces
+    RingBuffer<Assembled>        assembled_;
     uint64_t                     epoch_ = 0;    ///< bumped by clear()
 };
 
@@ -453,18 +471,22 @@ void LiveReceiver::deliver(Fn&& fn, bool& stopped) {
         Reader r(inbox_.data() + at, inbox_.size() - at);
         uint64_t len = 0;
         r.varint(len);   // written by on_frame: always whole
+        Ticks ticks = 0;
         const size_t head = inbox_.size() - at - r.left();
-        const bool more = fn(ByteView(inbox_.data() + at + head, static_cast<size_t>(len)));
+        std::memcpy(&ticks, inbox_.data() + at + head, sizeof ticks);
+        const size_t body = head + sizeof ticks;
+        const bool more = fn(ByteView(inbox_.data() + at + body, static_cast<size_t>(len)),
+                             Clock::time_point(Clock::duration(ticks)));
         if (epoch_ != epoch) { stopped = true; return; }   // cleared under us
-        at += head + static_cast<size_t>(len);
+        at += body + static_cast<size_t>(len);
         if (!more) { stopped = true; break; }
     }
     inbox_.consume(at);
     if (stopped) return;
     while (!assembled_.empty()) {
-        Bytes message = std::move(assembled_.front());
+        Assembled message = std::move(assembled_.front());
         assembled_.pop_front();
-        const bool more = fn(ByteView(message));
+        const bool more = fn(ByteView(message.data), message.deadline);
         if (epoch_ != epoch || !more) { stopped = true; return; }
     }
 }

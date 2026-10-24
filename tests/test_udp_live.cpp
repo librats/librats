@@ -91,11 +91,13 @@ udp::LiveRepairFrame repair_of(const Piece& p, uint64_t lifetime = 1000) {
     return f;
 }
 
-std::vector<std::string> delivered(LiveReceiver& r) {
+std::vector<std::string> delivered(LiveReceiver& r,
+                                   std::vector<LiveReceiver::Clock::time_point>* deadlines = nullptr) {
     std::vector<std::string> out;
     bool stopped = false;
-    r.deliver([&](ByteView m) {
+    r.deliver([&](ByteView m, LiveReceiver::Clock::time_point deadline) {
         out.emplace_back(m.begin(), m.end());
+        if (deadlines) deadlines->push_back(deadline);
         return true;
     }, stopped);
     return out;
@@ -525,6 +527,29 @@ TEST(LiveReceiverTest, PutsPiecesTogetherInAnyOrderAndDeliversOnce) {
     EXPECT_EQ(r.buffered(), 0u);
 }
 
+TEST(LiveReceiverTest, AMessageIsDueWhenItsSenderSaid) {
+    LiveSender s;
+    s.push(FrameHeader{MessageType::App, 0, 4}, ByteView(std::string(2500, 'a')), kT0 + 1s);
+    s.push(FrameHeader{MessageType::App, 0, 5}, ByteView(std::string("small")), kT0 + 1s);
+    const auto pieces = drain(s, 1000);
+    ASSERT_EQ(pieces.size(), 4u);
+    udp::HoldAccount account;
+    LiveReceiver r;
+    // Each packet came 20 ms after it left. The large message's first piece
+    // left with 150 ms to go and its others later, with less; the small one
+    // with 90.
+    r.on_frame(frame_of(pieces[0], 150), kT0, 10ms, account, 20ms);
+    r.on_frame(frame_of(pieces[1], 140), kT0 + 10ms, 10ms, account, 20ms);
+    r.on_frame(frame_of(pieces[3], 90), kT0 + 15ms, 10ms, account, 20ms);
+    r.on_frame(frame_of(pieces[2], 130), kT0 + 20ms, 10ms, account, 20ms);
+    std::vector<LiveReceiver::Clock::time_point> deadlines;
+    const auto got = delivered(r, &deadlines);
+    ASSERT_EQ(got.size(), 2u);
+    EXPECT_EQ(got[0], inner("small", 5));
+    EXPECT_EQ(deadlines[0], kT0 + 15ms - 20ms + 90ms);
+    EXPECT_EQ(deadlines[1], kT0 - 20ms + 150ms) << "by its first piece";
+}
+
 TEST(LiveReceiverTest, PiecesThatDisagreeAboutTheirMessageAreInvalid) {
     udp::HoldAccount account;
     LiveReceiver r;
@@ -742,6 +767,26 @@ TEST(UdpLiveTest, ArriveWholeWhateverTheirSize) {
     const PathStats st = p.a.conn->path_stats();
     EXPECT_EQ(st.live_sent, 2u);
     EXPECT_EQ(st.live_expired, 0u);
+}
+
+// What a node relaying a message on gives the next hop: the time it has left
+// of what its sender gave it, not its lifetime afresh.
+TEST(UdpLiveTest, ArriveWithTheDeadlineTheirSenderGaveThem) {
+    Pair p(true, 25ms);
+    ASSERT_TRUE(p.connect());
+    send_live(p, "frame", 150ms);
+    const Clock::time_point due = p.now + 150ms;
+    send_live(p, std::string(20000, 'k'), 300ms);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2; }));
+    // The time left is told in whole milliseconds, the trip reckoned by the
+    // round trip.
+    const auto off = [](Clock::duration d) { return std::chrono::abs(d); };
+    EXPECT_LE(off(p.b.messages[0].deadline - due), 2ms);
+    EXPECT_LE(off(p.b.messages[1].deadline - (due + 150ms)), 2ms);
+    ASSERT_TRUE(p.a.send(MessageType::App, "reliable"));
+    p.a.conn->flush(p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 3; }));
+    EXPECT_EQ(p.b.messages[2].deadline, Clock::time_point{}) << "a reliable one has none";
 }
 
 // Two keyframes of the largest size a live message may have, frames behind

@@ -42,9 +42,10 @@ public:
 };
 
 struct Message {
-    MessageType type;
-    uint16_t    channel;
-    std::string payload;
+    MessageType       type;
+    uint16_t          channel;
+    std::string       payload;
+    Clock::time_point deadline{};   ///< Frame::deadline
 };
 
 class End final : public UdpConnectionHost {
@@ -89,7 +90,7 @@ public:
             bytes_in += f.payload.size();
             if (!count_only)
                 messages.push_back({f.header.type, f.header.channel,
-                                    std::string(f.payload.begin(), f.payload.end())});
+                                    std::string(f.payload.begin(), f.payload.end()), f.deadline});
             return true;
         });
     }
