@@ -268,9 +268,8 @@ TEST(NodeTest, DisconnectNotifiesPeer) {
 // Node is destroyed. Regression: a stopped node kept the port bound, so a fresh
 // node on the same fixed port failed to bind (as seen in the Node.js test suite,
 // which reuses fixed ports across sequential cases). We learn a real free port
-// from an ephemeral bind, stop, then re-bind that exact port. Observable on Linux
-// (SO_REUSEADDR there rejects a second listener on a still-bound port); Windows
-// SO_REUSEADDR is permissive enough to mask it, so this passes there regardless.
+// from an ephemeral bind, stop, then re-bind that exact port; a listener still
+// bound there would refuse the second bind.
 TEST(NodeTest, StopReleasesListenPort) {
     uint16_t port = 0;
     {
@@ -304,17 +303,9 @@ TEST(NodeTest, TakenPortWalksToNextFreePort) {
     c.listen_port = taken;                    // occupied by the node above
     Node node(c);
     ASSERT_TRUE(node.start()) << "a taken port should not fail start()";
-#ifndef _WIN32
-    // Windows is exempt from the rest: create_tcp_server() sets SO_REUSEADDR,
-    // which there lets a bind succeed on a port another socket of the same user
-    // is already listening on. bind() never reports EADDRINUSE, so there is no
-    // clash for open_listeners() to walk past and the node stays on the taken
-    // port. Starting at all — which is what this test is really about — still
-    // holds, and is asserted above for every platform.
     EXPECT_NE(node.listen_port(), taken);
     EXPECT_GT(node.listen_port(), taken);
     EXPECT_LE(node.listen_port(), taken + 4); // kBindAttempts - 1 steps up
-#endif
 
     node.stop();
     squatter.stop();

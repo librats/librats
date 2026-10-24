@@ -478,7 +478,13 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
         return RATS_INVALID_SOCKET;
     }
 
-    // Set socket option to reuse address
+    // Reuse the address, so a listener can come back on its port while the
+    // connections it accepted wait out TIME_WAIT — but not on Windows, where the
+    // option means something else: a bind with it succeeds on a port another
+    // socket of the same user is still listening on, and the two then split the
+    // incoming connections. Windows needs no option to bind over TIME_WAIT, and
+    // without it a taken port fails with WSAEADDRINUSE as it does everywhere else.
+#ifndef _WIN32
     int opt = 1;
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR,
                    (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
@@ -487,6 +493,7 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
         close_socket(server_socket);
         return RATS_INVALID_SOCKET;
     }
+#endif
 
     // For IPv6/DualStack sockets, configure IPV6_V6ONLY
     if (family == AF_INET6) {

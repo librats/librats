@@ -68,6 +68,51 @@ TEST_F(SocketTest, TCPServerCreationTest) {
     close_socket(server_v6);
 }
 
+// A port another listener holds is refused, on Windows too: SO_REUSEADDR there
+// would let the second bind succeed and the two split the incoming connections.
+TEST_F(SocketTest, TcpServerRefusesAPortAnotherListenerHolds) {
+    socket_t held = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(held));
+    const int port = get_bound_port(held);
+    ASSERT_GT(port, 0);
+
+    socket_t second = create_tcp_server(port, 5, "127.0.0.1", AddressFamily::IPv4);
+    EXPECT_FALSE(is_valid_socket(second)) << "a second listener took a taken port";
+    EXPECT_TRUE(last_error_was_port_unavailable());
+    if (is_valid_socket(second)) close_socket(second);
+    close_socket(held);
+}
+
+// The other half: a listener comes back on its port at once, though a connection
+// it accepted and closed first still waits out TIME_WAIT on it — what a node
+// restarted on its configured port meets.
+TEST_F(SocketTest, TcpServerRebindsAPortItsClosedConnectionsWaitOn) {
+    socket_t server = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(server));
+    const int port = get_bound_port(server);
+    ASSERT_GT(port, 0);
+
+    socket_t accepted = RATS_INVALID_SOCKET;
+    std::thread server_thread([&]() { accepted = accept_client(server); });
+    socket_t client = create_tcp_client("127.0.0.1", port, 2000);
+    ASSERT_TRUE(is_valid_socket(client));
+    server_thread.join();
+    ASSERT_TRUE(is_valid_socket(accepted));
+
+    // The server's side closes first, so the TIME_WAIT is on the listener's port.
+    close_socket(accepted);
+    TcpRecvStatus status = TcpRecvStatus::Data;
+    receive_tcp_data(client, 1024, 2000, RATS_INVALID_SOCKET, &status);
+    EXPECT_EQ(status, TcpRecvStatus::Closed);
+    close_socket(client);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the last FIN in
+    close_socket(server);
+
+    socket_t again = create_tcp_server(port, 5, "127.0.0.1", AddressFamily::IPv4);
+    EXPECT_TRUE(is_valid_socket(again)) << "a listener could not come back on its port";
+    if (is_valid_socket(again)) close_socket(again);
+}
+
 // Test UDP socket creation with AddressFamily
 TEST_F(SocketTest, UDPSocketCreationTest) {
     // Test dual-stack UDP socket
