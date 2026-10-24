@@ -180,6 +180,13 @@ void UdpMux::send_stateless_reset(const Address& to, Cid dcid, size_t trigger_le
     send_datagram(to, len);
 }
 
+void UdpMux::send_foreign(const Address& to, ByteView datagram) {
+    if (datagram.empty() || datagram.size() > kMaxDatagram) return;
+    std::memcpy(datagram_buffer(), datagram.data(), datagram.size());
+    send_datagram(to, datagram.size());
+    flush_output();
+}
+
 // ── Deadline scheduling ─────────────────────────────────────────────────────
 
 void UdpMux::arm(Cid cid, Entry& entry) {
@@ -333,7 +340,10 @@ bool UdpMux::on_readable() {
 
 void UdpMux::handle_datagram(uint8_t* data, size_t len, const Address& from, Clock::time_point now) {
     Cid dcid = 0;
-    if (!peek_dcid(data, len, dcid)) return;   // not a packet of this protocol
+    if (!peek_dcid(data, len, dcid)) {   // not a packet of this protocol
+        if (foreign_ && len > 0 && !has_fixed_bit(data[0])) foreign_(ByteView(data, len), from);
+        return;
+    }
 
     if (auto it = conns_.find(dcid); it != conns_.end()) {
         // From wherever it comes: a source address is trivially forged, so what

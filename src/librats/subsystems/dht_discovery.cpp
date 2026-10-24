@@ -2,9 +2,11 @@
 #include "librats/node/node_context.h"
 #include "librats/node/host_events.h"
 #include "librats/node/dial_service.h"
+#include "librats/node/reflexive_probe.h"
 #include "librats/nat/stun.h"
 #include "librats/crypto/sha1.h"
 #include "librats/util/fs.h"
+#include "librats/util/network_utils.h"
 #include "librats/util/logger.h"
 
 #include <algorithm>
@@ -89,6 +91,7 @@ void DhtDiscovery::attach(NodeContext& ctx) {
     // node's maintenance thread); the actual STUN runs on our own loop thread.
     ctx.events.on<NetworkChanged>([this](const NetworkChanged&) {
         mapped_port_.store(0);  // renewed, and told again, if it still can be
+        reflexive_port_.store(0);  // asked again
         recover_pending_.store(true);
         wake_.notify_all();
     });
@@ -104,11 +107,15 @@ void DhtDiscovery::attach(NodeContext& ctx) {
         wake_.notify_all();
     });
     dial_ = ctx.services.get<DialService>();
+    reflexive_ = ctx.services.get<ReflexiveAddressService>();
 }
 
-uint16_t DhtDiscovery::announced_port() const {
-    const uint16_t mapped = mapped_port_.load();
-    return mapped != 0 ? mapped : network_->listen_port();
+uint16_t DhtDiscovery::announced_port(bool v6) const {
+    const uint16_t listen = network_->listen_port();
+    if (v6) return listen;
+    if (const uint16_t mapped = mapped_port_.load()) return mapped;
+    if (const uint16_t seen = reflexive_port_.load()) return seen;
+    return listen;
 }
 
 std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
@@ -177,43 +184,83 @@ std::string DhtDiscovery::external_address() const {
 }
 
 // Discover our reflexive (public) address via STUN and feed it to the DHT so the
-// node id is BEP-42-correct from the start instead of waiting for "ip" voting.
+// node id is BEP-42-correct from the start instead of waiting for "ip" voting —
+// from the shared datagram socket, whose mapping is then the port announced, or,
+// on a node without one, from a socket of our own, for the IP alone.
 // Runs on the loop thread; stop() joins that thread before resetting dht_, so the
 // dht_ access here can never touch a freed client.
-void DhtDiscovery::probe_external_ip() {
+bool DhtDiscovery::probe_external_ip() {
     std::vector<HostEndpoint> servers = config_.stun_servers.empty() ? default_stun_servers()
                                                                       : config_.stun_servers;
+    const bool shared = reflexive_ && (network_->transports() & PeerTransportUdp) != 0;
     StunClient stun;
-    const int timeout = static_cast<int>(config_.stun_timeout.count());
+    std::optional<Address> first;
     for (const HostEndpoint& s : servers) {
-        if (!running_.load()) return;  // stopping; don't keep probing
-        StunResult r = stun.binding_request(s.host, s.port, timeout);
-        if (r.success && r.mapped_address) {
-            const std::string& ip = r.mapped_address->address;
-            LOG_INFO("dht-discovery", "STUN reflexive address " << ip << " (via " << s.host << ":" << s.port << ")");
-            // Feed it to whichever clients are up; each ignores it if it's not a
-            // public address of its own family (e.g. a v4 reflexive on the v6 client).
-            if (running_.load()) for_each_client([&](DhtClient& c) { c.set_external_ip(ip); });
-            return;
+        if (!running_.load()) return false;  // stopping; don't keep probing
+        std::optional<Address> seen;
+        if (shared) {
+            const std::optional<IpAddress> ip = IpAddress::parse(network_utils::resolve_hostname(s.host));
+            if (ip && ip->is_v4()) seen = reflexive_->udp_endpoint(Address{*ip, s.port}, config_.stun_timeout);
+        } else {
+            const StunResult r = stun.binding_request(s.host, s.port, static_cast<int>(config_.stun_timeout.count()));
+            if (r.success && r.mapped_address)
+                if (const std::optional<IpAddress> ip = IpAddress::parse(r.mapped_address->address))
+                    seen = Address{*ip, 0};
         }
+        if (!seen) continue;
+
+        if (first) {
+            // A second server, asked once: a NAT that maps the socket anew for it
+            // does so for every peer (symmetric), and no peer's dial gets through.
+            if (seen->port != first->port)
+                LOG_WARN("dht-discovery", "The NAT maps our socket to another port for each destination ("
+                         << first->port << ", " << seen->port << "): peers cannot dial it");
+            return true;
+        }
+        first = seen;
+        const std::string ip = seen->ip.to_string();
+        if (seen != last_seen_) {
+            LOG_INFO("dht-discovery", "STUN reflexive address " << (shared ? seen->to_string() : ip)
+                     << " (via " << s.host << ":" << s.port << ")");
+        }
+        last_seen_ = seen;
+        // Feed it to whichever clients are up; each ignores it if it's not a
+        // public address of its own family (e.g. a v4 reflexive on the v6 client).
+        if (running_.load()) for_each_client([&](DhtClient& c) { c.set_external_ip(ip); });
+        if (shared) reflexive_port_.store(seen->port);
+        if (!shared || mapping_checked_) return true;
+        mapping_checked_ = true;  // and on to the next server, once
     }
-    LOG_DEBUG("dht-discovery", "STUN external-IP discovery failed; relying on DHT ip voting");
+    if (!first) LOG_DEBUG("dht-discovery", "STUN external-IP discovery failed; relying on DHT ip voting");
+    return first.has_value();
 }
 
 void DhtDiscovery::loop() {
-    if (config_.discover_external_ip) probe_external_ip();
+    using Clock = std::chrono::steady_clock;
+    // STUN again when due, on the round of searching it falls in: it keeps the
+    // shared socket's mapping alive, and finds it anew if it moved — then
+    // announced at once.
+    Clock::time_point stun_due = Clock::now();
+    auto ask_stun = [&] {
+        const uint16_t before = announced_port();
+        const bool answered = probe_external_ip();
+        stun_due = Clock::now() + (answered ? config_.stun_every : config_.stun_every * 10);
+        return announced_port() != before;
+    };
+    if (config_.discover_external_ip) ask_stun();
 
-    auto last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
+    auto last_announce = Clock::now() - config_.announce_interval;
     while (running_.load()) {
         // Network changed: re-learn our public IP and force an immediate re-announce.
         if (recover_pending_.exchange(false)) {
             LOG_INFO("dht-discovery", "Network changed — re-probing STUN and re-announcing");
-            if (config_.discover_external_ip) probe_external_ip();
-            last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
+            if (config_.discover_external_ip) ask_stun();
+            last_announce = Clock::now() - config_.announce_interval;
         }
-        if (announce_pending_.exchange(false)) {
-            LOG_INFO("dht-discovery", "Announcing the router's port " << announced_port());
-            last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
+        const bool moved = config_.discover_external_ip && Clock::now() >= stun_due && ask_stun();
+        if (announce_pending_.exchange(false) || moved) {
+            LOG_INFO("dht-discovery", "Announcing port " << announced_port());
+            last_announce = Clock::now() - config_.announce_interval;
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -224,8 +271,9 @@ void DhtDiscovery::loop() {
             // find_peers this cycle, otherwise we'd run two identical traversals per hash
             // (every node queried twice). find_peers covers the faster search cadence in
             // between announces.
-            const uint16_t port = announced_port();
-            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, port, deliver); });
+            for_each_client([&](DhtClient& c) {
+                c.announce_peer(hash_, announced_port(&c == dht6_.get()), deliver);
+            });
             last_announce = now;
             std::lock_guard<std::mutex> lock(dialed_mutex_);
             dialed_.forget_older_than(now - kForgetFound);

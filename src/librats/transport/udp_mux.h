@@ -97,6 +97,13 @@
  * circuit's ForwardedCircuit, and dropping the connection's entry ends the
  * circuit.
  *
+ * ── Other protocols on the socket ───────────────────────────────────────────
+ * Every packet of ours has the fixed bit set; a datagram without it is
+ * another protocol's — a STUN server's answer, above all. Asking STUN from this
+ * socket is the only way to learn the endpoint the NAT maps *it* to, which is
+ * the one a peer dials, so such datagrams can go out (send_foreign) and come
+ * back to whoever asked (on_foreign). The mux reads nothing of them.
+ *
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread. Events are never
  * delivered from inside a connection's packet handling — a connection records
@@ -119,6 +126,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <random>
@@ -306,6 +314,16 @@ public:
     /// so its peer sees where we are now (UdpConnection::nudge).
     void nudge();
 
+    // — other protocols on the socket (see the file comment) —
+
+    /// Each datagram of another protocol that arrives, from whom. Runs inline
+    /// on the reactor thread: it must be cheap, and it is anyone's datagram.
+    using ForeignHandler = std::function<void(ByteView datagram, const Address& from)>;
+    void on_foreign(ForeignHandler handler) { foreign_ = std::move(handler); }
+    /// Send a datagram of another protocol, at once. One larger than any of
+    /// ours (udp::kMaxDatagram) is not sent.
+    void send_foreign(const Address& to, ByteView datagram);
+
     /// The transport that owned `conn` is being destroyed. The connection goes at
     /// once or lingers until it has delivered what it owes.
     void release(UdpConnection& conn);
@@ -432,6 +450,7 @@ private:
     Clock::time_point     secret_rotated_at_{};
     Secret                reset_key_{};
 
+    ForeignHandler    foreign_;
     std::mt19937_64   rng_;
     Clock::time_point reply_window_started_{};
     int               replies_in_window_ = 0;

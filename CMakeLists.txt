@@ -276,6 +276,8 @@ set(LIBRARY_SOURCES
     src/librats/node/circuit_service.h
     src/librats/node/nat_status.h
     src/librats/node/nat_status.cpp
+    src/librats/node/reflexive_probe.h
+    src/librats/node/reflexive_probe.cpp
 
 # subsystems/ — opt-in plugins attached to a Node
     src/librats/subsystems/ping_service.h
@@ -760,6 +762,7 @@ if(RATS_BUILD_TESTS)
         tests/test_dht_discovery.cpp
         tests/test_reconnection.cpp
         tests/test_nat_status.cpp
+        tests/test_reflexive_probe.cpp
         tests/test_hole_punch.cpp
         tests/test_relay.cpp
         tests/test_logging.cpp

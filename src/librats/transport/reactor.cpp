@@ -219,6 +219,16 @@ void Reactor::nudge_datagram_peers() {
     });
 }
 
+void Reactor::on_foreign_datagram(UdpMux::ForeignHandler handler) {
+    if (mux_) mux_->on_foreign(std::move(handler));
+}
+
+void Reactor::send_foreign_datagram(const Address& to, Bytes datagram) {
+    execute([this, to, datagram = std::move(datagram)] {
+        if (mux_) mux_->send_foreign(to, datagram);
+    });
+}
+
 void Reactor::stop_forwarding(udp::Cid cid) {
     execute([this, cid] {
         if (mux_) mux_->unforward(cid);

@@ -24,8 +24,13 @@
  * datagram socket), each time it is found again for a while after it was first
  * found (Redials).
  *
- * The port announced is the one peers are to dial: the node's listen port, or
- * the one the router forwards to it (PortMapped, from PortMappingService).
+ * The port announced is the one peers are to dial. Over IPv6, which has no NAT,
+ * the listen port; over IPv4 the one the router forwards to it (PortMapped, from
+ * PortMappingService), or else the one the NAT maps the shared datagram socket
+ * to — asked of STUN from that socket (ReflexiveAddressService), as most
+ * carrier-grade NATs pick another — or the listen port. STUN is asked again
+ * every so often: that keeps the mapping alive while no peer does, and finds
+ * it anew if it moved.
  *
  * Everything DHT-specific stays in DhtClient; this class only bridges its
  * callbacks to PeerNetwork::connect().
@@ -42,6 +47,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -50,6 +56,7 @@
 namespace librats {
 
 class DialService;
+class ReflexiveAddressService;
 
 class RATS_API DhtDiscovery final : public Subsystem, public DhtService {
 public:
@@ -68,12 +75,17 @@ public:
         /// node still announces immediately at startup regardless of this value (see loop()).
         std::chrono::milliseconds announce_interval{600000};  // 10 min
 
-        /// Probe a STUN server once at startup to learn our public IP and seed the
-        /// DHT node id per BEP 42. Without it we still converge via the slower
-        /// in-DHT "ip" voting, but bootstrap under the wrong node id until then.
+        /// Ask STUN where we are: the public IP seeds the DHT node id per BEP 42
+        /// (without it we still converge via the slower in-DHT "ip" voting, but
+        /// bootstrap under the wrong node id until then), and the port the NAT
+        /// maps the shared datagram socket to is the one announced over IPv4.
         bool                      discover_external_ip = true;
         std::vector<HostEndpoint> stun_servers;          ///< empty → built-in public defaults
         std::chrono::milliseconds stun_timeout{3000};
+        /// STUN is asked again this often, on the search round it falls in —
+        /// after a round with no answer, ten times as long. Shorter than a NAT
+        /// keeps an idle mapping (30 s at the least), with search_interval.
+        std::chrono::milliseconds stun_every{20000};
 
         /// A peer found and not connected is dialed again when found again, at
         /// most this often, for this long after it was first found. A NAT's
@@ -141,10 +153,12 @@ public:
 
 private:
     void loop();
-    void probe_external_ip();  ///< STUN → set_external_ip on each client (runs on the loop thread)
+    /// STUN → set_external_ip on each client, and the shared socket's port.
+    /// Whether a server answered. Runs on the loop thread.
+    bool probe_external_ip();
     void on_peers(const std::vector<Address>& peers, const InfoHash& info_hash);
-    /// The port peers are to dial: the router's for ours, or ours.
-    uint16_t announced_port() const;
+    /// The port peers are to dial us at over IPv4, or IPv6.
+    uint16_t announced_port(bool v6 = false) const;
 
     /// Bring up one family's DhtClient (bind + bootstrap). Returns nullptr if it
     /// could not bind/start, so the caller can run on whatever family did come up.
@@ -161,6 +175,7 @@ private:
     InfoHash                   hash_;
     PeerNetwork*               network_ = nullptr;
     DialService*               dial_ = nullptr;  ///< for punches; none: dials are ordinary
+    ReflexiveAddressService*   reflexive_ = nullptr;  ///< STUN from the shared socket
     std::unique_ptr<DhtClient> dht_;    ///< IPv4 Kademlia network
     std::unique_ptr<DhtClient> dht6_;   ///< IPv6 Kademlia network (BEP 32)
 
@@ -169,6 +184,9 @@ private:
     std::atomic<bool>       recover_pending_{false};  ///< network changed: re-STUN + re-announce
     std::atomic<bool>       announce_pending_{false}; ///< the port to announce changed
     std::atomic<uint16_t>   mapped_port_{0};          ///< the router's for ours; 0: none
+    std::atomic<uint16_t>   reflexive_port_{0};       ///< where STUN saw the shared socket; 0: not
+    bool                    mapping_checked_ = false; ///< a second STUN server asked (loop thread)
+    std::optional<Address>  last_seen_;               ///< STUN's last answer (loop thread)
     std::mutex              wait_mutex_;
     std::condition_variable wake_;
 

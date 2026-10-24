@@ -36,7 +36,8 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout) {
 // so we can exercise the STUN → DHT node-id seeding path entirely offline.
 class FixedStunServer {
 public:
-    explicit FixedStunServer(std::string public_ip) : public_ip_(std::move(public_ip)) {}
+    explicit FixedStunServer(std::string public_ip, uint16_t public_port = 41234)
+        : public_ip_(std::move(public_ip)), public_port_(public_port) {}
     ~FixedStunServer() { stop(); }
 
     bool start() {
@@ -71,7 +72,7 @@ private:
             StunMessage resp;
             resp.type = StunMessageType::BindingSuccessResponse;
             resp.transaction_id = req->transaction_id;
-            resp.add_xor_mapped_address(StunMappedAddress(StunAddressFamily::IPv4, public_ip_, 41234));
+            resp.add_xor_mapped_address(StunMappedAddress(StunAddressFamily::IPv4, public_ip_, public_port_));
             resp.add_software("FixedStunServer/1.0");
             auto out = resp.serialize();
             send_udp_data(socket_, out, sender.ip.to_string(), sender.port);
@@ -79,6 +80,7 @@ private:
     }
 
     std::string       public_ip_;
+    uint16_t          public_port_;
     std::atomic<bool> running_{false};
     socket_t          socket_ = RATS_INVALID_SOCKET;
     int               port_ = 0;
@@ -141,6 +143,7 @@ DhtDiscovery::Config disc_config(const std::vector<HostEndpoint>& bootstrap) {
     c.bootstrap_nodes = bootstrap;
     c.search_interval = 500ms;
     c.announce_interval = 1000ms;
+    c.discover_external_ip = false;  // offline: no public STUN
     return c;
 }
 
@@ -302,6 +305,34 @@ TEST(DhtDiscoveryTest, AnnouncesThePortTheRouterForwards) {
 
     b.stop();
     a.stop();
+}
+
+// Where STUN sees the shared datagram socket is the port announced: a NAT that
+// maps it to another one is dialed there.
+TEST(DhtDiscoveryTest, AnnouncesThePortStunSeesTheSharedSocketAt) {
+    SilentPort mapped;
+    FixedStunServer stun("1.2.3.4", mapped.port());
+    ASSERT_TRUE(stun.start());
+
+    Node a(listening_config());
+    auto disc_a = std::make_unique<DhtDiscovery>(disc_config({}));
+    DhtDiscovery* da = disc_a.get();
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return da->dht_port() != 0; }, 5s));
+
+    Node b(listening_config());
+    auto cfg = disc_config({HostEndpoint("127.0.0.1", da->dht_port())});
+    cfg.discover_external_ip = true;
+    cfg.stun_servers = {HostEndpoint("127.0.0.1", stun.port())};
+    b.add_subsystem(std::make_unique<DhtDiscovery>(cfg));
+    ASSERT_TRUE(b.start());
+
+    EXPECT_TRUE(wait_for([&] { return mapped.initials() > 0; }, 30s));
+
+    b.stop();
+    a.stop();
+    stun.stop();
 }
 
 // A peer found and not reached is dialed again as found again: a punch, dense

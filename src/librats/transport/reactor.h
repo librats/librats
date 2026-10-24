@@ -175,6 +175,13 @@ public:
     /// so its peer sees where we are now. Thread-safe.
     void nudge_datagram_peers();
 
+    /// Datagrams of another protocol on the shared socket, and sending one from
+    /// it (UdpMux::on_foreign, send_foreign): a STUN exchange that learns where
+    /// the NAT maps that socket. The handler is set before start() and runs on
+    /// the reactor thread; sending is thread-safe. Without UDP, both do nothing.
+    void on_foreign_datagram(UdpMux::ForeignHandler handler);
+    void send_foreign_datagram(const Address& to, Bytes datagram);
+
     /// Drop a dial that lost its race — but only while it is still a dial. Once an
     /// attempt has established it is not an attempt any more, it is one of possibly
     /// several links to a peer, and which of those survives is the peer table's

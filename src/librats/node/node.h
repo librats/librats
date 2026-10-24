@@ -53,6 +53,7 @@
 #include "librats/node/dial_service.h"
 #include "librats/node/dialer.h"
 #include "librats/node/nat_status.h"
+#include "librats/node/reflexive_probe.h"
 #include "librats/node/node_context.h"    // NodeContext, EventBus, ServiceRegistry
 #include "librats/peer/peer.h"
 #include "librats/node/peer_network.h"
@@ -407,6 +408,9 @@ private:
     // included, and several peers' views of it are what say whether that mapping is
     // stable enough to punch through. Published as ExternalAddressService.
     NatStatus            nat_status_;
+    // And asked of STUN, from that socket, before any peer has said: published as
+    // ReflexiveAddressService.
+    ReflexiveProbe       reflexive_;
 
     // The dialable addresses we advertise to peers in identify. Derived from local
     // interfaces (and, in future, promoted observed addresses). Rebuilt once at

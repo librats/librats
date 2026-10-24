@@ -95,7 +95,12 @@ Node::Node(NodeConfig config)
     : config_(std::move(config)),
       identity_(load_or_create_identity(config_.data_dir)),
       security_(make_security(config_, identity_)),
-      reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {
+      reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)),
+      reflexive_([this](const Address& to, Bytes datagram) {
+          if (!running_.load() || !reactors_->has_udp()) return false;
+          reactors_->pick(TransportKind::Udp).send_foreign_datagram(to, std::move(datagram));
+          return true;
+      }) {
     max_peers_.store(config_.max_peers, std::memory_order_relaxed);
 
     DialPolicy policy;
@@ -116,6 +121,7 @@ Node::Node(NodeConfig config)
     services_.provide<DialService>(this);
     services_.provide<CircuitService>(this);
     services_.provide<ExternalAddressService>(&nat_status_);
+    services_.provide<ReflexiveAddressService>(&reflexive_);
 }
 
 Node::~Node() {
@@ -299,6 +305,10 @@ bool Node::start() {
     if (!open_listeners()) {
         running_.store(false);
         return false;
+    }
+    if (reactors_->has_udp()) {
+        reactors_->pick(TransportKind::Udp).on_foreign_datagram(
+            [this](ByteView datagram, const Address& from) { reflexive_.on_datagram(datagram, from); });
     }
 
     // Compute our advertised addresses once; the network monitor refreshes them
