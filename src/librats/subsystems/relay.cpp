@@ -14,6 +14,7 @@
 #include <optional>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@ namespace {
 //     op=7 Close    [u8 reason]             either end, or the relay
 //     op=8 Probe    [32B dst]               client → relay        (circuit = 0)
 //     op=9 ProbeOk  [32B dst]               relay  → client       (circuit = 0)
+//     op=10 Serving —                       relay  → every peer   (circuit = 0)
 //
 // `circuit` is scoped to the LINK the message travels on, never globally: the
 // relay holds two ids for one circuit, one per side, and translates between them.
@@ -51,6 +53,11 @@ namespace {
 // Credit are never used on it. No cid, or a target that does not echo it, means
 // the circuit is the byte stream of transport/relay_link.h.
 //
+// Serving is a relay saying, as a peer connects (and again when it reroutes), that
+// it carries circuits for others: a client asks those first (Probe), and HolePunch
+// sends its rendezvous through them first — the public node two strangers both
+// reach, among the many peers of a room that relay nothing.
+//
 // Every length is bounds-checked and the payload is capped, so a malformed or
 // hostile message is dropped rather than acted on.
 
@@ -66,6 +73,7 @@ constexpr uint8_t kOpCredit   = 6;
 constexpr uint8_t kOpClose    = 7;
 constexpr uint8_t kOpProbe    = 8;
 constexpr uint8_t kOpProbeOk  = 9;
+constexpr uint8_t kOpServing  = 10;
 
 constexpr uint8_t kDenyNoTarget     = 0;  ///< the relay does not hold that peer
 constexpr uint8_t kDenyNotPermitted = 1;  ///< relaying is off here
@@ -251,6 +259,7 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     std::unordered_map<PeerId, PeerLink, PeerId::Hash>          links;
     std::unordered_map<PeerId, Attempt, PeerId::Hash>           attempts;
     std::unordered_map<PeerId, Clock::time_point, PeerId::Hash> cooldown;
+    std::unordered_set<PeerId, PeerId::Hash>                    serving;  ///< said Serving
     size_t outbound_circuits = 0;
     size_t inbound_circuits  = 0;
     size_t carried_circuits  = 0;
@@ -269,6 +278,8 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     void handle_close(const PeerId& from, uint32_t circuit, ByteView body);
 
     void on_peer_connected(const Peer& peer);
+    /// Tell `peer` this node carries circuits, if it does (Serving).
+    void tell_serving(const PeerId& peer);
     void on_peer_disconnected(const PeerId& id);
     void on_peer_writable(const PeerId& id);
 
@@ -433,6 +444,11 @@ void Relay::State::handle(const Peer& from, ByteView payload) {
         case kOpData:     handle_data(peer, circuit, body); break;
         case kOpCredit:   handle_credit(peer, circuit, body); break;
         case kOpClose:    handle_close(peer, circuit, body); break;
+        case kOpServing: {
+            std::lock_guard<std::mutex> lock(mutex);
+            serving.insert(peer);
+            break;
+        }
         default: break;   // an op from a newer version: ignore, never fatal
     }
 }
@@ -886,6 +902,12 @@ bool Relay::State::begin_attempt(const PeerId& target) {
         if (info.transport == TransportKind::Relay) continue;
         candidates.push_back(info.id);
     }
+    {
+        // Those that said they carry circuits first: the rest most likely do not.
+        std::lock_guard<std::mutex> lock(mutex);
+        std::stable_partition(candidates.begin(), candidates.end(),
+                              [&](const PeerId& id) { return serving.count(id) != 0; });
+    }
     if (candidates.size() > config.max_probes) candidates.resize(config.max_probes);
     if (candidates.empty()) return false;
 
@@ -970,6 +992,7 @@ void Relay::State::finish_attempt(const PeerId& target, bool succeeded) {
 
 void Relay::State::on_peer_connected(const Peer& peer) {
     if (!running.load()) return;
+    tell_serving(peer.id());
     finish_attempt(peer.id(), /*succeeded=*/true);
 
     if (!config.upgrade_with_hole_punch) return;
@@ -987,6 +1010,12 @@ void Relay::State::on_peer_connected(const Peer& peer) {
     }
 }
 
+void Relay::State::tell_serving(const PeerId& peer) {
+    if (!config.serve) return;
+    const Bytes msg = message(kOpServing, kNoCircuit);
+    network->send(peer, MessageType::Relay, ByteView(msg));
+}
+
 void Relay::State::on_peer_disconnected(const PeerId& id) {
     // Everything riding this link is over: the circuits we terminate through it,
     // and the ones we were carrying across it.
@@ -994,6 +1023,7 @@ void Relay::State::on_peer_disconnected(const PeerId& id) {
     std::unordered_map<uint32_t, Forward> forwards;
     {
         std::lock_guard<std::mutex> lock(mutex);
+        serving.erase(id);
         auto link = links.find(id);
         if (link == links.end()) return;
         legs     = std::move(link->second.legs);
@@ -1291,6 +1321,10 @@ void Relay::attach(NodeContext& ctx) {
     ctx.network.on_peer_disconnected(
         [state](const PeerId& id, CloseReason) { state->on_peer_disconnected(id); });
     ctx.network.on_peer_writable([state](const Peer& peer) { state->on_peer_writable(peer.id()); });
+    // Serving may have gone on the link that lost.
+    ctx.network.on_peer_rerouted([state](const Peer& peer) {
+        if (state->running.load()) state->tell_serving(peer.id());
+    });
 
     services_ = &ctx.services;
 }
@@ -1364,6 +1398,11 @@ uint64_t Relay::carried_bytes() const {
         for (const auto& [circuit, fwd] : link.forwards)
             if (fwd.opener && fwd.meter->cid != 0) total += fwd.meter->bytes;
     return total;
+}
+
+bool Relay::serves(const PeerId& peer) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->serving.count(peer) != 0;
 }
 
 size_t Relay::attempts() const {

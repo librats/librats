@@ -737,6 +737,7 @@ void Node::on_established(Connection& conn) {
     info.id        = conn.remote_id();
     info.direction = conn.role();
     info.transport = conn.transport();
+    info.endpoint  = conn.remote_endpoint();
     // Outbound: remember the address we dialed — but only if it was a numeric IP.
     // A dial-by-hostname target isn't a dialable Address (peers can't use our name),
     // and the resolved IP is re-learned via identify anyway.
@@ -886,6 +887,8 @@ void Node::on_moved(Connection& conn) {
     // aims at) and our view of where it can be dialled. Identify again — both
     // ends hear of the move, so both answer it.
     LOG_DEBUG("node", "Path to peer " << conn.remote_id().short_hex() << " changed; identifying again");
+    peers_.set_endpoint(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()},
+                        conn.remote_endpoint());
     send_identify(conn);
 }
 

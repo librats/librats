@@ -49,6 +49,7 @@ enum class MessageType : uint8_t {
     Punch     = 9,  ///< NAT hole-punch rendezvous, relayed peer→peer (HolePunch)
     Relay     = 10, ///< relayed circuits: a peer's connection carried through a third node (Relay)
     Media     = 11, ///< real-time media: live frames and their control plane (ratcast's MediaService)
+    Rendezvous = 12, ///< meeting under a key at a server, which introduces the peers (Rendezvous)
 };
 
 /// Fixed header of an inner message.

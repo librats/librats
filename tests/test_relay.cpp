@@ -295,6 +295,29 @@ TEST(RelayE2E, ANodeThatDoesNotServeCarriesNothing) {
     EXPECT_EQ(trio.relay_a->circuits(), 0u);
 }
 
+// A node that carries circuits says so as each peer connects, and is asked
+// first: among a room's many peers that relay nothing, one probe finds it.
+TEST(RelayE2E, ANodeThatServesIsAskedFirst) {
+    Relay::Config ends;
+    ends.max_probes = 1;
+    Trio trio(serving(), ends);
+    std::vector<std::unique_ptr<Node>> others;
+    for (int i = 0; i < 4; ++i) {
+        others.push_back(std::make_unique<Node>(listening_config()));
+        others.back()->add_subsystem(std::make_unique<Relay>(Relay::Config{}));
+        ASSERT_TRUE(others.back()->start());
+    }
+    ASSERT_TRUE(trio.start());
+    for (auto& other : others) trio.a.connect("127.0.0.1", other->listen_port());
+    ASSERT_TRUE(wait_for([&] { return trio.a.peer_count() == 5; }));
+    ASSERT_TRUE(wait_for([&] { return trio.relay_a->serves(trio.hub.local_id()); }));
+    EXPECT_FALSE(trio.relay_a->serves(others.front()->local_id()));
+
+    ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
+    EXPECT_TRUE(wait_for([&] { return relayed(trio.a, trio.b.local_id()); }));
+    for (auto& other : others) other->stop();
+}
+
 // A relay only ever forwards between peers it already holds. It never dials and
 // never resolves an address, which is what keeps it from being turned into an open
 // reflector for traffic aimed at somebody who never connected to it.

@@ -241,3 +241,19 @@ TEST(PeerTableTest, TheLoserIsHandedBackToBeClosed) {
     EXPECT_TRUE(table.remove(kPeer, udp_route));
     EXPECT_EQ(table.size(), 0u);
 }
+
+// Where a peer's connection runs to follows it as it moves — on its live route
+// only: a stale link's word changes nothing.
+TEST(PeerTableTest, AnEndpointIsChangedOnlyByThePeersLiveRoute) {
+    PeerTable table;
+    PeerInfo info;
+    info.id       = kPeer;
+    info.endpoint = Address("198.51.100.7", 40000);
+    const PeerRoute live{0, 2};
+    table.add(info, live, /*prefer_outbound=*/true);
+
+    table.set_endpoint(kPeer, PeerRoute{0, 9}, Address("203.0.113.9", 1));
+    EXPECT_EQ(table.info(kPeer)->endpoint, Address("198.51.100.7", 40000));
+    table.set_endpoint(kPeer, live, Address("198.51.100.7", 40001));
+    EXPECT_EQ(table.info(kPeer)->endpoint, Address("198.51.100.7", 40001));
+}

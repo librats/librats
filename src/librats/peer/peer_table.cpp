@@ -146,6 +146,14 @@ void PeerTable::set_supported_transports(const PeerId& id, PeerRoute route, uint
     it->second.info.supported_transports = mask;
 }
 
+void PeerTable::set_endpoint(const PeerId& id, PeerRoute route,
+                             std::optional<Address> endpoint) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || it->second.route != route) return;
+    it->second.info.endpoint = endpoint;
+}
+
 bool PeerTable::remove(const PeerId& id, PeerRoute route) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);

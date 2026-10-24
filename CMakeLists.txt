@@ -305,6 +305,8 @@ set(LIBRARY_SOURCES
     src/librats/subsystems/relay.h
     src/librats/subsystems/relay.cpp
     src/librats/subsystems/relay_service.h
+    src/librats/subsystems/rendezvous.h
+    src/librats/subsystems/rendezvous.cpp
 
 # dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
     src/librats/dht/dht.h
@@ -765,6 +767,7 @@ if(RATS_BUILD_TESTS)
         tests/test_reflexive_probe.cpp
         tests/test_hole_punch.cpp
         tests/test_relay.cpp
+        tests/test_rendezvous.cpp
         tests/test_logging.cpp
     )
 

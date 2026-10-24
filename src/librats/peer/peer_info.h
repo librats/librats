@@ -13,6 +13,7 @@
 #include "librats/core/address.h"
 #include "librats/peer/peer_id.h"
 
+#include <optional>
 #include <vector>
 
 namespace librats {
@@ -28,6 +29,10 @@ enum PeerTransports : uint8_t {
 struct PeerInfo {
     PeerId               id;
     std::vector<Address> addresses;                 ///< known dialable addresses
+    /// Where this connection's packets come from: over UDP, the endpoint the
+    /// peer's NAT maps its shared socket to (what a third node has to aim at);
+    /// over TCP an ephemeral port. Nullopt for a relayed connection.
+    std::optional<Address> endpoint;
     ConnRole             direction = ConnRole::Outbound;
     TransportKind        transport = TransportKind::Tcp;  ///< wire this connection runs on
     uint8_t              supported_transports = PeerTransportNone;  ///< what the peer advertised

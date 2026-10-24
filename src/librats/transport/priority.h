@@ -40,7 +40,9 @@ constexpr Priority priority_of(MessageType type) noexcept {
         // file, and a punch Sync that waits misses the window it was timed for —
         // and both are a handful of bytes.
         case MessageType::Ping:
-        case MessageType::Punch:     return Priority::Interactive;
+        case MessageType::Punch:
+        // Its introductions time the two sides' dials to cross, as a punch's Sync does.
+        case MessageType::Rendezvous: return Priority::Interactive;
         // Media frames are live messages and scheduled as such; what is left on
         // this lane is their control plane — subscriptions and, above all,
         // keyframe requests, each of which stands between a receiver and a

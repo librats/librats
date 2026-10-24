@@ -269,8 +269,14 @@ size_t HolePunch::relay_to(const PeerId& dst, const Bytes& inner, const PeerId* 
     // Nothing known yet: we do not know which of our peers also has the target, so
     // ask a few and let the ones that cannot help drop it. Bounded on purpose —
     // every extra relay is a duplicate rendezvous the far end has to recognise.
+    // Those that carry circuits for others first: a public node both ends reach,
+    // where the rest are most likely peers the target never met.
+    std::vector<PeerId> relays = network_->connected_peers();
+    if (RelayService* relay = relay_.load())
+        std::stable_partition(relays.begin(), relays.end(),
+                              [relay](const PeerId& id) { return relay->serves(id); });
     size_t sent = 0;
-    for (const PeerId& relay : network_->connected_peers()) {
+    for (const PeerId& relay : relays) {
         if (sent >= config_.max_relays) break;
         if (relay == dst) continue;  // if it were connected we would not be punching
         // send() answers backpressure, not delivery, and every id here is a peer we

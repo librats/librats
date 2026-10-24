@@ -85,6 +85,10 @@ public:
     /// only while `route` is still the peer's live route. Write lock.
     void set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask);
 
+    /// Record where a peer's connection now runs to (PeerInfo::endpoint), after
+    /// it moved. Applies only while `route` is still the peer's live route.
+    void set_endpoint(const PeerId& id, PeerRoute route, std::optional<Address> endpoint);
+
     /// A peer's live route together with whether its send queue has room, in one
     /// lookup — the send path needs both and should not pay for two.
     struct Destination {

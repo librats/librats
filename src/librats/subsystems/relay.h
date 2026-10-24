@@ -200,6 +200,8 @@ public:
 
     /// @copydoc RelayService::connect_via_relay
     bool connect_via_relay(const PeerId& target) override;
+    /// @copydoc RelayService::serves
+    bool serves(const PeerId& peer) const override;
 
     // — diagnostics and tests —
     /// Circuits this node terminates (relayed peers, live or still being set up).

@@ -41,6 +41,10 @@ struct RATS_API RelayService {
     ///         or this node has no peer that could carry the circuit) and needs no
     ///         handling by the caller.
     virtual bool connect_via_relay(const PeerId& target) = 0;
+
+    /// Whether `peer` said it carries circuits for others — a node to try first
+    /// for anything relayed, a punch's rendezvous included.
+    virtual bool serves(const PeerId& /*peer*/) const { return false; }
 };
 
 } // namespace librats
