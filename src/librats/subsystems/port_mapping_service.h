@@ -37,6 +37,7 @@
 
 namespace librats {
 
+class EventBus;
 class UpnpClient;
 class NatPmpClient;
 
@@ -70,6 +71,7 @@ private:
 
     PortMappingConfig config_;
     PeerNetwork*      network_ = nullptr;
+    EventBus*         events_ = nullptr;  ///< PortMapped goes here
     PortMapCallback   user_callback_;
 
     mutable std::mutex            mutex_;  ///< guards the clients and mapped_* below

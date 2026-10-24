@@ -16,6 +16,17 @@
  * is best-effort per family: if one family can't bind (e.g. a host with no usable
  * IPv6) the subsystem still runs on the other.
  *
+ * Two nodes behind NATs find each other here but cannot dial each other: each
+ * NAT drops what comes in unless something went out to that peer first. Both
+ * dial what they find, though, so each one's dial opens the way for the
+ * other's — if they overlap. A peer found and not connected is therefore
+ * dialed again, as a punch (DialProfile::punch(): dense probes over the shared
+ * datagram socket), each time it is found again for a while after it was first
+ * found (Redials).
+ *
+ * The port announced is the one peers are to dial: the node's listen port, or
+ * the one the router forwards to it (PortMapped, from PortMappingService).
+ *
  * Everything DHT-specific stays in DhtClient; this class only bridges its
  * callbacks to PeerNetwork::connect().
  */
@@ -33,10 +44,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace librats {
+
+class DialService;
 
 class RATS_API DhtDiscovery final : public Subsystem, public DhtService {
 public:
@@ -61,6 +74,44 @@ public:
         bool                      discover_external_ip = true;
         std::vector<HostEndpoint> stun_servers;          ///< empty → built-in public defaults
         std::chrono::milliseconds stun_timeout{3000};
+
+        /// A peer found and not connected is dialed again when found again, at
+        /// most this often, for this long after it was first found. A NAT's
+        /// mapping lives some 30 s at least, so two nodes that keep dialing
+        /// each other more often than that get through on the second's dial.
+        std::chrono::milliseconds redial_every{5000};
+        std::chrono::milliseconds redial_for{120000};
+    };
+
+    /// Which addresses found to dial, and how: a policy of times alone.
+    class RATS_API Redials {
+    public:
+        enum class Dial : uint8_t {
+            None,   ///< dialed lately, or for long enough
+            First,  ///< never dialed: the ordinary dial
+            Again,  ///< not reached yet: a punch
+        };
+        using Clock = std::chrono::steady_clock;
+
+        Redials(std::chrono::milliseconds every, std::chrono::milliseconds dial_for)
+            : every_(every), for_(dial_for) {}
+
+        /// `address` found at `now`, not connected.
+        Dial found(const Address& address, Clock::time_point now);
+        /// Forget what has not been found for a while: the DHT stops handing
+        /// out an address half an hour after its last announce.
+        void forget_older_than(Clock::time_point before);
+        size_t size() const { return found_.size(); }
+
+    private:
+        struct Dialed {
+            Clock::time_point first;
+            Clock::time_point last;
+            Clock::time_point seen;
+        };
+        std::chrono::milliseconds every_;
+        std::chrono::milliseconds for_;
+        std::unordered_map<Address, Dialed> found_;
     };
 
     explicit DhtDiscovery(Config config);
@@ -92,6 +143,8 @@ private:
     void loop();
     void probe_external_ip();  ///< STUN → set_external_ip on each client (runs on the loop thread)
     void on_peers(const std::vector<Address>& peers, const InfoHash& info_hash);
+    /// The port peers are to dial: the router's for ours, or ours.
+    uint16_t announced_port() const;
 
     /// Bring up one family's DhtClient (bind + bootstrap). Returns nullptr if it
     /// could not bind/start, so the caller can run on whatever family did come up.
@@ -107,17 +160,20 @@ private:
     Config                     config_;
     InfoHash                   hash_;
     PeerNetwork*               network_ = nullptr;
+    DialService*               dial_ = nullptr;  ///< for punches; none: dials are ordinary
     std::unique_ptr<DhtClient> dht_;    ///< IPv4 Kademlia network
     std::unique_ptr<DhtClient> dht6_;   ///< IPv6 Kademlia network (BEP 32)
 
     std::thread             thread_;
     std::atomic<bool>       running_{false};
     std::atomic<bool>       recover_pending_{false};  ///< network changed: re-STUN + re-announce
+    std::atomic<bool>       announce_pending_{false}; ///< the port to announce changed
+    std::atomic<uint16_t>   mapped_port_{0};          ///< the router's for ours; 0: none
     std::mutex              wait_mutex_;
     std::condition_variable wake_;
 
-    std::mutex                      dialed_mutex_;
-    std::unordered_set<Address> dialed_;  ///< peers we've already dialed
+    std::mutex dialed_mutex_;
+    Redials    dialed_;  ///< under dialed_mutex_
 };
 
 } // namespace librats

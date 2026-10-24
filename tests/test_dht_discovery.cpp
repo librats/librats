@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include "test_paths.h"
 
+#include "librats/node/host_events.h"
 #include "librats/node/node.h"
+#include "librats/node/node_context.h"
 #include "librats/subsystems/dht_discovery.h"
 #include "librats/nat/stun.h"
 #include "librats/core/socket.h"
@@ -10,8 +12,10 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace librats;
 using namespace std::chrono_literals;
@@ -81,6 +85,51 @@ private:
     std::thread       thread_;
 };
 
+// Tells the node, once started, that the router forwards `port` to it — what
+// PortMappingService says when UPnP or NAT-PMP maps it.
+class FakePortMapping final : public Subsystem {
+public:
+    explicit FakePortMapping(uint16_t port) : port_(port) {}
+    void attach(NodeContext& ctx) override { events_ = &ctx.events; }
+    void start() override { events_->emit(PortMapped{PortMapProtocol::UDP, "1.2.3.4", port_}); }
+    void stop() override {}
+
+private:
+    uint16_t  port_;
+    EventBus* events_ = nullptr;
+};
+
+// A UDP port nothing answers on, counting the dials' Initials (padded to 1220
+// bytes) that arrive.
+class SilentPort {
+public:
+    SilentPort() {
+        init_socket_library();
+        socket_ = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+        port_ = static_cast<uint16_t>(get_bound_port(socket_));
+        thread_ = std::thread([this] {
+            while (running_) {
+                Address from;
+                if (receive_udp_data(socket_, 1500, from, 50).size() >= 1200) ++initials_;
+            }
+        });
+    }
+    ~SilentPort() {
+        running_ = false;
+        thread_.join();
+        close_socket(socket_);
+    }
+    uint16_t port() const { return port_; }
+    int initials() const { return initials_.load(); }
+
+private:
+    socket_t          socket_ = RATS_INVALID_SOCKET;
+    uint16_t          port_ = 0;
+    std::atomic<bool> running_{true};
+    std::atomic<int>  initials_{0};
+    std::thread       thread_;
+};
+
 NodeConfig listening_config() {
     NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; c.protocol = librats_test::test_protocol(); return c;
 }
@@ -113,6 +162,30 @@ bool ipv6_loopback_available() {
 TEST(DhtDiscoveryTest, HashIsDeterministicPerKey) {
     EXPECT_EQ(DhtDiscovery::hash_for_key("app-a"), DhtDiscovery::hash_for_key("app-a"));
     EXPECT_NE(DhtDiscovery::hash_for_key("app-a"), DhtDiscovery::hash_for_key("app-b"));
+}
+
+// A peer found is dialed at once, then again as found again — no oftener than
+// every, for as long as `for` after it was first found.
+TEST(DhtDiscoveryTest, RedialsWhatItFindsForAWhile) {
+    using Dial = DhtDiscovery::Redials::Dial;
+    using Clock = DhtDiscovery::Redials::Clock;
+    DhtDiscovery::Redials redials(5s, 20s);
+    const Address a("203.0.113.1", 4000);
+    const Address b("203.0.113.2", 4000);
+    const Clock::time_point t0{};
+
+    EXPECT_EQ(redials.found(a, t0), Dial::First);
+    EXPECT_EQ(redials.found(a, t0 + 1s), Dial::None);   // dialed just now
+    EXPECT_EQ(redials.found(b, t0 + 1s), Dial::First);  // each its own
+    EXPECT_EQ(redials.found(a, t0 + 5s), Dial::Again);
+    EXPECT_EQ(redials.found(a, t0 + 9s), Dial::None);
+    EXPECT_EQ(redials.found(a, t0 + 10s), Dial::Again);
+    EXPECT_EQ(redials.found(a, t0 + 21s), Dial::None);  // for long enough
+
+    redials.forget_older_than(t0 + 15s);  // b, last found at 1 s
+    EXPECT_EQ(redials.size(), 1u);
+    EXPECT_EQ(redials.found(b, t0 + 30s), Dial::First);
+    EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);
 }
 
 // The adapter brings a DhtClient up on a real UDP port and tears down cleanly.
@@ -189,6 +262,70 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaDht) {
 
     EXPECT_TRUE(wait_for([&] { return a.peer_count() >= 1 && b.peer_count() >= 1; }, 30s))
         << "discovered: a=" << a.peer_count() << " b=" << b.peer_count();
+
+    b.stop();
+    a.stop();
+}
+
+// A port the router forwards to the node's is the one announced: whoever finds
+// the node dials that.
+TEST(DhtDiscoveryTest, AnnouncesThePortTheRouterForwards) {
+    SilentPort mapped;
+    Node a(listening_config());
+    std::mutex failed_mutex;
+    std::vector<Address> failed;
+    a.on_dial_failed([&](const Address& address) {
+        std::lock_guard<std::mutex> lock(failed_mutex);
+        failed.push_back(address);
+    });
+    auto disc_a = std::make_unique<DhtDiscovery>(disc_config({}));
+    DhtDiscovery* da = disc_a.get();
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return da->dht_port() != 0; }, 5s));
+
+    // b's announce is stored at a's DHT node, which a's searches ask.
+    Node b(listening_config());
+    // Told before discovery starts, so that the router's port is the only one
+    // announced.
+    b.add_subsystem(std::make_unique<FakePortMapping>(mapped.port()));
+    b.add_subsystem(std::make_unique<DhtDiscovery>(
+        disc_config({HostEndpoint("127.0.0.1", da->dht_port())})));
+    ASSERT_TRUE(b.start());
+
+    EXPECT_TRUE(wait_for([&] { return mapped.initials() > 0; }, 30s));
+    EXPECT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> lock(failed_mutex);
+        return std::any_of(failed.begin(), failed.end(),
+                           [&](const Address& f) { return f.port == mapped.port(); });
+    }, 10s));
+
+    b.stop();
+    a.stop();
+}
+
+// A peer found and not reached is dialed again as found again: a punch, dense
+// probes, which two nodes behind NATs get through on once their dials cross.
+TEST(DhtDiscoveryTest, PunchesAPeerFoundAndNotReached) {
+    SilentPort mapped;
+    Node a(listening_config());
+    auto cfg = disc_config({});
+    cfg.redial_every = 200ms;
+    auto disc_a = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* da = disc_a.get();
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return da->dht_port() != 0; }, 5s));
+
+    Node b(listening_config());
+    b.add_subsystem(std::make_unique<FakePortMapping>(mapped.port()));
+    b.add_subsystem(std::make_unique<DhtDiscovery>(
+        disc_config({HostEndpoint("127.0.0.1", da->dht_port())})));
+    ASSERT_TRUE(b.start());
+
+    // The first dial's three Initials, then a punch's eight.
+    EXPECT_TRUE(wait_for([&] { return mapped.initials() >= 3 + 8; }, 30s))
+        << mapped.initials() << " Initials";
 
     b.stop();
     a.stop();

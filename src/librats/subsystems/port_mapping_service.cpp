@@ -16,6 +16,7 @@ PortMappingService::~PortMappingService() { stop(); }
 
 void PortMappingService::attach(NodeContext& ctx) {
     network_ = &ctx.network;
+    events_ = &ctx.events;
     // On a host network change the LAN IP and/or gateway likely changed, so existing
     // UPnP/NAT-PMP leases are stale or aimed at the wrong internal address. Tear them
     // down and re-run discovery from scratch. The handler runs on the node's
@@ -177,6 +178,8 @@ void PortMappingService::handle_result(const PortMapResult& result) {
     }
 
     // Invoke the user callback outside the lock to avoid re-entrancy deadlocks.
+    if (result.success && !ip_is_private && events_)
+        events_->emit(PortMapped{result.protocol, result.external_ip, result.external_port});
     if (user_cb) user_cb(result);
 }
 

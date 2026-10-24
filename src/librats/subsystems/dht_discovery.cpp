@@ -1,10 +1,13 @@
 #include "librats/subsystems/dht_discovery.h"
 #include "librats/node/node_context.h"
 #include "librats/node/host_events.h"
+#include "librats/node/dial_service.h"
 #include "librats/nat/stun.h"
 #include "librats/crypto/sha1.h"
 #include "librats/util/fs.h"
 #include "librats/util/logger.h"
+
+#include <algorithm>
 
 namespace librats {
 
@@ -21,6 +24,10 @@ int hex_val(char c) {
 std::vector<HostEndpoint> default_stun_servers() {
     return { HostEndpoint("stun.l.google.com", 19302), HostEndpoint("stun1.l.google.com", 19302) };
 }
+
+// What has not been found for this long is forgotten (the DHT keeps an
+// announce for half an hour).
+constexpr std::chrono::minutes kForgetFound{10};
 
 // The configured bind literal only applies to its own family; the other family
 // binds the wildcard. An empty config means wildcard for both.
@@ -39,8 +46,28 @@ InfoHash DhtDiscovery::hash_for_key(const std::string& key) {
     return hash;
 }
 
+// ── Redials ─────────────────────────────────────────────────────────────────
+
+DhtDiscovery::Redials::Dial DhtDiscovery::Redials::found(const Address& address,
+                                                         Clock::time_point now) {
+    const auto [it, first] = found_.try_emplace(address, Dialed{now, now, now});
+    Dialed& dialed = it->second;
+    dialed.seen = now;
+    if (first) return Dial::First;
+    if (now - dialed.first > for_ || now - dialed.last < every_) return Dial::None;
+    dialed.last = now;
+    return Dial::Again;
+}
+
+void DhtDiscovery::Redials::forget_older_than(Clock::time_point before) {
+    for (auto it = found_.begin(); it != found_.end();)
+        it = it->second.seen < before ? found_.erase(it) : std::next(it);
+}
+
+// ── DhtDiscovery ────────────────────────────────────────────────────────────
+
 DhtDiscovery::DhtDiscovery(Config config)
-    : config_(std::move(config)) {}  // hash_ is resolved in attach() (may depend on the node protocol)
+    : config_(std::move(config)), dialed_(config_.redial_every, config_.redial_for) {}  // hash_ is resolved in attach() (may depend on the node protocol)
 
 DhtDiscovery::~DhtDiscovery() { stop(); }
 
@@ -61,9 +88,27 @@ void DhtDiscovery::attach(NodeContext& ctx) {
     // rather than the previous network's. We only flag + wake here (cheap, on the
     // node's maintenance thread); the actual STUN runs on our own loop thread.
     ctx.events.on<NetworkChanged>([this](const NetworkChanged&) {
+        mapped_port_.store(0);  // renewed, and told again, if it still can be
         recover_pending_.store(true);
         wake_.notify_all();
     });
+    // The router forwards a port of its own to ours: announce that one — its
+    // mapping for the transport a dial tries first.
+    ctx.events.on<PortMapped>([this](const PortMapped& mapped) {
+        const bool udp = (network_->transports() & PeerTransportUdp) != 0;
+        if ((mapped.protocol == PortMapProtocol::UDP) != udp) return;
+        const uint16_t before = announced_port();
+        mapped_port_.store(mapped.external_port);
+        if (announced_port() == before) return;
+        announce_pending_.store(true);
+        wake_.notify_all();
+    });
+    dial_ = ctx.services.get<DialService>();
+}
+
+uint16_t DhtDiscovery::announced_port() const {
+    const uint16_t mapped = mapped_port_.load();
+    return mapped != 0 ? mapped : network_->listen_port();
 }
 
 std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
@@ -166,6 +211,10 @@ void DhtDiscovery::loop() {
             if (config_.discover_external_ip) probe_external_ip();
             last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
         }
+        if (announce_pending_.exchange(false)) {
+            LOG_INFO("dht-discovery", "Announcing the router's port " << announced_port());
+            last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
+        }
 
         const auto now = std::chrono::steady_clock::now();
         auto deliver = [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); };
@@ -175,27 +224,47 @@ void DhtDiscovery::loop() {
             // find_peers this cycle, otherwise we'd run two identical traversals per hash
             // (every node queried twice). find_peers covers the faster search cadence in
             // between announces.
-            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, network_->listen_port(), deliver); });
+            const uint16_t port = announced_port();
+            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, port, deliver); });
             last_announce = now;
+            std::lock_guard<std::mutex> lock(dialed_mutex_);
+            dialed_.forget_older_than(now - kForgetFound);
         } else {
             for_each_client([&](DhtClient& c) { c.find_peers(hash_, deliver); });
         }
 
         std::unique_lock<std::mutex> lock(wait_mutex_);
-        wake_.wait_for(lock, config_.search_interval,
-                       [this] { return !running_.load() || recover_pending_.load(); });
+        wake_.wait_for(lock, config_.search_interval, [this] {
+            return !running_.load() || recover_pending_.load() || announce_pending_.load();
+        });
     }
 }
 
 void DhtDiscovery::on_peers(const std::vector<Address>& peers, const InfoHash& /*info_hash*/) {
+    // Where the peers connected are dialable: the address dialed, or the one
+    // seen with the listen port told — an announce's own form.
+    std::vector<Address> connected;
+    for (PeerInfo& info : network_->peers())
+        connected.insert(connected.end(), info.addresses.begin(), info.addresses.end());
+
+    const auto now = Redials::Clock::now();
     for (const Address& peer : peers) {
         if (peer.ip.is_any() || peer.port == 0) continue;
+        if (std::find(connected.begin(), connected.end(), peer) != connected.end()) continue;
+        Redials::Dial dial;
         {
             std::lock_guard<std::mutex> lock(dialed_mutex_);
-            if (!dialed_.insert(peer).second) continue;  // already dialed this address
+            dial = dialed_.found(peer, now);
         }
-        LOG_DEBUG("dht-discovery", "Dialing discovered peer " << peer.to_string());
-        network_->connect(peer);
+        if (dial == Redials::Dial::None) continue;
+        LOG_DEBUG("dht-discovery", (dial == Redials::Dial::First ? "Dialing" : "Punching")
+                                       << " discovered peer " << peer.to_string());
+        // The first dial races TCP in, for a network that blocks UDP; a punch is
+        // the shared datagram socket's alone.
+        if (dial == Redials::Dial::First || !dial_ ||
+            !dial_->dial_direct(peer, TransportKind::Udp, DialProfile::punch())) {
+            network_->connect(peer);
+        }
     }
 }
 
