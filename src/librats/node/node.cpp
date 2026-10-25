@@ -50,8 +50,9 @@ Identity load_or_create_identity(const std::string& data_dir) {
 
     const std::string key_path = combine_paths(data_dir, "identity.key");
 
+    // None yet is a first run, not a failure to read one: no error logged.
     size_t size = 0;
-    void* data = read_file_binary(key_path.c_str(), &size);
+    void* data = file_exists(key_path) ? read_file_binary(key_path.c_str(), &size) : nullptr;
     if (data) {
         if (size == librats::NOISE_DH_SIZE) {
             uint8_t priv[librats::NOISE_DH_SIZE];
