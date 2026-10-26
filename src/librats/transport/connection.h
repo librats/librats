@@ -231,6 +231,10 @@ public:
     /// the previous call. Reactor thread; called by the Reactor's path sampler, the
     /// one caller, which is what gives "since the previous call" its meaning.
     PathStats sample_path();
+    /// The transport's figures as they are now — whether the link answers above
+    /// all (PathStats::answers). Unlike sample_path(), touches nothing. Reactor
+    /// thread.
+    PathStats path_now() const { return transport_->path_stats(); }
 
     /// Send no faster than `bits_per_second` (0: no ceiling); see
     /// PeerNetwork::set_send_ceiling. Reactor thread.

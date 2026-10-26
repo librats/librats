@@ -753,6 +753,7 @@ if(RATS_BUILD_TESTS)
         tests/test_peer_table.cpp
         tests/test_handshake.cpp
         tests/test_node.cpp
+        tests/test_standby.cpp
         tests/test_identify.cpp
         tests/test_persistence.cpp
         tests/test_event_bus.cpp

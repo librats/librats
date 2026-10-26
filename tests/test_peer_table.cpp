@@ -257,3 +257,41 @@ TEST(PeerTableTest, AnEndpointIsChangedOnlyByThePeersLiveRoute) {
     table.set_endpoint(kPeer, live, Address("198.51.100.7", 40001));
     EXPECT_EQ(table.info(kPeer)->endpoint, Address("198.51.100.7", 40001));
 }
+
+// A duplicate the table turned down (Node's standby) takes the place of the live
+// link it lost to — a link gone dead — and of no other: by the time it does, the
+// peer may have moved on to a third, which stays.
+TEST(PeerTableTest, AStandbyTakesThePlaceOfTheLiveRouteAndOfNoOther) {
+    PeerTable table;
+    const PeerRoute dead{0, 1}, standby{0, 2}, third{0, 3};
+    table.add(info_for(kWeUdp), dead, /*prefer_outbound=*/true);
+    EXPECT_EQ(table.add(info_for(kTheyUdp), standby, true).result, PeerTable::AddResult::Rejected);
+
+    EXPECT_TRUE(table.supersede(info_for(kTheyUdp), dead, standby));
+    EXPECT_EQ(table.route(kPeer), standby);
+    EXPECT_EQ(table.info(kPeer)->direction, ConnRole::Inbound) << "the standby's own description";
+    EXPECT_EQ(table.size(), 1u);
+    EXPECT_FALSE(table.remove(kPeer, dead)) << "the dead link's teardown evicted its successor";
+
+    EXPECT_FALSE(table.supersede(info_for(kWeTcp), dead, third)) << "took over from a link gone";
+    EXPECT_EQ(table.route(kPeer), standby);
+}
+
+// Of two links neither of which is in the table — two standbys — both ends must
+// keep the same one, or each closes the one the other kept. The table's own rules
+// decide, as for a link in it: the same verdict at both ends, whichever way round
+// the two are put.
+TEST(PeerTableTest, OfTwoLinksBothEndsPreferTheSame) {
+    const std::vector<Link> links{kWeUdp, kWeTcp, kTheyUdp, kTheyTcp, kWeRelay, kTheyRelay};
+    for (const Link& a : links) {
+        for (const Link& b : links) {
+            // Same side, same wire: a redial, where the newcomer wins by design.
+            if (a.direction == b.direction && a.transport == b.transport) continue;
+            const bool here = PeerTable::prevails(info_for(a), info_for(b), true);
+            EXPECT_EQ(PeerTable::prevails(info_for(mirrored(a)), info_for(mirrored(b)), false), here)
+                << a.name << " against " << b.name << ": the two ends disagree";
+            EXPECT_NE(PeerTable::prevails(info_for(b), info_for(a), true), here)
+                << a.name << " against " << b.name << ": the verdict turned with the order";
+        }
+    }
+}

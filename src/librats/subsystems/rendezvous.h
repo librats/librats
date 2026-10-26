@@ -30,6 +30,20 @@
  * A registration lasts while its connection does; registering again, every
  * `refresh`, is answered again, so a peer not reached is tried again.
  *
+ * A peer that moves — another network, a VPN switched on, a NAT that gave it
+ * another port — keeps its connection to the server, which follows it there
+ * (udp_connection.h, "Migration"), but not those to its peers behind NATs of
+ * their own: they let in only what comes from where they sent, and it now
+ * comes from somewhere else. The server, seeing it move, tells the others
+ * under its keys where it is now and it where they are (Moved), and both
+ * sides dial as they would on Peers, connected or not: each dial opens its
+ * NAT to the other, so the old connection follows the move, or a new one
+ * comes up beside it and takes over (Node's standby). One whose link still
+ * goes unanswered `punch_after_move` on is handed to Relay as above. A server
+ * sees a peer move only when it hears from it, so a peer whose link to another
+ * goes dead speaks to its servers at once (registering again): if it is the
+ * one that moved, they see it.
+ *
  * Servers are dialed from `Config::servers` (host:port, resolved here) and kept:
  * one lost is dialed again, 5 s after and doubling up to a minute. One of those
  * is known for a server as it connects, before its Hello — an application that
@@ -43,6 +57,7 @@
  *     op=1 Register [32B key]                                  peer → server
  *     op=2 Peers    [u8 count] × { [32B id][u8 n] × { [u8 ip_len][ip][u16 port] } }
  *                                                              server → peer
+ *     op=3 Moved    as Peers: dial them even if connected      server → peer
  * The first endpoint of each is where the server sees its UDP packets come from;
  * the others are what it identified itself with (its listen port at the address
  * seen, and the ones it advertised: another on the same network dials those).
@@ -100,6 +115,11 @@ public:
         /// before it is handed to Relay (or, without one, HolePunch). Covers
         /// the punch profile's eight Initials and a handshake.
         std::chrono::milliseconds punch_after{3000};
+        /// The same for a peer told of by Moved: a punch after a move goes
+        /// through most often not at all — the moved side's packets to the old
+        /// link left the other's NAT a mapping in the way — so a circuit comes
+        /// sooner. A direct link that comes up later takes its place.
+        std::chrono::milliseconds punch_after_move{1000};
         /// A server lost or not reached is dialed again after this, doubling up
         /// to `redial_max`.
         std::chrono::milliseconds redial{5000};
@@ -157,6 +177,11 @@ private:
     struct Registered {
         std::unordered_set<PeerId, PeerId::Hash> peers;
     };
+    /// Client: a peer told of, until it is reached or handed on.
+    struct Unreached {
+        std::chrono::steady_clock::time_point due;
+        bool moved = false;  ///< told of by Moved: reached only once its link answers
+    };
     struct Budget {
         std::chrono::steady_clock::time_point window_started{};
         size_t                                spent = 0;
@@ -172,13 +197,21 @@ private:
     void on_hello(const PeerId& server);
     /// Server: `peer` registered `key`.
     void on_register(const PeerId& peer, const Key& key);
-    /// Client: a server told of peers; dial them.
-    void on_peers(const PeerId& server, ByteView body);
+    /// Client: a server told of peers; dial them — `moved`: connected or not.
+    void on_peers(const PeerId& server, ByteView body, bool moved);
+    /// Server: `peer` moved; tell those it meets, and it of them.
+    void on_moved(const PeerId& peer);
+    /// Client: a path sample of `peer`'s link; one gone dead — a peer's or a
+    /// server's — has the servers spoken to.
+    void on_path(const PeerId& peer, const PathStats& path);
+    /// Server: whether `peer` may make another request now (Budget).
+    bool spend(const PeerId& peer);
 
     // — outgoing —
     void register_keys(const PeerId& server);
-    /// The Peers message naming `peers`, each with its endpoints from `known`.
-    Bytes peers_message(const std::vector<PeerId>& peers,
+    /// The Peers (or Moved) message naming `peers`, each with its endpoints
+    /// from `known`.
+    Bytes peers_message(uint8_t op, const std::vector<PeerId>& peers,
                         const std::unordered_map<PeerId, PeerInfo, PeerId::Hash>& known) const;
 
     // — worker —
@@ -203,8 +236,9 @@ private:
     std::unordered_set<PeerId, PeerId::Hash>             servers_;     ///< said Hello
     std::unordered_set<PeerId, PeerId::Hash>             at_servers_;  ///< at a server address
     std::vector<std::function<void(const PeerId&)>>      found_handlers_;
-    std::unordered_map<PeerId, std::chrono::steady_clock::time_point, PeerId::Hash> unreached_;
+    std::unordered_map<PeerId, Unreached, PeerId::Hash>  unreached_;
     std::chrono::steady_clock::time_point                refresh_at_{};
+    std::chrono::steady_clock::time_point                spoken_at_{};  ///< on a dead link
     // Server.
     std::map<Key, Registered>                                        registered_;
     std::unordered_map<PeerId, std::vector<Key>, PeerId::Hash>       keys_of_;

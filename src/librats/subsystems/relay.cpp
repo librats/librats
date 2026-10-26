@@ -588,8 +588,10 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
     // `src` is the relay's word, not the far end's — the handshake is what actually
     // establishes who is there. It is used only to turn away a circuit that would
     // duplicate a peer we already hold, which costs the far end a Deny instead of a
-    // whole handshake it was going to lose anyway.
-    if (reach_of(*network, *src) == Reach::Direct) return deny(from, circuit, kDenyRefused);
+    // whole handshake it was going to lose anyway — over a link that answers: one
+    // gone dead (the far end moved) is what the circuit takes the place of.
+    if (reach_of(*network, *src) == Reach::Direct && network->answers(*src))
+        return deny(from, circuit, kDenyRefused);
     // And the carrier itself must be a direct peer: a circuit inside a circuit is
     // the chain this refuses to be part of.
     if (reach_of(*network, from) != Reach::Direct) return deny(from, circuit, kDenyLoop);
@@ -895,11 +897,13 @@ bool Relay::State::begin_attempt(const PeerId& target) {
         if (outbound_circuits >= config.max_outbound_circuits) return false;
     }
 
+    // Already reached over a link that answers: nothing to do. One gone dead —
+    // the target moved — is what a circuit takes the place of (Node's standby).
+    if (network->answers(target)) return false;
     // Peers that could carry the circuit: connected, not the target, and not
     // themselves relayed — asking a relayed peer to relay is the chain we refuse.
     for (const PeerInfo& info : network->peers()) {
-        if (info.id == target) return false;              // already reachable directly
-        if (info.transport == TransportKind::Relay) continue;
+        if (info.id == target || info.transport == TransportKind::Relay) continue;
         candidates.push_back(info.id);
     }
     {

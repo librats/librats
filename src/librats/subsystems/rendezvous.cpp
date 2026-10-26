@@ -22,6 +22,7 @@ constexpr uint8_t kVersion    = 1;
 constexpr uint8_t kOpHello    = 0;
 constexpr uint8_t kOpRegister = 1;
 constexpr uint8_t kOpPeers    = 2;
+constexpr uint8_t kOpMoved    = 3;
 
 /// Peers one Peers message names, and endpoints each: a cap on what one
 /// server's word makes this node dial.
@@ -34,6 +35,10 @@ constexpr size_t kMaxMessageSize =
 
 /// How often the worker looks at what is due, at most this far apart.
 constexpr auto kTick = std::chrono::milliseconds(250);
+
+/// A peer's link gone dead has the servers spoken to at most this often: again
+/// if what was said first went out before the way did (a VPN still connecting).
+constexpr auto kSpeakAgain = std::chrono::seconds(2);
 
 void put_u16(Bytes& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v >> 8));
@@ -91,6 +96,10 @@ void Rendezvous::attach(NodeContext& ctx) {
     network_->on_peer_rerouted([this](const Peer& peer) { on_connected(peer.id()); });
     network_->on_peer_disconnected(
         [this](const PeerId& peer, CloseReason) { on_disconnected(peer); });
+    network_->on_peer_moved([this](const Peer& peer) { on_moved(peer.id()); });
+    // Whether a link to a peer answers is in its path samples.
+    if (!keys_.empty())
+        network_->on_peer_path([this](const Peer& peer, const PathStats& path) { on_path(peer.id(), path); });
 }
 
 void Rendezvous::start() {
@@ -156,7 +165,10 @@ void Rendezvous::handle(const Peer& from, ByteView payload) {
             break;
         }
         case kOpPeers:
-            on_peers(from.id(), body);
+            on_peers(from.id(), body, /*moved=*/false);
+            break;
+        case kOpMoved:
+            on_peers(from.id(), body, /*moved=*/true);
             break;
         default:
             break;  // an op from a newer version: ignored
@@ -232,18 +244,22 @@ void Rendezvous::register_keys(const PeerId& server) {
     }
 }
 
+bool Rendezvous::spend(const PeerId& peer) {
+    const auto now = Clock::now();
+    Budget& budget = budgets_[peer];
+    if (now - budget.window_started > config_.request_window) {
+        budget.window_started = now;
+        budget.spent = 0;
+    }
+    return ++budget.spent <= config_.request_budget;
+}
+
 void Rendezvous::on_register(const PeerId& peer, const Key& key) {
     std::vector<PeerId> others;
     bool kept = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto now = Clock::now();
-        Budget& budget = budgets_[peer];
-        if (now - budget.window_started > config_.request_window) {
-            budget.window_started = now;
-            budget.spent = 0;
-        }
-        if (++budget.spent > config_.request_budget) return;
+        if (!spend(peer)) return;
 
         auto it = registered_.find(key);
         if (it != registered_.end()) {
@@ -271,21 +287,68 @@ void Rendezvous::on_register(const PeerId& peer, const Key& key) {
     for (PeerInfo& info : network_->peers()) known.emplace(info.id, std::move(info));
     // The newcomer and the others hear of each other at once: their dials cross.
     if (!others.empty()) {
-        const Bytes answer = peers_message(others, known);
+        const Bytes answer = peers_message(kOpPeers, others, known);
         network_->send(peer, MessageType::Rendezvous, ByteView(answer));
     }
     if (kept) {
-        const Bytes told = peers_message({peer}, known);
+        const Bytes told = peers_message(kOpPeers, {peer}, known);
         for (const PeerId& other : others) network_->send(other, MessageType::Rendezvous, ByteView(told));
     }
     LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " registered, meeting "
               << others.size() << " other(s)");
 }
 
+void Rendezvous::on_moved(const PeerId& peer) {
+    if (!config_.serve || !running_.load()) return;
+    std::vector<PeerId> others;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto keys = keys_of_.find(peer);
+        if (keys == keys_of_.end() || !spend(peer)) return;
+        for (const Key& key : keys->second) {
+            const auto it = registered_.find(key);
+            if (it == registered_.end()) continue;
+            for (const PeerId& other : it->second.peers)
+                if (other != peer && others.size() < kMaxPeersPerMessage &&
+                    std::find(others.begin(), others.end(), other) == others.end())
+                    others.push_back(other);
+        }
+    }
+    if (others.empty()) return;
+
+    std::unordered_map<PeerId, PeerInfo, PeerId::Hash> known;
+    for (PeerInfo& info : network_->peers()) known.emplace(info.id, std::move(info));
+    // As a newcomer's meeting: each side told of the other at once, their dials
+    // crossing — the old links between them gone dead or not.
+    const Bytes told = peers_message(kOpMoved, {peer}, known);
+    for (const PeerId& other : others) network_->send(other, MessageType::Rendezvous, ByteView(told));
+    const Bytes answer = peers_message(kOpMoved, others, known);
+    network_->send(peer, MessageType::Rendezvous, ByteView(answer));
+    LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " moved; telling "
+              << others.size() << " other(s)");
+}
+
+void Rendezvous::on_path(const PeerId& peer, const PathStats& path) {
+    // Any link: one to a server gone dead is the server not yet hearing where
+    // this node is, which speaking to it is what shows.
+    const auto now = Clock::now();
+    if (!running_.load() || path.answers(now)) return;
+    std::vector<PeerId> servers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (now - spoken_at_ < kSpeakAgain) return;
+        spoken_at_ = now;
+        servers.assign(servers_.begin(), servers_.end());
+    }
+    LOG_DEBUG("rendezvous", "The link to " << peer.short_hex()
+              << " went unanswered; registering again");
+    for (const PeerId& server : servers) register_keys(server);
+}
+
 Bytes Rendezvous::peers_message(
-    const std::vector<PeerId>& peers,
+    uint8_t op, const std::vector<PeerId>& peers,
     const std::unordered_map<PeerId, PeerInfo, PeerId::Hash>& known) const {
-    Bytes out{kVersion, kOpPeers, 0};
+    Bytes out{kVersion, op, 0};
     uint8_t count = 0;
     for (const PeerId& id : peers) {
         const auto info = known.find(id);
@@ -307,7 +370,7 @@ Bytes Rendezvous::peers_message(
     return out;
 }
 
-void Rendezvous::on_peers(const PeerId& server, ByteView body) {
+void Rendezvous::on_peers(const PeerId& server, ByteView body, bool moved) {
     if (!is_server(server) || body.empty()) return;
     const uint8_t* p = body.data();
     size_t n = body.size();
@@ -346,22 +409,29 @@ void Rendezvous::on_peers(const PeerId& server, ByteView body) {
     }
 
     const std::vector<PeerId> connected = network_->connected_peers();
-    const auto due = Clock::now() + config_.punch_after;
+    const auto due = Clock::now() + (moved ? config_.punch_after_move : config_.punch_after);
     for (const Told& peer : told) {
+        // A peer that moved is dialed whether connected or not: the dial opens
+        // this side's NAT to where it is now, which the link to it needs.
         if (peer.id == network_->local_id() || peer.endpoints.empty() ||
-            std::find(connected.begin(), connected.end(), peer.id) != connected.end())
+            (!moved && std::find(connected.begin(), connected.end(), peer.id) != connected.end()))
             continue;
-        LOG_DEBUG("rendezvous", "Told of " << peer.id.short_hex() << " at "
-                  << peer.endpoints.front().to_string() << "; dialing");
+        LOG_DEBUG("rendezvous", "Told of " << peer.id.short_hex() << (moved ? ", moved," : "")
+                  << " at " << peer.endpoints.front().to_string() << "; dialing");
         bool dialed = false;
         if (dial_)
             for (const Address& at : peer.endpoints)
                 dialed |= dial_->dial_direct(at, TransportKind::Udp, DialProfile::punch());
         if (!dialed) network_->connect(peer.endpoints.front());
         std::lock_guard<std::mutex> lock(mutex_);
-        unreached_.try_emplace(peer.id, due);
+        if (moved) {
+            unreached_.insert_or_assign(peer.id, Unreached{due, true});
+        } else {
+            unreached_.try_emplace(peer.id, Unreached{due, false});
+        }
     }
 }
+
 
 // ── Worker ──────────────────────────────────────────────────────────────────
 
@@ -415,15 +485,15 @@ void Rendezvous::dial_servers(Clock::time_point now) {
 }
 
 void Rendezvous::hand_on_unreached(Clock::time_point now) {
-    std::vector<PeerId> due;
+    std::vector<std::pair<PeerId, bool>> due;  // and whether it moved
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto it = unreached_.begin(); it != unreached_.end();) {
-            if (it->second > now) {
+            if (it->second.due > now) {
                 ++it;
                 continue;
             }
-            due.push_back(it->first);
+            due.emplace_back(it->first, it->second.moved);
             it = unreached_.erase(it);
         }
     }
@@ -431,8 +501,12 @@ void Rendezvous::hand_on_unreached(Clock::time_point now) {
     const std::vector<PeerId> connected = network_->connected_peers();
     auto* relay = services_->get<RelayService>();
     auto* punch = services_->get<HolePunchService>();
-    for (const PeerId& peer : due) {
-        if (std::find(connected.begin(), connected.end(), peer) != connected.end()) continue;
+    for (const auto& [peer, moved] : due) {
+        // Reached: connected — over a link that answers, for one that moved,
+        // whose old link may be connected and dead.
+        if (moved ? network_->answers(peer)
+                  : std::find(connected.begin(), connected.end(), peer) != connected.end())
+            continue;
         LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " not reached by dialing; "
                   << (relay ? "relaying" : "punching"));
         // The dials were a punch, timed by the server: a NAT they did not get

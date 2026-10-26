@@ -119,6 +119,13 @@ public:
     /// What did arrive may so arrive twice. Runs on a reactor thread. Default: not
     /// offered (a mock's peers never move).
     virtual void                on_peer_rerouted(PeerEventHandler /*handler*/) {}
+    /// The path to a connected peer changed under its connection: one end's
+    /// address did (a NAT gave it another port, its network changed) and the
+    /// connection followed it there. PeerInfo::endpoint is where the peer is
+    /// seen now. Its other peers, which knew it at the old address, may not
+    /// hear it from the new one until told (Rendezvous tells them). Runs on a
+    /// reactor thread. Default: not offered (a mock's peers never move).
+    virtual void                on_peer_moved(PeerEventHandler /*handler*/) {}
     /// A periodic sample of each connected peer's path (see PathStats) — what a
     /// sender that sizes its own output to the path, a live encoder above all,
     /// steers by. Registering one turns sampling on. Runs on a reactor thread.
@@ -127,6 +134,17 @@ public:
     /// The latest path sample for a peer, from any thread; nullopt if the peer is
     /// not connected, sampling is off, or no sample has been taken yet.
     virtual std::optional<PathStats> path_stats(const PeerId& /*id*/) const { return std::nullopt; }
+    /// Whether `id` is reached over a link that answers (PathStats::answers) —
+    /// connected, and not over a link gone dead, which a peer that moved leaves
+    /// behind until it times out. Where there are no path samples, connected.
+    bool answers(const PeerId& id) const {
+        if (const std::optional<PathStats> path = path_stats(id))
+            return path->answers(std::chrono::steady_clock::now());
+        const std::vector<PeerId> peers = connected_peers();
+        for (const PeerId& peer : peers)
+            if (peer == id) return true;
+        return false;
+    }
     /// Send to `id` no faster than `bits_per_second`, whatever its congestion
     /// controller paces at; 0 lifts the ceiling. For a sender that knows several
     /// connections share one uplink narrower than each path beyond it — copies of

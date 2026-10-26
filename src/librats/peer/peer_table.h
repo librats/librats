@@ -66,6 +66,18 @@ public:
     /// The loser's route is returned in `close`. Write lock.
     AddOutcome add(const PeerInfo& info, PeerRoute route, bool prefer_outbound);
 
+    /// Whether a connection to a peer described by `newcomer` wins over one by
+    /// `held`, by the rules add() goes by — what both ends of the pair decide
+    /// alike. For choosing between two links neither of which is in the table
+    /// (Node's standbys).
+    static bool prevails(const PeerInfo& newcomer, const PeerInfo& held, bool prefer_outbound);
+
+    /// Put the connection at `route` in the place of the peer's live one,
+    /// `current` — a duplicate add() turned down, taking over from a link gone
+    /// dead (Node's standby). Only while `current` is still the live route;
+    /// returns whether it was. Write lock.
+    bool supersede(const PeerInfo& info, PeerRoute current, PeerRoute route);
+
     /// Drop a peer, but only if its current route matches `route` — so a stale
     /// connection's teardown cannot evict a newer one that replaced it. Write lock.
     /// Returns true iff an entry was actually removed.

@@ -7,6 +7,7 @@
 
 #include "librats/util/rats_export.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -204,6 +205,20 @@ struct PathStats {
     /// a peer that only listens, the one sign it is gone: it is never heard
     /// unless asked.
     std::chrono::steady_clock::time_point unanswered_since{};
+
+    /// Whether the link answers at `now`: nothing sent on it has gone without an
+    /// answer for kDeadAfter, or four round trips on a path longer than a
+    /// quarter of that — past it a link gone dead (its peer moved, or its network
+    /// went) rather than one slow to answer. A link that cannot say (TCP) always
+    /// answers.
+    static constexpr std::chrono::seconds kDeadAfter{1};
+    bool answers(std::chrono::steady_clock::time_point now) const {
+        if (unanswered_since == std::chrono::steady_clock::time_point{}) return true;
+        const std::chrono::steady_clock::duration patience =
+            (std::max)(std::chrono::steady_clock::duration(kDeadAfter),
+                       std::chrono::steady_clock::duration(std::chrono::microseconds(4ull * srtt_us)));
+        return now - unanswered_since < patience;
+    }
 };
 
 /// Connection lifecycle. A connection moves strictly forward through these.

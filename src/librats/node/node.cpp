@@ -19,6 +19,13 @@ namespace librats {
 
 namespace {
 
+// A duplicate connection the peer table turns down is held this long rather
+// than closed at once: the link it lost to may be one gone dead — its peer
+// moved, and has not been heard since (PathStats::answers) — which it then
+// takes the place of. That link is looked at this often meanwhile.
+constexpr auto kStandbyFor   = std::chrono::seconds(5);
+constexpr auto kStandbyCheck = std::chrono::milliseconds(250);
+
 // Pick the listen socket's address family from the bind address:
 //   - empty or "::"  → DualStack wildcard: one IPv6 socket that also accepts IPv4
 //                      (IPv4-mapped), so the node is reachable over both families.
@@ -354,6 +361,10 @@ void Node::stop() {
     // before the dependency it borrowed is itself stopped and destroyed.
     for (auto it = subsystems_.rbegin(); it != subsystems_.rend(); ++it) (*it)->stop();
     reactors_->stop();                      // then join reactors; close connections
+    {
+        std::lock_guard lock(standby_mutex_);
+        standbys_.clear();
+    }
     // The listen sockets are owned by us, not the reactors — close them here,
     // after the reactor threads have joined (so nothing is still polling them), to
     // release the bound port immediately on stop() rather than leaking it until
@@ -692,6 +703,10 @@ void Node::route_close(PeerRoute route) {
     reactors_->by_index(route.reactor).close(route.conn, CloseReason::LocalClose);
 }
 
+void Node::close_duplicate(PeerRoute route) {
+    reactors_->by_index(route.reactor).close(route.conn, CloseReason::DuplicateConn);
+}
+
 // ── ConnectionDelegate (reactor thread) ─────────────────────────────────────
 
 bool Node::admit_inbound() {
@@ -753,39 +768,28 @@ void Node::on_established(Connection& conn) {
     const bool prefer_outbound = identity_.id < conn.remote_id();
     const auto outcome = peers_.add(info, route, prefer_outbound);
 
-    // Tear down the loser of a duplicate/cross-connect race so it can't linger
-    // holding an fd. Its on_closed is a no-op: the peer table no longer maps its
-    // route, so it neither evicts the survivor nor fires a spurious disconnect.
-    if (outcome.close)
-        reactors_->by_index(outcome.close->reactor).close(outcome.close->conn, CloseReason::DuplicateConn);
-
-    // Hand the peer's in-transit counter to the connection that now carries its
-    // traffic, so the send queue's marks weigh what callers have offered as well
-    // as what is already queued — the two halves of one backlog, and the reason a
-    // caller told "no room" is always the one told when the room comes back. The
-    // route check keeps the loser of a race off the survivor's counter.
-    if (const auto dest = peers_.destination(conn.remote_id()); dest && dest->route == route) {
-        conn.set_in_transit(dest->owed);
-        // And the ceiling its sends were given, which goes with the peer.
-        uint64_t ceiling = 0;
-        {
-            std::lock_guard lock(ceilings_mutex_);
-            if (const auto it = ceilings_.find(conn.remote_id()); it != ceilings_.end())
-                ceiling = it->second;
-        }
-        if (ceiling != 0) conn.set_send_ceiling(ceiling);
+    // Turned down: the link it lost to stays the peer's, and this one is held a
+    // while — the peer's standby — in case that link has gone dead. Both ends
+    // turn down the same one, so both hold it. Nothing is sent on it until then.
+    if (outcome.result == PeerTable::AddResult::Rejected) {
+        hold_standby(info, route);
+        return;
     }
+    // Tear down a link this one replaced so it can't linger holding an fd. Its
+    // on_closed is a no-op: the peer table no longer maps its route, so it
+    // neither evicts the survivor nor fires a spurious disconnect.
+    if (outcome.close) close_duplicate(*outcome.close);
 
-    // Tell the peer how to reach us, and what address we see it at. Skipped for a
-    // rejected duplicate (its connection was just closed above); sent on the
-    // surviving link otherwise — including the winner of a cross-connect race.
+    take_up(conn);
+
+    // Tell the peer how to reach us, and what address we see it at, on the
+    // surviving link — including the winner of a cross-connect race.
     //
     // Queued before any handler below can queue anything, so it is the first
     // message on the connection. Its lane (Control) would put it ahead of what is
     // still waiting anyway, but a handler sending enough to be written at once
     // would otherwise beat it to the wire.
-    if (outcome.result != PeerTable::AddResult::Rejected)
-        send_identify(conn);
+    send_identify(conn);
 
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
     // merely swapped the live route keeps the peer connected from the app's view —
@@ -802,6 +806,136 @@ void Node::on_established(Connection& conn) {
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_rerouted_) cb(handle);
     }
+}
+
+void Node::take_up(Connection& conn) {
+    // Hand the peer's in-transit counter to the connection that now carries its
+    // traffic, so the send queue's marks weigh what callers have offered as well
+    // as what is already queued — the two halves of one backlog, and the reason a
+    // caller told "no room" is always the one told when the room comes back. The
+    // route check keeps the loser of a race off the survivor's counter.
+    const auto dest = peers_.destination(conn.remote_id());
+    if (!dest || dest->route != PeerRoute{conn.reactor_index(), conn.id()}) return;
+    conn.set_in_transit(dest->owed);
+    // And the ceiling its sends were given, which goes with the peer.
+    uint64_t ceiling = 0;
+    {
+        std::lock_guard lock(ceilings_mutex_);
+        if (const auto it = ceilings_.find(conn.remote_id()); it != ceilings_.end())
+            ceiling = it->second;
+    }
+    if (ceiling != 0) conn.set_send_ceiling(ceiling);
+}
+
+// ── Standby ─────────────────────────────────────────────────────────────────
+//
+// Two connections to one peer: the peer table keeps one by rules both ends read
+// alike, and the other used to be closed at once. But the one kept may be a link
+// gone dead — the peer moved (a VPN switched on, another network) and neither
+// end hears the other on it, while a new one, dialed to where the peer is now,
+// comes up beside it — and closed, the new one would leave the peer with nothing
+// that works until the dead one timed out. So the one turned down is held a
+// while instead; the one kept going unanswered for kDeadAfter, or closing as
+// links that die do, hands over to it — both ends notice, each by its own
+// link — and past kStandbyFor it is closed after all.
+
+void Node::hold_standby(const PeerInfo& info, PeerRoute route) {
+    // One standby a peer: of two, the one the peer table's rules prefer — as at
+    // the other end, which holds the same two.
+    const bool prefer_outbound = identity_.id < info.id;
+    std::optional<PeerRoute> dropped;
+    uint64_t watch = 0;
+    {
+        std::lock_guard lock(standby_mutex_);
+        auto [it, fresh] = standbys_.try_emplace(info.id);
+        if (!fresh && !PeerTable::prevails(info, it->second.info, prefer_outbound)) {
+            dropped = route;
+        } else {
+            if (!fresh) dropped = it->second.route;
+            watch = ++standby_watches_;
+            it->second = Standby{info, route, std::chrono::steady_clock::now() + kStandbyFor, watch};
+        }
+    }
+    if (dropped) close_duplicate(*dropped);
+    if (watch == 0) return;  // the one held is watched already
+    LOG_DEBUG("node", "Peer " << info.id.short_hex() << ": another link, held as a standby");
+    watch_standby(info.id, watch);
+}
+
+size_t Node::standbys() const {
+    std::lock_guard lock(standby_mutex_);
+    return standbys_.size();
+}
+
+void Node::watch_standby(const PeerId& id, uint64_t watch) {
+    const auto live = peers_.route(id);
+    if (!live) return;  // gone: on_closed dealt with its standby
+    Reactor& reactor = reactors_->by_index(live->reactor);
+    reactor.execute([this, id, watch, &reactor, index = live->reactor] {
+        reactor.schedule(kStandbyCheck, [this, id, watch, index] { check_standby(id, index, watch); });
+    });
+}
+
+void Node::check_standby(const PeerId& id, uint8_t reactor, uint64_t watch) {
+    if (!running_.load()) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::optional<PeerRoute> expired;
+    {
+        std::lock_guard lock(standby_mutex_);
+        const auto it = standbys_.find(id);
+        if (it == standbys_.end() || it->second.watch != watch) return;  // another watches
+        if (now >= it->second.until) {
+            expired = it->second.route;
+            standbys_.erase(it);
+        }
+    }
+    if (expired) {
+        close_duplicate(*expired);
+        return;
+    }
+    const auto live = peers_.route(id);
+    if (!live) return;
+    if (live->reactor != reactor) {  // the peer's link changed meanwhile
+        watch_standby(id, watch);
+        return;
+    }
+    if (Connection* conn = reactors_->by_index(reactor).find(live->conn)) {
+        if (!conn->path_now().answers(now)) {
+            LOG_INFO("node", "Peer " << id.short_hex() << ": its link went unanswered; "
+                             "the standby takes over");
+            if (take_over(id, *live, /*close_from=*/true)) return;
+        }
+    }
+    reactors_->by_index(reactor).schedule(
+        kStandbyCheck, [this, id, reactor, watch] { check_standby(id, reactor, watch); });
+}
+
+bool Node::take_over(const PeerId& id, PeerRoute from, bool close_from) {
+    Standby standby;
+    {
+        std::lock_guard lock(standby_mutex_);
+        const auto it = standbys_.find(id);
+        if (it == standbys_.end()) return false;
+        standby = std::move(it->second);
+        standbys_.erase(it);
+    }
+    if (!peers_.supersede(standby.info, from, standby.route)) {
+        close_duplicate(standby.route);  // the live link is another by now
+        return false;
+    }
+    if (close_from) close_duplicate(from);
+    // As a link that replaced another in on_established: the peer's own, then
+    // identify, then those who said something on the link that went.
+    Reactor& reactor = reactors_->by_index(standby.route.reactor);
+    reactor.execute([this, id, route = standby.route, &reactor] {
+        Connection* conn = reactor.find(route.conn);
+        if (!conn) return;  // closed meanwhile: its on_closed settles the table
+        take_up(*conn);
+        send_identify(*conn);
+        Peer handle = make_peer(id, route);
+        for (auto& cb : peer_rerouted_) cb(handle);
+    });
+    return true;
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {
@@ -833,11 +967,34 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     const PeerId    id = conn.remote_id();
     const PeerRoute route{conn.reactor_index(), conn.id()};
 
+    // A standby closing is forgotten. The live link dying with one held hands
+    // over to it: the peer is still there, on the other link.
+    {
+        std::lock_guard lock(standby_mutex_);
+        const auto it = standbys_.find(id);
+        if (it != standbys_.end() && it->second.route == route) {
+            standbys_.erase(it);
+            return;
+        }
+    }
+    const bool died = reason == CloseReason::IdleTimeout || reason == CloseReason::PeerReset;
+    if (died && take_over(id, route, /*close_from=*/false)) return;
+
     // Disconnect fires only for the connection currently registered for this peer.
     // A loser of a duplicate race (or a rejected self-connection) is not mapped
     // under its route, so removing it is a no-op and must NOT surface a disconnect
     // for a peer that is still connected over the surviving link.
     if (!peers_.remove(id, route)) return;
+    // The peer is gone, and its standby with it.
+    std::optional<PeerRoute> standby;
+    {
+        std::lock_guard lock(standby_mutex_);
+        if (const auto it = standbys_.find(id); it != standbys_.end()) {
+            standby = it->second.route;
+            standbys_.erase(it);
+        }
+    }
+    if (standby) close_duplicate(*standby);
     // What this peer told us about our external endpoint went with it: the mapping
     // it observed may well have been made for its link alone, and keeping it would
     // let a long-gone peer keep voting on how our NAT behaves.
@@ -889,9 +1046,14 @@ void Node::on_moved(Connection& conn) {
     // aims at) and our view of where it can be dialled. Identify again — both
     // ends hear of the move, so both answer it.
     LOG_DEBUG("node", "Path to peer " << conn.remote_id().short_hex() << " changed; identifying again");
-    peers_.set_endpoint(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()},
-                        conn.remote_endpoint());
+    const PeerRoute route{conn.reactor_index(), conn.id()};
+    peers_.set_endpoint(conn.remote_id(), route, conn.remote_endpoint());
     send_identify(conn);
+    // Only the peer's live link speaks for it: a duplicate on its way out moving
+    // tells nobody anything.
+    if (peers_.route(conn.remote_id()) != route) return;
+    Peer handle = make_peer(conn.remote_id(), route);
+    for (auto& cb : peer_moved_) cb(handle);
 }
 
 void Node::on_dial_aborted(uint8_t reactor_index, ConnId id,

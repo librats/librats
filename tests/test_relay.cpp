@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_paths.h"
+#include "udp_forwarder.h"
 
 #include "librats/node/node.h"
 #include "librats/subsystems/hole_punch.h"
@@ -637,6 +638,52 @@ TEST(RelayE2E, AHolePunchThatCannotWorkFallsBackToARelay) {
     a.stop();
     b.stop();
     hub.stop();
+}
+
+// A direct link gone dead — the peer moved, and neither NAT lets the other in any
+// more — reaches nobody: a circuit is asked for all the same, which the far end
+// takes too, and at both ends it takes the dead link's place (Node's standby).
+// While the link answers, a circuit is no more asked for than before.
+TEST(RelayE2E, ACircuitTakesThePlaceOfADirectLinkGoneDead) {
+    Trio trio;
+    std::atomic<int> disconnects{0}, rerouted{0}, heard{0};
+    for (Node* node : {&trio.a, &trio.b}) {
+        node->on_peer_path([](const Peer&, const PathStats&) {});  // whether a link answers
+        node->on_peer_disconnected([&](const PeerId&, CloseReason) { ++disconnects; });
+        node->on_peer_rerouted([&](const Peer&) { ++rerouted; });
+    }
+    trio.b.on("chat", [&](const Peer&, ByteView) { ++heard; });
+    ASSERT_TRUE(trio.start());
+    librats_test::UdpForwarder path(trio.b.listen_port());
+    trio.a.connect("127.0.0.1", path.port());
+    ASSERT_TRUE(wait_for([&] {
+        return trio.a.peer(trio.b.local_id()).has_value() && trio.b.peer(trio.a.local_id()).has_value();
+    }));
+    EXPECT_FALSE(trio.relay_a->connect_via_relay(trio.b.local_id()))
+        << "a circuit asked for to a peer whose link answers";
+
+    path.cut();
+    const auto speak_until = [&](auto pred) {
+        const std::string probe = "probe";
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (!pred() && std::chrono::steady_clock::now() < deadline) {
+            trio.a.send(trio.b.local_id(), "probe", ByteView(probe));
+            trio.b.send(trio.a.local_id(), "probe", ByteView(probe));
+            std::this_thread::sleep_for(50ms);
+        }
+        return pred();
+    };
+    ASSERT_TRUE(speak_until([&] {
+        return !trio.a.answers(trio.b.local_id()) && !trio.b.answers(trio.a.local_id());
+    }));
+    ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
+    EXPECT_TRUE(speak_until([&] { return rerouted.load() == 2; })) << "the circuit never took over";
+    EXPECT_TRUE(relayed(trio.a, trio.b.local_id()));
+    EXPECT_TRUE(relayed(trio.b, trio.a.local_id()));
+    EXPECT_EQ(disconnects.load(), 0);
+    const std::string hello = "through the middle";
+    trio.a.send(trio.b.local_id(), "chat", ByteView(hello));
+    EXPECT_TRUE(wait_for([&] { return heard.load() == 1; }, 5s));
 }
 
 // And the other direction: a circuit is a fallback, not a destination. Once the two

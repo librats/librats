@@ -148,6 +148,10 @@ public:
 
     /// Number of currently-established peers.
     size_t                  peer_count() const noexcept { return peers_.size(); }
+    /// Links held as standbys now: duplicates the peer table turned down, kept a
+    /// while in case the one they lost to has gone dead (see on_established).
+    /// Diagnostics and tests.
+    size_t                  standbys() const;
     /// Snapshot of all established peers (id, addresses, direction, timing).
     std::vector<PeerInfo>   peers() const override { return peers_.snapshot(); }
     /// Handle to a connected peer by id, or std::nullopt if not connected.
@@ -262,6 +266,9 @@ public:
     /// Subscribe to "this peer's traffic moved to another connection" (see
     /// PeerNetwork::on_peer_rerouted). The handler runs on a reactor thread.
     void on_peer_rerouted(PeerNetwork::PeerEventHandler cb) override { peer_rerouted_.push_back(std::move(cb)); }
+    /// Subscribe to "the path to this peer changed: one end moved" (see
+    /// PeerNetwork::on_peer_moved). The handler runs on a reactor thread.
+    void on_peer_moved(PeerNetwork::PeerEventHandler cb) override { peer_moved_.push_back(std::move(cb)); }
     /// Subscribe to periodic path samples of every connected peer (see PathStats):
     /// the estimate to size a live sender to, the queue in front of its next
     /// message, round trip and loss. Registering turns sampling on, every
@@ -341,6 +348,24 @@ private:
     /// config knob that sets the hard limit, so the two cannot drift apart.
     size_t send_low_water() const noexcept;
     void route_close(PeerRoute route);
+    /// Close a link the peer has another for (CloseReason::DuplicateConn).
+    void close_duplicate(PeerRoute route);
+    /// Hand a connection that now carries a peer's traffic what goes with the
+    /// peer: its in-transit counter and its send ceiling. Reactor thread.
+    void take_up(Connection& conn);
+
+    // — standby: a duplicate held in case the link it lost to has gone dead —
+    /// Hold `route`, a connection the peer table turned down, as the peer's
+    /// standby, in place of any it had.
+    void hold_standby(const PeerInfo& info, PeerRoute route);
+    /// Look at the peer's live link in kStandbyCheck, on its reactor.
+    void watch_standby(const PeerId& id, uint64_t watch);
+    /// The look itself: the live link gone unanswered hands over to the
+    /// standby; the standby past its time is closed. On reactor `reactor`.
+    void check_standby(const PeerId& id, uint8_t reactor, uint64_t watch);
+    /// The peer's standby takes the place of its live link, `from`; closed
+    /// unless it is closing already. Whether there was one to.
+    bool take_over(const PeerId& id, PeerRoute from, bool close_from);
 
     // — identify: how peers learn each other's dialable addresses (reactor thread) —
     void                 send_identify(Connection& conn);            ///< on establish
@@ -391,8 +416,21 @@ private:
     std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
     std::vector<PeerNetwork::PeerEventHandler>      peer_writable_;
     std::vector<PeerNetwork::PeerEventHandler>      peer_rerouted_;
+    std::vector<PeerNetwork::PeerEventHandler>      peer_moved_;
     std::vector<PeerNetwork::PeerPathHandler>       peer_path_;
     std::vector<std::pair<MessageType, PeerNetwork::LiveOutcomeHandler>> live_outcome_;
+
+    // Standbys by peer: what a duplicate connection the peer table turned down
+    // is, while it is held (hold_standby).
+    struct Standby {
+        PeerInfo                              info;
+        PeerRoute                             route;
+        std::chrono::steady_clock::time_point until;
+        uint64_t                              watch = 0;  ///< its check_standby() chain
+    };
+    mutable std::mutex                                       standby_mutex_;
+    std::unordered_map<PeerId, Standby, PeerId::Hash>       standbys_;
+    uint64_t                                                 standby_watches_ = 0;
 
     // Send ceilings by peer (set_send_ceiling), for the link that carries it now
     // and any it moves to.

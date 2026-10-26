@@ -29,6 +29,19 @@ int transport_rank(TransportKind t) noexcept {
 
 } // namespace
 
+bool PeerTable::prevails(const PeerInfo& newcomer, const PeerInfo& held, bool prefer_outbound) {
+    const bool held_relayed = held.transport == TransportKind::Relay;
+    const bool new_relayed  = newcomer.transport == TransportKind::Relay;
+    if (held_relayed != new_relayed) return !new_relayed;
+    if (held.direction != newcomer.direction) {
+        const ConnRole survivor = prefer_outbound ? ConnRole::Outbound : ConnRole::Inbound;
+        return newcomer.direction == survivor;
+    }
+    if (held.transport != newcomer.transport)
+        return transport_rank(newcomer.transport) > transport_rank(held.transport);
+    return true;
+}
+
 PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
                                              bool prefer_outbound) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -65,20 +78,7 @@ PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
     //                        same pair differently.
     //   same role and wire ⇒ a reconnect, not a simultaneous pair: the old link is
     //                        stale or already dead, so the newcomer is the live one.
-    const bool cur_relayed = cur.info.transport == TransportKind::Relay;
-    const bool new_relayed = info.transport == TransportKind::Relay;
-
-    bool keep_new = true;
-    if (cur_relayed != new_relayed) {
-        keep_new = !new_relayed;
-    } else if (cur.info.direction != info.direction) {
-        const ConnRole survivor = prefer_outbound ? ConnRole::Outbound : ConnRole::Inbound;
-        keep_new = (info.direction == survivor);
-    } else if (cur.info.transport != info.transport) {
-        keep_new = transport_rank(info.transport) > transport_rank(cur.info.transport);
-    }
-
-    if (keep_new) {
+    if (prevails(info, cur.info, prefer_outbound)) {
         const PeerRoute loser = cur.route;
         cur = Entry{info, route};
         return {AddResult::Replaced, loser};
@@ -101,6 +101,14 @@ std::vector<Address> PeerTable::add_addresses(const PeerId& id, PeerRoute route,
         added.push_back(addr);
     }
     return added;
+}
+
+bool PeerTable::supersede(const PeerInfo& info, PeerRoute current, PeerRoute route) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(info.id);
+    if (it == peers_.end() || it->second.route != current) return false;
+    it->second = Entry{info, route};
+    return true;
 }
 
 std::optional<PeerTable::Destination> PeerTable::destination(const PeerId& id) const {
