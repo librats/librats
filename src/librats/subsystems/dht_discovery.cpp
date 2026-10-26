@@ -298,11 +298,16 @@ void DhtDiscovery::on_peers(const std::vector<Address>& peers, const InfoHash& /
     const auto now = Redials::Clock::now();
     for (const Address& peer : peers) {
         if (peer.ip.is_any() || peer.port == 0) continue;
-        if (std::find(connected.begin(), connected.end(), peer) != connected.end()) continue;
-        Redials::Dial dial;
+        const bool is_connected =
+            std::find(connected.begin(), connected.end(), peer) != connected.end();
+        Redials::Dial dial = Redials::Dial::None;
         {
             std::lock_guard<std::mutex> lock(dialed_mutex_);
-            dial = dialed_.found(peer, now);
+            if (is_connected) {
+                dialed_.connected(peer);
+            } else {
+                dial = dialed_.found(peer, now);
+            }
         }
         if (dial == Redials::Dial::None) continue;
         LOG_DEBUG("dht-discovery", (dial == Redials::Dial::First ? "Dialing" : "Punching")

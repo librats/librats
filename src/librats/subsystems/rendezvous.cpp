@@ -23,11 +23,14 @@ constexpr uint8_t kOpHello    = 0;
 constexpr uint8_t kOpRegister = 1;
 constexpr uint8_t kOpPeers    = 2;
 constexpr uint8_t kOpMoved    = 3;
+constexpr uint8_t kOpServers  = 4;
 
 /// Peers one Peers message names, and endpoints each: a cap on what one
 /// server's word makes this node dial.
 constexpr size_t kMaxPeersPerMessage = 64;
 constexpr size_t kMaxEndpoints       = 4;
+/// Servers one Servers message names.
+constexpr size_t kMaxServersPerMessage = 64;
 
 /// The longest honest message: a full Peers.
 constexpr size_t kMaxMessageSize =
@@ -44,6 +47,44 @@ void put_u16(Bytes& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v >> 8));
     out.push_back(static_cast<uint8_t>(v));
 }
+
+/// [u8 ip_len][ip][u16 port]
+void put_endpoint(Bytes& out, const Address& a) {
+    const ByteView ip = a.ip.bytes();
+    out.push_back(static_cast<uint8_t>(ip.size()));
+    out.insert(out.end(), ip.begin(), ip.end());
+    put_u16(out, a.port);
+}
+
+/// A message's body, read front to back.
+struct Reader {
+    const uint8_t* p;
+    size_t         n;
+
+    explicit Reader(ByteView body) : p(body.data()), n(body.size()) {}
+    /// The next `k` bytes; null past the end.
+    const uint8_t* take(size_t k) {
+        if (n < k) return nullptr;
+        const uint8_t* at = p;
+        p += k;
+        n -= k;
+        return at;
+    }
+    /// An endpoint (put_endpoint()): false if the message is malformed; `out`
+    /// none for one that names nowhere to dial.
+    bool endpoint(std::optional<Address>& out) {
+        out.reset();
+        const uint8_t* len = take(1);
+        if (!len || (*len != 4 && *len != 16)) return false;
+        const uint8_t* ip_p = take(*len);
+        const uint8_t* port_p = take(2);
+        if (!ip_p || !port_p) return false;
+        const auto ip = IpAddress::from_bytes(ByteView(ip_p, *len));
+        const uint16_t port = static_cast<uint16_t>((port_p[0] << 8) | port_p[1]);
+        if (ip && !ip->is_any() && port != 0) out = Address{*ip, port};
+        return true;
+    }
+};
 
 /// Where a peer may be dialed, best first: the endpoint its UDP packets come
 /// from, then what it identified itself with.
@@ -121,6 +162,7 @@ void Rendezvous::stop() {
     registered_.clear();
     keys_of_.clear();
     budgets_.clear();
+    servers_told_.clear();
 }
 
 std::vector<PeerId> Rendezvous::servers() const {
@@ -170,6 +212,9 @@ void Rendezvous::handle(const Peer& from, ByteView payload) {
         case kOpMoved:
             on_peers(from.id(), body, /*moved=*/true);
             break;
+        case kOpServers:
+            on_servers_told(from.id(), body);
+            break;
         default:
             break;  // an op from a newer version: ignored
     }
@@ -184,6 +229,7 @@ void Rendezvous::on_connected(const PeerId& peer) {
     if (!config_.serve) return;
     const uint8_t hello[] = {kVersion, kOpHello};
     network_->send(peer, MessageType::Rendezvous, ByteView(hello, sizeof hello));
+    tell_servers(peer);
 }
 
 bool Rendezvous::at_server_address(const PeerId& peer) const {
@@ -206,11 +252,17 @@ void Rendezvous::on_server_found(std::function<void(const PeerId&)> handler) {
     found_handlers_.push_back(std::move(handler));
 }
 
+void Rendezvous::on_servers(
+    std::function<void(const PeerId&, const std::vector<Address>&)> handler) {
+    servers_handlers_.push_back(std::move(handler));
+}
+
 void Rendezvous::on_disconnected(const PeerId& peer) {
     std::lock_guard<std::mutex> lock(mutex_);
     servers_.erase(peer);
     at_servers_.erase(peer);
     budgets_.erase(peer);
+    servers_told_.erase(peer);
     const auto keys = keys_of_.find(peer);
     if (keys == keys_of_.end()) return;
     for (const Key& key : keys->second) {
@@ -227,6 +279,7 @@ void Rendezvous::on_hello(const PeerId& server) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!servers_.insert(server).second) return;
+        ++servers_came_;
         found = at_servers_.count(server) == 0;
     }
     if (found)
@@ -281,6 +334,7 @@ void Rendezvous::on_register(const PeerId& peer, const Key& key) {
         }
         if (keys.empty()) keys_of_.erase(peer);
     }
+    tell_servers(peer);
     if (others.empty() && !kept) return;
 
     std::unordered_map<PeerId, PeerInfo, PeerId::Hash> known;
@@ -345,6 +399,32 @@ void Rendezvous::on_path(const PeerId& peer, const PathStats& path) {
     for (const PeerId& server : servers) register_keys(server);
 }
 
+void Rendezvous::tell_servers(const PeerId& peer) {
+    std::vector<PeerId> servers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t& told = servers_told_[peer];
+        if (told == servers_came_) return;
+        told = servers_came_;
+        for (const PeerId& server : servers_)
+            if (server != peer) servers.push_back(server);
+    }
+    Bytes out{kVersion, kOpServers, 0};
+    uint8_t count = 0;
+    for (const PeerInfo& info : network_->peers()) {
+        if (count == kMaxServersPerMessage ||
+            std::find(servers.begin(), servers.end(), info.id) == servers.end())
+            continue;
+        const std::vector<Address> endpoints = endpoints_of(info);
+        if (endpoints.empty()) continue;
+        put_endpoint(out, endpoints.front());
+        ++count;
+    }
+    if (count == 0) return;
+    out[2] = count;
+    network_->send(peer, MessageType::Rendezvous, ByteView(out));
+}
+
 Bytes Rendezvous::peers_message(
     uint8_t op, const std::vector<PeerId>& peers,
     const std::unordered_map<PeerId, PeerInfo, PeerId::Hash>& known) const {
@@ -358,12 +438,7 @@ Bytes Rendezvous::peers_message(
         const auto& raw = id.bytes();
         out.insert(out.end(), raw.begin(), raw.end());
         out.push_back(static_cast<uint8_t>(endpoints.size()));
-        for (const Address& a : endpoints) {
-            const ByteView ip = a.ip.bytes();
-            out.push_back(static_cast<uint8_t>(ip.size()));
-            out.insert(out.end(), ip.begin(), ip.end());
-            put_u16(out, a.port);
-        }
+        for (const Address& a : endpoints) put_endpoint(out, a);
         ++count;
     }
     out[2] = count;
@@ -372,38 +447,24 @@ Bytes Rendezvous::peers_message(
 
 void Rendezvous::on_peers(const PeerId& server, ByteView body, bool moved) {
     if (!is_server(server) || body.empty()) return;
-    const uint8_t* p = body.data();
-    size_t n = body.size();
-    auto take = [&](size_t k) -> const uint8_t* {
-        if (n < k) return nullptr;
-        const uint8_t* at = p;
-        p += k;
-        n -= k;
-        return at;
-    };
-
+    Reader read(body);
     struct Told {
         PeerId               id;
         std::vector<Address> endpoints;
     };
     std::vector<Told> told;
-    const uint8_t count = *take(1);
+    const uint8_t count = *read.take(1);
     for (uint8_t i = 0; i < count && i < kMaxPeersPerMessage; ++i) {
-        const uint8_t* id_p = take(PeerId::kSize);
-        const uint8_t* n_p = take(1);
+        const uint8_t* id_p = read.take(PeerId::kSize);
+        const uint8_t* n_p = read.take(1);
         if (!id_p || !n_p || *n_p > kMaxEndpoints) return;
         const auto id = PeerId::from_bytes(ByteView(id_p, PeerId::kSize));
         if (!id) return;
         Told peer{*id, {}};
         for (uint8_t e = 0; e < *n_p; ++e) {
-            const uint8_t* len = take(1);
-            if (!len || (*len != 4 && *len != 16)) return;
-            const uint8_t* ip_p = take(*len);
-            const uint8_t* port_p = take(2);
-            if (!ip_p || !port_p) return;
-            const auto ip = IpAddress::from_bytes(ByteView(ip_p, *len));
-            const uint16_t port = static_cast<uint16_t>((port_p[0] << 8) | port_p[1]);
-            if (ip && !ip->is_any() && port != 0) peer.endpoints.push_back(Address{*ip, port});
+            std::optional<Address> at;
+            if (!read.endpoint(at)) return;
+            if (at) peer.endpoints.push_back(*at);
         }
         told.push_back(std::move(peer));
     }
@@ -432,6 +493,23 @@ void Rendezvous::on_peers(const PeerId& server, ByteView body, bool moved) {
     }
 }
 
+void Rendezvous::on_servers_told(const PeerId& server, ByteView body) {
+    if (servers_handlers_.empty() || !is_server(server) || body.empty()) return;
+    Reader read(body);
+    const uint8_t count = *read.take(1);
+    if (count > kMaxServersPerMessage) return;
+    std::vector<Address> servers;
+    for (uint8_t i = 0; i < count; ++i) {
+        std::optional<Address> at;
+        if (!read.endpoint(at)) return;
+        if (at && std::find(servers.begin(), servers.end(), *at) == servers.end())
+            servers.push_back(*at);
+    }
+    if (servers.empty()) return;
+    LOG_DEBUG("rendezvous", "Server " << server.short_hex() << " told of " << servers.size()
+              << " other server(s)");
+    for (const auto& handler : servers_handlers_) handler(server, servers);
+}
 
 // ── Worker ──────────────────────────────────────────────────────────────────
 

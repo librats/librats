@@ -63,10 +63,12 @@ bool connected(Node& node, const Node& other) {
 }
 
 // The wire, spelled out: [ver=1][op] — Hello is op 0; Register op 1: [32B key];
-// Peers op 2 and Moved op 3: [count] × { [32B id][n] × { [ip_len][ip][u16 port] } }.
+// Peers op 2 and Moved op 3: [count] × { [32B id][n] × { [ip_len][ip][u16 port] } };
+// Servers op 4: [count] × { [ip_len][ip][u16 port] }.
 constexpr uint8_t kOpRegister = 1;
 constexpr uint8_t kOpPeers    = 2;
 constexpr uint8_t kOpMoved    = 3;
+constexpr uint8_t kOpServers  = 4;
 
 Bytes hello() { return Bytes{1, 0}; }
 
@@ -89,6 +91,57 @@ Bytes peers_naming(const PeerId& id, std::array<uint8_t, 4> ip, uint16_t port,
     out.push_back(static_cast<uint8_t>(port));
     return out;
 }
+
+/// A Servers message naming loopback's `ports`.
+Bytes servers_naming(const std::vector<uint16_t>& ports) {
+    Bytes out{1, kOpServers, static_cast<uint8_t>(ports.size())};
+    for (uint16_t port : ports) {
+        out.insert(out.end(), {4, 127, 0, 0, 1});
+        out.push_back(static_cast<uint8_t>(port >> 8));
+        out.push_back(static_cast<uint8_t>(port));
+    }
+    return out;
+}
+
+/// The ports of loopback a Servers message names, in its order.
+std::vector<uint16_t> ports_named(const Bytes& message) {
+    std::vector<uint16_t> ports;
+    if (message.size() < 3) return ports;
+    for (size_t at = 3; at + 7 <= message.size(); at += 7)
+        ports.push_back(static_cast<uint16_t>((message[at + 5] << 8) | message[at + 6]));
+    std::sort(ports.begin(), ports.end());
+    return ports;
+}
+
+/// What a node's Rendezvous was told of servers, by whom.
+class ToldOfServers {
+public:
+    explicit ToldOfServers(Rendezvous& rendezvous) {
+        rendezvous.on_servers([this](const PeerId& from, const std::vector<Address>& servers) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            from_ = from;
+            ports_.clear();
+            for (const Address& at : servers) ports_.push_back(at.port);
+            std::sort(ports_.begin(), ports_.end());
+            ++times_;
+        });
+    }
+    int times() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return times_;
+    }
+    /// The last told: by whom, and the ports of loopback named.
+    std::pair<PeerId, std::vector<uint16_t>> last() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return {from_, ports_};
+    }
+
+private:
+    mutable std::mutex    mutex_;
+    int                   times_ = 0;
+    PeerId                from_;
+    std::vector<uint16_t> ports_;
+};
 
 /// A HolePunch or Relay stand-in that notes whom it was asked to reach.
 class Recorder {
@@ -565,4 +618,122 @@ TEST(Rendezvous, ALinkGoneDeadHasTheServersSpokenToAtOnce) {
     a.stop();
     b.stop();
     server.stop();
+}
+
+// Servers that met say Hello to each other, and each tells a peer of the others
+// it is connected to, where they are dialed: as the peer connects, and again as
+// it registers once another has come.
+TEST(Rendezvous, AServerTellsAPeerOfTheOtherServersAndOfOneThatCame) {
+    Node first(node_config()), second(node_config()), third(node_config());
+    for (Node* server : {&first, &second, &third})
+        server->add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(first.start() && second.start() && third.start());
+    second.connect("127.0.0.1", first.listen_port());
+    ASSERT_TRUE(wait_for([&] { return first.peer_count() == 1; }));
+
+    Node a(node_config());
+    Rendezvous::Config config = meeting("room", first.listen_port());
+    config.refresh = 200ms;
+    auto* rendezvous = a.add_subsystem(std::make_unique<Rendezvous>(config));
+    ToldOfServers told(*rendezvous);
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return told.times() == 1; }));
+    EXPECT_EQ(told.last().first, first.local_id());
+    EXPECT_EQ(told.last().second, std::vector<uint16_t>{second.listen_port()});
+
+    first.connect("127.0.0.1", third.listen_port());
+    ASSERT_TRUE(wait_for([&] { return told.times() == 2; }, 5s))
+        << "not told of a server that came";
+    std::vector<uint16_t> both{second.listen_port(), third.listen_port()};
+    std::sort(both.begin(), both.end());
+    EXPECT_EQ(told.last().second, both);
+    std::this_thread::sleep_for(600ms);  // three registrations more
+    EXPECT_EQ(told.times(), 2) << "told again with nothing new";
+
+    a.stop();
+    third.stop();
+    second.stop();
+    first.stop();
+}
+
+// What a peer is told of servers, it is told by a server alone, and a server
+// tells one peer nothing of itself: a server is no server of its own.
+TEST(Rendezvous, ServersAreHeardOfFromAServerAlone) {
+    Node server(node_config());
+    server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    Node a(node_config());
+    auto* rendezvous = a.add_subsystem(std::make_unique<Rendezvous>(meeting("room", 0)));
+    ToldOfServers told(*rendezvous);
+    Node stranger(node_config());
+    ASSERT_TRUE(server.start() && a.start() && stranger.start());
+
+    stranger.connect("127.0.0.1", a.listen_port());
+    ASSERT_TRUE(wait_for([&] { return stranger.peer_count() == 1; }));
+    const Bytes named = servers_naming({1000, 1001});
+    stranger.send(a.local_id(), MessageType::Rendezvous, ByteView(named));
+    for (const Bytes& junk : {Bytes{1, kOpServers}, Bytes{1, kOpServers, 2, 4, 127, 0, 0, 1},
+                              Bytes{1, kOpServers, 1, 5, 127, 0, 0, 1, 0, 0}})
+        stranger.send(a.local_id(), MessageType::Rendezvous, ByteView(junk));
+    std::this_thread::sleep_for(300ms);
+    EXPECT_EQ(told.times(), 0) << "told of servers by one that is none";
+
+    a.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return rendezvous->is_server(server.local_id()); }));
+    std::this_thread::sleep_for(300ms);
+    EXPECT_EQ(told.times(), 0) << "a server with no other told of something";
+
+    // Told by hand, as a server it said Hello: heard.
+    Node hand_made(node_config());
+    ASSERT_TRUE(hand_made.start());
+    hand_made.connect("127.0.0.1", a.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hand_made.peer_count() == 1; }));
+    const Bytes hi = hello();
+    hand_made.send(a.local_id(), MessageType::Rendezvous, ByteView(hi));
+    hand_made.send(a.local_id(), MessageType::Rendezvous, ByteView(named));
+    ASSERT_TRUE(wait_for([&] { return told.times() == 1; }));
+    EXPECT_EQ(told.last().first, hand_made.local_id());
+    EXPECT_EQ(told.last().second, (std::vector<uint16_t>{1000, 1001}));
+
+    hand_made.stop();
+    stranger.stop();
+    a.stop();
+    server.stop();
+}
+
+// A server tells each peer of the others once — again only when one comes —
+// and never of the peer itself, a server among its peers as well.
+TEST(Rendezvous, AServerTellsAPeerOfTheServersOnceAndNeverOfItself) {
+    Node first(node_config()), second(node_config());
+    for (Node* server : {&first, &second})
+        server->add_subsystem(std::make_unique<Rendezvous>(serving()));
+    Node a(node_config());  // speaks the wire by hand
+    Heard heard(a);
+    ASSERT_TRUE(first.start() && second.start() && a.start());
+    second.connect("127.0.0.1", first.listen_port());
+    ASSERT_TRUE(wait_for([&] { return first.peer_count() == 1; }));
+
+    a.connect("127.0.0.1", first.listen_port());
+    ASSERT_TRUE(wait_for([&] { return heard.count(kOpServers) == 1; }));
+    EXPECT_EQ(ports_named(heard.last(kOpServers)), std::vector<uint16_t>{second.listen_port()});
+    const Bytes registering = register_message("room");
+    const auto register_thrice = [&] {
+        for (int i = 0; i < 3; ++i) {
+            a.send(first.local_id(), MessageType::Rendezvous, ByteView(registering));
+            std::this_thread::sleep_for(50ms);
+        }
+        std::this_thread::sleep_for(200ms);
+    };
+    register_thrice();
+    EXPECT_EQ(heard.count(kOpServers), 1u) << "told again with nothing new";
+
+    // It says Hello: a server come, which it is told of no more than the others.
+    const Bytes hi = hello();
+    a.send(first.local_id(), MessageType::Rendezvous, ByteView(hi));
+    register_thrice();
+    EXPECT_EQ(heard.count(kOpServers), 2u);
+    EXPECT_EQ(ports_named(heard.last(kOpServers)), std::vector<uint16_t>{second.listen_port()});
+
+    a.stop();
+    second.stop();
+    first.stop();
 }

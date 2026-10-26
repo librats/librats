@@ -51,6 +51,12 @@
  * own connected handler, whichever runs first. A node learns of a server any other way as well — a
  * peer exchange naming it — by its Hello, and says so (on_server_found()).
  *
+ * Servers that know each other — met however they met, a DHT's key of their
+ * own as a rule — say Hello to each other too, and a server tells each peer
+ * the others it is connected to (Servers): as it says Hello, and again as it
+ * answers a registration when one has come since. A node keeps them as it
+ * likes (on_servers()): Rendezvous dials only Config::servers.
+ *
  * ── Wire format (MessageType::Rendezvous), big-endian ───────────────────────
  *   [u8 ver=1][u8 op]
  *     op=0 Hello    —                                          server → peer
@@ -58,9 +64,11 @@
  *     op=2 Peers    [u8 count] × { [32B id][u8 n] × { [u8 ip_len][ip][u16 port] } }
  *                                                              server → peer
  *     op=3 Moved    as Peers: dial them even if connected      server → peer
- * The first endpoint of each is where the server sees its UDP packets come from;
- * the others are what it identified itself with (its listen port at the address
- * seen, and the ones it advertised: another on the same network dials those).
+ *     op=4 Servers  [u8 count] × { [u8 ip_len][ip][u16 port] }  server → peer
+ * The first endpoint of each in Peers is where the server sees its UDP packets
+ * come from; the others are what it identified itself with (its listen port at
+ * the address seen, and the ones it advertised: another on the same network
+ * dials those). Servers names each server at the first of those alone.
  *
  * Trust: a server's word on where a peer is, is acted on with a few dense dials,
  * the exposure PeerExchange and HolePunch already accept, and only from a peer
@@ -160,6 +168,9 @@ public:
     /// A peer said Hello that was not known for a server as it connected. Runs
     /// on a reactor thread; register before start().
     void on_server_found(std::function<void(const PeerId&)> handler);
+    /// A server told of the other servers it is connected to, where each is
+    /// dialed. Runs on a reactor thread; register before start().
+    void on_servers(std::function<void(const PeerId& server, const std::vector<Address>& servers)> handler);
 
     // — diagnostics and tests —
     /// Registrations this node keeps as a server, over every key.
@@ -197,6 +208,8 @@ private:
     void on_hello(const PeerId& server);
     /// Server: `peer` registered `key`.
     void on_register(const PeerId& peer, const Key& key);
+    /// Client: a server told of the other servers.
+    void on_servers_told(const PeerId& server, ByteView body);
     /// Client: a server told of peers; dial them — `moved`: connected or not.
     void on_peers(const PeerId& server, ByteView body, bool moved);
     /// Server: `peer` moved; tell those it meets, and it of them.
@@ -209,6 +222,9 @@ private:
 
     // — outgoing —
     void register_keys(const PeerId& server);
+    /// Server: tell `peer` of the other servers, if any came since it was last
+    /// told.
+    void tell_servers(const PeerId& peer);
     /// The Peers (or Moved) message naming `peers`, each with its endpoints
     /// from `known`.
     Bytes peers_message(uint8_t op, const std::vector<PeerId>& peers,
@@ -236,6 +252,7 @@ private:
     std::unordered_set<PeerId, PeerId::Hash>             servers_;     ///< said Hello
     std::unordered_set<PeerId, PeerId::Hash>             at_servers_;  ///< at a server address
     std::vector<std::function<void(const PeerId&)>>      found_handlers_;
+    std::vector<std::function<void(const PeerId&, const std::vector<Address>&)>> servers_handlers_;
     std::unordered_map<PeerId, Unreached, PeerId::Hash>  unreached_;
     std::chrono::steady_clock::time_point                refresh_at_{};
     std::chrono::steady_clock::time_point                spoken_at_{};  ///< on a dead link
@@ -243,6 +260,8 @@ private:
     std::map<Key, Registered>                                        registered_;
     std::unordered_map<PeerId, std::vector<Key>, PeerId::Hash>       keys_of_;
     std::unordered_map<PeerId, Budget, PeerId::Hash>                 budgets_;
+    uint64_t                                                         servers_came_ = 0;  ///< Hellos heard
+    std::unordered_map<PeerId, uint64_t, PeerId::Hash>               servers_told_;  ///< servers_came_ as told
 };
 
 } // namespace librats

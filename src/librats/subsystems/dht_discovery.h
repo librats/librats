@@ -22,7 +22,8 @@
  * other's — if they overlap. A peer found and not connected is therefore
  * dialed again, as a punch (DialProfile::punch(): dense probes over the shared
  * datagram socket), each time it is found again for a while after it was first
- * found (Redials).
+ * found (Redials) — or after it was last found connected, a link that went
+ * since dialed for anew.
  *
  * The port announced is the one peers are to dial. Over IPv6, which has no NAT,
  * the listen port; over IPv4 the one the router forwards to it (PortMapped, from
@@ -88,7 +89,8 @@ public:
         std::chrono::milliseconds stun_every{20000};
 
         /// A peer found and not connected is dialed again when found again, at
-        /// most this often, for this long after it was first found. A NAT's
+        /// most this often, for this long after it was first found (or last
+        /// found connected: a link gone is dialed for anew). A NAT's
         /// mapping lives some 30 s at least, so two nodes that keep dialing
         /// each other more often than that get through on the second's dial.
         std::chrono::milliseconds redial_every{5000};
@@ -110,6 +112,9 @@ public:
 
         /// `address` found at `now`, not connected.
         Dial found(const Address& address, Clock::time_point now);
+        /// `address` found connected: once its link is gone, it is dialed as
+        /// though found for the first time.
+        void connected(const Address& address) { found_.erase(address); }
         /// Forget what has not been found for a while: the DHT stops handing
         /// out an address half an hour after its last announce.
         void forget_older_than(Clock::time_point before);

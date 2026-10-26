@@ -191,6 +191,22 @@ TEST(DhtDiscoveryTest, RedialsWhatItFindsForAWhile) {
     EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);
 }
 
+// A peer found connected, whose link then goes, is dialed for anew however long
+// ago it was first found: two that stay up find each other again.
+TEST(DhtDiscoveryTest, RedialsAPeerFoundConnectedOnceItsLinkIsGone) {
+    using Dial = DhtDiscovery::Redials::Dial;
+    using Clock = DhtDiscovery::Redials::Clock;
+    DhtDiscovery::Redials redials(5s, 20s);
+    const Address a("203.0.113.1", 4000);
+    const Clock::time_point t0{};
+
+    EXPECT_EQ(redials.found(a, t0), Dial::First);
+    EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);  // for long enough
+    redials.connected(a);
+    EXPECT_EQ(redials.found(a, t0 + 600s), Dial::First);
+    EXPECT_EQ(redials.found(a, t0 + 605s), Dial::Again);
+}
+
 // The adapter brings a DhtClient up on a real UDP port and tears down cleanly.
 TEST(DhtDiscoveryTest, StartsAndStopsCleanly) {
     Node node(listening_config());
