@@ -496,22 +496,22 @@ TEST(Rendezvous, APeerThatMovedIsDialedThoughConnected) {
 TEST(Rendezvous, OfPeersThatMovedOnlyOneWhoseLinkIsDeadIsRelayed) {
     RelayRecorder* relay = nullptr;
     Unreached test([&](Node& a) { relay = a.add_subsystem(std::make_unique<RelayRecorder>()); });
-    Node near(node_config()), far(node_config());
-    ASSERT_TRUE(near.start() && far.start());
+    Node alive(node_config()), dead(node_config());
+    ASSERT_TRUE(alive.start() && dead.start());
     ASSERT_TRUE(test.start());
     test.hello();
-    librats_test::UdpForwarder path(far.listen_port());
-    test.a.connect("127.0.0.1", near.listen_port());
+    librats_test::UdpForwarder path(dead.listen_port());
+    test.a.connect("127.0.0.1", alive.listen_port());
     test.a.connect("127.0.0.1", path.port());
     ASSERT_TRUE(wait_for([&] {
-        return test.a.peer(near.local_id()).has_value() && test.a.peer(far.local_id()).has_value();
+        return test.a.peer(alive.local_id()).has_value() && test.a.peer(dead.local_id()).has_value();
     }));
 
     path.cut();
     const auto speak = [&] {
         const std::string probe = "probe";
-        test.a.send(near.local_id(), "probe", ByteView(probe));
-        test.a.send(far.local_id(), "probe", ByteView(probe));
+        test.a.send(alive.local_id(), "probe", ByteView(probe));
+        test.a.send(dead.local_id(), "probe", ByteView(probe));
     };
     const auto speak_until = [&](auto pred, std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -521,18 +521,18 @@ TEST(Rendezvous, OfPeersThatMovedOnlyOneWhoseLinkIsDeadIsRelayed) {
         }
         return pred();
     };
-    ASSERT_TRUE(speak_until([&] { return !test.a.answers(far.local_id()); }, 5s));
-    EXPECT_TRUE(test.a.answers(near.local_id()));
+    ASSERT_TRUE(speak_until([&] { return !test.a.answers(dead.local_id()); }, 5s));
+    EXPECT_TRUE(test.a.answers(alive.local_id()));
 
-    for (const PeerId& peer : {near.local_id(), far.local_id()}) {
+    for (const PeerId& peer : {alive.local_id(), dead.local_id()}) {
         const Bytes moved = peers_naming(peer, {192, 0, 2, 1}, 9, kOpMoved);
         test.server.send(test.a.local_id(), MessageType::Rendezvous, ByteView(moved));
     }
     EXPECT_TRUE(speak_until([&] { return !relay->asked().empty(); }, 5s));
     speak_until([] { return false; }, 500ms);
-    EXPECT_EQ(relay->asked(), std::vector<PeerId>{far.local_id()});
-    near.stop();
-    far.stop();
+    EXPECT_EQ(relay->asked(), std::vector<PeerId>{dead.local_id()});
+    alive.stop();
+    dead.stop();
 }
 
 // A peer can tell a server it moved only by speaking to it, which one keeping
