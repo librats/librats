@@ -1,4 +1,5 @@
 #include "librats/subsystems/reconnection.h"
+#include "librats/node/host_events.h"
 #include "librats/node/node_context.h"
 #include "librats/util/logger.h"
 
@@ -14,6 +15,16 @@ namespace {
 uint64_t now_secs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+/// Where a peer may be dialed if its link is lost: what it said it listens at,
+/// and the endpoint its packets came from — its NAT's mapping, which a dial
+/// crossing its own toward us gets through, as a punch does.
+std::vector<Address> dialable(const PeerInfo& info) {
+    std::vector<Address> addresses = info.addresses;
+    if (info.endpoint && std::find(addresses.begin(), addresses.end(), *info.endpoint) == addresses.end())
+        addresses.push_back(*info.endpoint);
+    return addresses;
 }
 } // namespace
 
@@ -71,11 +82,25 @@ std::vector<Address> ReconnectionService::known_peers(size_t n) const {
     return book_->best(n, now_secs(), static_cast<uint64_t>(config_.archive_max_age.count()));
 }
 
+std::vector<PeerId> ReconnectionService::lost_peers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PeerId> peers;
+    peers.reserve(lost_.size());
+    for (const auto& [id, lost] : lost_) peers.push_back(id);
+    return peers;
+}
+
+void ReconnectionService::on_given_up(std::function<void(const PeerId&)> handler) {
+    given_up_ = std::move(handler);
+}
+
 void ReconnectionService::attach(NodeContext& ctx) {
     network_ = &ctx.network;
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
-    network_->on_peer_disconnected([this](const PeerId& id, CloseReason) { on_disconnected(id); });
+    network_->on_peer_disconnected([this](const PeerId& id, CloseReason reason) { on_disconnected(id, reason); });
     network_->on_dial_failed([this](const Address& addr) { on_dial_failed(addr); });
+    if (config_.lost_for.count() > 0)
+        ctx.events.on<NetworkChanged>([this](const NetworkChanged&) { on_network_changed(); });
 }
 
 void ReconnectionService::start() {
@@ -122,6 +147,10 @@ void ReconnectionService::on_connected(const Peer& peer) {
     bool book_changed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (config_.lost_for.count() > 0) {
+            known_[peer.id()] = dialable(*info);
+            forget_lost(peer.id());  // back: its dials are done
+        }
         for (const Address& addr : info->addresses) {
             auto it = targets_.find(addr);
             if (it == targets_.end()) {
@@ -140,8 +169,50 @@ void ReconnectionService::on_connected(const Peer& peer) {
 // A peer dropped. The loop reconciles which targets are live from the directory
 // snapshot, so there is no per-target state to clear here — just wake it so the
 // re-dial happens at once rather than waiting out a tick.
-void ReconnectionService::on_disconnected(const PeerId& /*id*/) {
+void ReconnectionService::on_disconnected(const PeerId& id, CloseReason reason) {
+    if (config_.lost_for.count() > 0) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto known = known_.find(id);
+        if (lost(reason)) {
+            lost_[id] = Lost{now + config_.lost_for};
+            if (known != known_.end()) {
+                for (const Address& addr : known->second) {
+                    if (targets_.size() >= config_.max_targets) break;
+                    auto [it, added] = targets_.try_emplace(addr);
+                    if (!added) continue;  // the app's own target already
+                    it->second.address      = addr;
+                    it->second.lost         = id;
+                    it->second.next_attempt = now;
+                }
+            }
+        }
+        if (known != known_.end()) known_.erase(known);
+    }
     wake_.notify_all();
+}
+
+void ReconnectionService::on_network_changed() {
+    // Whatever was dialed went out on the network that went: start over now.
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [addr, target] : targets_) {
+            if (!target.lost) continue;
+            target.dialing      = false;
+            target.attempts     = 0;
+            target.next_attempt = now;
+        }
+    }
+    wake_.notify_all();
+}
+
+void ReconnectionService::forget_lost(const PeerId& id) {
+    if (lost_.erase(id) == 0) return;
+    for (auto it = targets_.begin(); it != targets_.end();) {
+        if (it->second.lost == id) it = targets_.erase(it);
+        else ++it;
+    }
 }
 
 // An outbound dial we asked for closed before establishing. Clear the in-flight
@@ -175,13 +246,31 @@ void ReconnectionService::loop() {
         // connection). Without it such a peer is never seen as connected and we
         // re-dial it forever, each dial torn down by the node as a duplicate.
         live.clear();
-        for (const PeerInfo& p : network_->peers())
+        const std::vector<PeerInfo> peers = network_->peers();
+        for (const PeerInfo& p : peers)
             for (const Address& a : p.addresses)
                 live.insert(a);
 
         std::vector<Address> to_dial, gave_up;
+        std::vector<PeerId>  lost_gave_up;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (config_.lost_for.count() > 0) {
+                // Where each connected peer is now — identify, a migration may
+                // have told more since it connected. Only those still known: the
+                // snapshot was taken outside the lock, and one in it may have
+                // gone since. For the same reason a lost peer is back only by its
+                // connected event, never by the snapshot.
+                for (const PeerInfo& p : peers)
+                    if (auto known = known_.find(p.id); known != known_.end()) known->second = dialable(p);
+                for (auto it = lost_.begin(); it != lost_.end();) {
+                    if (now < it->second.until) { ++it; continue; }
+                    const PeerId id = it->first;
+                    ++it;
+                    lost_gave_up.push_back(id);
+                    forget_lost(id);
+                }
+            }
             for (auto it = targets_.begin(); it != targets_.end();) {
                 Target& target = it->second;
 
@@ -204,7 +293,9 @@ void ReconnectionService::loop() {
                 // the active set (it stays in the book as history, ranked down by its
                 // failure streak, until it ages out). A reconnect resets attempts, so
                 // only addresses that never came back are reaped.
-                if (config_.max_attempts > 0 && target.attempts >= static_cast<int>(config_.max_attempts)) {
+                // A lost peer's targets are kept for lost_for, however many dials fail.
+                if (!target.lost && config_.max_attempts > 0 &&
+                    target.attempts >= static_cast<int>(config_.max_attempts)) {
                     gave_up.push_back(target.address);
                     it = targets_.erase(it);
                     continue;
@@ -226,6 +317,10 @@ void ReconnectionService::loop() {
         for (const Address& addr : gave_up)
             LOG_DEBUG("reconnect", "Giving up on " << addr.to_string() << " after "
                       << config_.max_attempts << " attempts");
+        for (const PeerId& id : lost_gave_up) {
+            LOG_INFO("reconnect", "Peer " << id.short_hex() << " lost and not back: given up on");
+            if (given_up_) given_up_(id);
+        }
         for (const Address& addr : to_dial) {
             LOG_DEBUG("reconnect", "Dialing " << addr.to_string());
             network_->connect(addr);

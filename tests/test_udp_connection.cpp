@@ -721,6 +721,46 @@ TEST(UdpConnectionTest, AnAbortTellsThePeerAtOnce) {
     EXPECT_EQ(p.b.conn->close_reason(), CloseReason::PeerReset);
 }
 
+TEST(UdpConnectionTest, ThePathSaysWhenThePeerWasLastHeard) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(1s);  // keep-alives only
+    const auto heard = p.a.conn->path_stats().heard_at;
+    EXPECT_GT(heard, p.now - UdpConnection::kKeepAlive - 100ms) << "keep-alives are heard";
+    EXPECT_LE(heard, p.now);
+
+    EXPECT_EQ(p.a.conn->path_stats().unanswered_since, UdpConnection::Clock::time_point{})
+        << "nothing owed an answer";
+
+    p.net.blackout = true;
+    p.run(20s);
+    EXPECT_LE(p.a.conn->path_stats().heard_at, heard + 100ms) << "nothing heard since";
+    EXPECT_TRUE(p.a.conn->established()) << "quiet, not yet given up on";
+    EXPECT_EQ(p.a.conn->path_stats().unanswered_since, UdpConnection::Clock::time_point{})
+        << "a peer we ask nothing of may simply have nothing to say";
+
+    const auto asked = p.now;
+    p.send(MessageType::App, "anyone there?");
+    p.run(3s);
+    EXPECT_GE(p.a.conn->path_stats().unanswered_since, asked);
+    EXPECT_LE(p.a.conn->path_stats().unanswered_since, asked + 100ms) << "the first unanswered";
+
+    p.net.blackout = false;
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->path_stats().heard_at > asked; }, 5s));
+    EXPECT_EQ(p.a.conn->path_stats().unanswered_since, UdpConnection::Clock::time_point{})
+        << "answered";
+}
+
+TEST(UdpConnectionTest, ANodeStoppingSaysAnOrderlyGoodbyeAtOnce) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.send(MessageType::App, std::string(50000, 'l'));
+    p.a.conn->close(CloseReason::ReactorShutdown, p.now);
+    EXPECT_TRUE(p.a.conn->dead()) << "nothing queued is waited for";
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.b.conn->close_reason(), CloseReason::PeerClosed) << "a leaving, not a failure";
+}
+
 TEST(UdpConnectionTest, AStatelessResetEndsTheConnection) {
     Pair p(true);
     ASSERT_TRUE(p.connect());

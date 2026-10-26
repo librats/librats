@@ -419,3 +419,159 @@ TEST(ReconnectionServiceTest, KnownPeersExposesBookPool) {
     server.stop();
     delete_file(store_path.c_str());
 }
+
+// ── Lost peers ──────────────────────────────────────────────────────────────
+
+namespace {
+
+/// A path between two nodes on loopback that can go dead: what comes to its
+/// port goes on to `to` from a socket of its own, and what comes back there
+/// goes to whoever last sent to its port. While `dead`, nothing passes either
+/// way — the network gone, with neither end told.
+class UdpPath {
+public:
+    explicit UdpPath(uint16_t to)
+        : to_(*Address::parse("127.0.0.1:" + std::to_string(to))),
+          front_(create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4, UdpPortMode::Exclusive)),
+          back_(create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4, UdpPortMode::Exclusive)),
+          thread_([this] { run(); }) {}
+    ~UdpPath() {
+        running_ = false;
+        thread_.join();
+        close_socket(front_);
+        close_socket(back_);
+    }
+
+    Address address() const { return *Address::parse("127.0.0.1:" + std::to_string(get_bound_port(front_))); }
+
+    std::atomic<bool> dead{false};
+
+private:
+    void run() {
+        Address client;
+        while (running_) {
+            bool moved = false;
+            Address from;
+            std::vector<uint8_t> out = receive_udp_data(front_, 65536, from, 0);
+            if (!out.empty()) {
+                moved  = true;
+                client = from;
+                if (!dead) send_udp_data(back_, out, to_, AddressFamily::IPv4);
+            }
+            std::vector<uint8_t> in = receive_udp_data(back_, 65536, from, 0);
+            if (!in.empty()) {
+                moved = true;
+                if (!dead && client.port != 0) send_udp_data(front_, in, client, AddressFamily::IPv4);
+            }
+            if (!moved) std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    const Address     to_;
+    const socket_t    front_;
+    const socket_t    back_;
+    std::atomic<bool> running_{true};
+    std::thread       thread_;
+};
+
+/// Nodes that find a quiet peer lost within a fraction of a second.
+NodeConfig quick_to_lose() {
+    NodeConfig c = listening_config();
+    c.enable_tcp       = false;  // the path carries datagrams only
+    c.udp_idle_timeout = 600ms;
+    return c;
+}
+
+ReconnectionService::Config redialing_the_lost(std::chrono::milliseconds lost_for) {
+    ReconnectionService::Config c = fast_reconnect();
+    c.persist_discovered = false;  // only the lost are dialed
+    c.lost_for           = lost_for;
+    return c;
+}
+
+} // namespace
+
+// A link that goes quiet past the idle deadline was ended by neither side: its
+// peer is dialed again at the address it said it listens at, and is back.
+TEST(ReconnectionServiceTest, DialsALostPeerAgainUntilItIsBack) {
+    Node us(quick_to_lose());
+    Node them(quick_to_lose());
+    auto reconnect = std::make_unique<ReconnectionService>(redialing_the_lost(10s));
+    ReconnectionService* svc = reconnect.get();
+    us.add_subsystem(std::move(reconnect));
+    std::atomic<int> lost{0};
+    us.on_peer_disconnected([&](const PeerId&, CloseReason reason) {
+        if (ReconnectionService::lost(reason)) ++lost;
+    });
+    ASSERT_TRUE(us.start());
+    ASSERT_TRUE(them.start());
+
+    UdpPath path(them.listen_port());
+    us.connect(path.address());
+    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 1; })) << "no connection through the path";
+    std::this_thread::sleep_for(200ms);  // identify: where they listen
+
+    path.dead = true;
+    ASSERT_TRUE(wait_for([&] { return lost > 0; }, 5s)) << "the quiet link was not found lost";
+    EXPECT_TRUE(wait_for([&] { return us.peer_count() == 1 && svc->lost_peers().empty(); }))
+        << "the lost peer was not dialed again";
+    EXPECT_EQ(svc->target_count(), 0u) << "its dials are done with";
+
+    us.stop();
+    them.stop();
+}
+
+// A lost peer that does not come back is given up on after lost_for, and told.
+TEST(ReconnectionServiceTest, GivesUpOnALostPeerNotBackInTime) {
+    Node us(quick_to_lose());
+    auto them = std::make_unique<Node>(quick_to_lose());
+    auto reconnect = std::make_unique<ReconnectionService>(redialing_the_lost(1500ms));
+    ReconnectionService* svc = reconnect.get();
+    std::atomic<int> given_up{0};
+    svc->on_given_up([&](const PeerId& id) {
+        if (id == them->local_id()) ++given_up;
+    });
+    us.add_subsystem(std::move(reconnect));
+    ASSERT_TRUE(us.start());
+    ASSERT_TRUE(them->start());
+
+    UdpPath path(them->listen_port());
+    us.connect(path.address());
+    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 1; }));
+    std::this_thread::sleep_for(200ms);
+
+    // Gone while the network is down: its goodbye never arrives.
+    path.dead = true;
+    them->stop();
+    ASSERT_TRUE(wait_for([&] { return svc->lost_peers().size() == 1; }, 5s));
+    EXPECT_GT(svc->target_count(), 0u) << "dialed at where it was";
+    EXPECT_TRUE(wait_for([&] { return given_up == 1; }, 5s));
+    EXPECT_TRUE(svc->lost_peers().empty());
+    EXPECT_EQ(svc->target_count(), 0u);
+
+    us.stop();
+}
+
+// A peer that leaves says so: it is not lost, and not dialed again.
+TEST(ReconnectionServiceTest, APeerThatLeavesIsNotDialedAgain) {
+    Node us(quick_to_lose());
+    auto them = std::make_unique<Node>(quick_to_lose());
+    auto reconnect = std::make_unique<ReconnectionService>(redialing_the_lost(10s));
+    ReconnectionService* svc = reconnect.get();
+    us.add_subsystem(std::move(reconnect));
+    std::atomic<int> closed{-1};
+    us.on_peer_disconnected([&](const PeerId&, CloseReason reason) { closed = static_cast<int>(reason); });
+    ASSERT_TRUE(us.start());
+    ASSERT_TRUE(them->start());
+
+    us.connect(*Address::parse("127.0.0.1:" + std::to_string(them->listen_port())));
+    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 1; }));
+    them->stop();
+    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 0; }, 5s));
+    EXPECT_EQ(closed, static_cast<int>(CloseReason::PeerClosed)) << "a stopping node says goodbye";
+    std::this_thread::sleep_for(300ms);
+    EXPECT_TRUE(svc->lost_peers().empty());
+    EXPECT_EQ(svc->target_count(), 0u);
+
+    us.stop();
+}

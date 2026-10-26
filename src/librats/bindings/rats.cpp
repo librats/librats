@@ -211,6 +211,7 @@ std::optional<NodeConfig> to_node_config(const rats_config_t& c) {
     }
     config.udp_receive_window = c.udp_receive_window;
     config.udp_receive_budget = c.udp_receive_budget;
+    config.udp_idle_timeout   = std::chrono::milliseconds(c.udp_idle_timeout_ms);
     config.udp_offload        = c.disable_udp_offload == 0;
 
     config.reactor_threads        = c.reactor_threads == 0 ? 1 : c.reactor_threads;
@@ -762,6 +763,15 @@ rats_error_t rats_enable_reconnect(rats_t node) {
     return enable(node, node->reconnect, [&] {
         ReconnectionService::Config config;
         if (!node->data_dir.empty()) config.store_path = node->data_dir + "/peers.json";
+        return std::make_unique<ReconnectionService>(config);
+    });
+}
+
+rats_error_t rats_enable_reconnect_lost(rats_t node, uint32_t lost_for_ms) {
+    return enable(node, node->reconnect, [&] {
+        ReconnectionService::Config config;
+        if (!node->data_dir.empty()) config.store_path = node->data_dir + "/peers.json";
+        config.lost_for = std::chrono::milliseconds(lost_for_ms);
         return std::make_unique<ReconnectionService>(config);
     });
 }

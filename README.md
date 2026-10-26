@@ -48,7 +48,7 @@ Projects and companies building on librats:
 - **mDNS Discovery**: automatic local-network peer discovery with service advertisement
 - **IPv4/IPv6 Dual Stack**: binds dual-stack by default, so a single node accepts both IPv4 and IPv6 peers
 - **Peer Exchange (PEX)**: peers gossip known addresses to grow the mesh
-- **Automatic Reconnection**: re-dials dropped peers with exponential backoff; targets persist to disk when a `data_dir` is set
+- **Automatic Reconnection**: re-dials dropped peers with exponential backoff; targets persist to disk when a `data_dir` is set; a peer whose link was lost (not closed) is dialed again where it was last known, for as long as asked
 - **Network-change awareness**: an optional monitor detects interface/route changes and notifies subsystems so they can re-announce and renew port mappings
 
 ### **Pub/Sub (GossipSub)**
@@ -389,7 +389,9 @@ node.add_subsystem(std::make_unique<MdnsDiscovery>());
 ReconnectionService::Config rc;
 rc.store_path = config.data_dir + "/peers.txt";
 rc.max_attempts = 10;
+rc.lost_for = std::chrono::minutes(2);   // a peer lost (not left) is dialed again this long
 auto* reconnect = node.add_subsystem(std::make_unique<ReconnectionService>(rc));
+reconnect->on_given_up([](const PeerId& id) { /* lost and not back */ });
 
 node.start();
 reconnect->add(Address{"203.0.113.7", 8080});   // keep this target connected
@@ -638,6 +640,7 @@ struct NodeConfig {
     size_t      send_queue_limit = 0;       // per-peer send queue before SlowConsumer; 0 = 8 MiB
     size_t      udp_receive_window = 0;     // ceiling one UDP connection's flow-control window grows to; 0 = 16 MiB
     size_t      udp_receive_budget = 0;     // out-of-order bytes all UDP connections may hold; 0 = 64 MiB
+    std::chrono::milliseconds udp_idle_timeout{0};  // a silent peer's connection closed as lost; 0 = 45 s
     uint32_t    path_sample_ms = 0;         // path sampling period; 0 = only with on_peer_path (100 ms)
 
     // Identity & security

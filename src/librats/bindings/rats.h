@@ -196,6 +196,10 @@ typedef struct {
     int    disable_udp_offload;  /* non-zero: no kernel segmentation offload
                                   * (UDP_SEGMENT/GRO, USO/URO), for comparison or a
                                   * host where it misbehaves */
+    uint32_t udp_idle_timeout_ms;  /* silence from a peer after which its connection
+                                    * is closed as lost (RATS_CLOSE_IDLE_TIMEOUT);
+                                    * keep-alives go out four times within it.
+                                    * 0 → 45 s */
 
     /* — runtime — */
     size_t reactor_threads;          /* I/O threads; 0 → 1, enough for thousands of peers */
@@ -515,6 +519,12 @@ RATS_API rats_error_t rats_enable_reconnect(rats_t node);
 RATS_API rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port);
 /** Stop keeping an address connected and forget it. */
 RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port);
+/** rats_enable_reconnect(), and a peer lost — its connection closed by neither
+ *  side: gone quiet past the idle timeout, or stopped answering — dialed again
+ *  where it was last known for `lost_for_ms`, until it is back over any route.
+ *  A peer that left is not. Enable before start, instead of
+ *  rats_enable_reconnect(). */
+RATS_API rats_error_t rats_enable_reconnect_lost(rats_t node, uint32_t lost_for_ms);
 
 /* ─── BitTorrent ──────────────────────────────────────────────────────────────
  * Available only in builds with RATS_SEARCH_FEATURES; elsewhere every call

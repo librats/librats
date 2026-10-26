@@ -182,7 +182,7 @@ TEST(NodeCApiTest, ConfigDataDirPersistsIdentity) {
 }
 
 // The UDP knobs are ordinary config fields: two nodes squeezed to Reno, a small
-// window and budget, no offload and two reactor threads still talk — slower,
+// window and budget, no offload, a short idle timeout and two reactor threads still talk — slower,
 // never wrong.
 TEST(NodeCApiTest, UdpTuningIsConfigurable) {
     rats_config_t cfg{};
@@ -192,6 +192,7 @@ TEST(NodeCApiTest, UdpTuningIsConfigurable) {
     cfg.udp_receive_window      = 64 * 1024;
     cfg.udp_receive_budget      = 256 * 1024;
     cfg.disable_udp_offload     = 1;
+    cfg.udp_idle_timeout_ms     = 2000;
     cfg.reactor_threads         = 2;
     cfg.disable_network_monitor = 1;
     rats_t server = rats_create(&cfg);
@@ -598,6 +599,23 @@ TEST(NodeCApiTest, ReconnectDialsTarget) {
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }, 15s))
         << "reconnect did not dial the added target";
     EXPECT_EQ(rats_remove_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+
+    rats_destroy(client); rats_destroy(server);
+}
+
+// The lost-peer form enables the same subsystem, once, before start.
+TEST(NodeCApiTest, ReconnectLostIsReconnectThatDialsTheLostToo) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+
+    ASSERT_EQ(rats_enable_reconnect_lost(client, 60000), RATS_OK);
+    EXPECT_EQ(rats_enable_reconnect(client), RATS_OK) << "enabled already";
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    EXPECT_EQ(rats_enable_reconnect_lost(server, 60000), RATS_ERR_ALREADY_STARTED);
+
+    ASSERT_EQ(rats_add_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+    EXPECT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }, 15s));
 
     rats_destroy(client); rats_destroy(server);
 }

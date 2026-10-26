@@ -192,6 +192,10 @@ struct UdpMuxLimits {
     /// Whether to use the kernel's segmentation offload where it has one.
     bool offload = true;
 
+    /// Silence from a peer that ends its connection (see
+    /// UdpConnectionConfig::idle_timeout).
+    std::chrono::milliseconds idle_timeout = UdpConnectionConfig::kDefaultIdleTimeout;
+
     /// The secret stateless-reset tokens are made from. Set from something that
     /// survives a restart (the node derives it from its identity) so a restarted
     /// node can still tell its old peers it has forgotten them; all zeros means a

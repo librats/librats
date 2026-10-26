@@ -146,6 +146,8 @@ struct UdpConnectionConfig {
     static constexpr size_t kDefaultMaxWindow = 16 * 1024 * 1024;
     /// See max_unfinished.
     static constexpr size_t kDefaultMaxUnfinished = 32 * 1024 * 1024;
+    /// See idle_timeout.
+    static constexpr std::chrono::milliseconds kDefaultIdleTimeout{45000};
 
     CongestionAlgorithm congestion = CongestionAlgorithm::Bbr;
     /// How hard a dial retries its Initial (see DialProfile). Ignored inbound.
@@ -167,6 +169,9 @@ struct UdpConnectionConfig {
     /// Send live messages with repair symbols on a path that loses packets
     /// (udp_fec.h). Off only to measure what they are worth.
     bool live_fec = true;
+    /// Silence from the peer that ends the connection (IdleTimeout). Keep-alives
+    /// go out at least four times within it.
+    std::chrono::milliseconds idle_timeout = kDefaultIdleTimeout;
 };
 
 class UdpConnection final : private udp::FrameSink {
@@ -194,8 +199,9 @@ public:
     /// Idle gap after which a packet goes out to prove we are still here — and to
     /// keep a NAT's mapping for the socket open.
     static constexpr std::chrono::seconds kKeepAlive{10};
-    /// Silence from the peer that ends the connection: four keep-alives and more.
-    static constexpr std::chrono::seconds kIdleTimeout{45};
+    /// Silence from the peer that ends the connection, unless configured
+    /// (UdpConnectionConfig::idle_timeout): four keep-alives and more.
+    static constexpr std::chrono::milliseconds kIdleTimeout = UdpConnectionConfig::kDefaultIdleTimeout;
     /// A peer that was streaming data and has gone quiet — for kQuietGaps of its
     /// usual gaps, and at least kQuietProbe — is sent a keep-alive, and again as
     /// often for kQuietSteady, then at doubling intervals up to kKeepAlive. If it
@@ -327,8 +333,10 @@ public:
     bool deliver(Clock::time_point now, Fn&& fn);
 
     /// The application is done with this connection. An orderly close (LocalClose,
-    /// PeerClosed) delivers everything queued first and then says goodbye; any
-    /// other reason says goodbye at once.
+    /// PeerClosed) delivers everything queued first and then says goodbye; the
+    /// node stopping (ReactorShutdown) says an orderly goodbye at once, leaving
+    /// what is queued — the peer hears that we left (PeerClosed), not that we
+    /// broke; any other reason aborts.
     void close(CloseReason reason, Clock::time_point now);
     /// Say goodbye now and stop.
     void abort(Clock::time_point now) { fail(now, CloseReason::LocalClose, kCloseAbort); events_ = 0; }
@@ -538,6 +546,11 @@ private:
     udp::Cid           remote_cid_;
     ConnId             conn_id_ = kInvalidConnId;
     UdpConnectionConfig config_;
+    /// How often a packet goes out with nothing else to send: kKeepAlive, or
+    /// four times within a shorter idle timeout.
+    Clock::duration keep_alive() const noexcept {
+        return (std::min)(Clock::duration(kKeepAlive), Clock::duration(config_.idle_timeout / 4));
+    }
 
     Phase       phase_        = Phase::Handshaking;
     CloseReason close_reason_ = CloseReason::PeerClosed;
@@ -617,6 +630,7 @@ private:
     bool              token_acked_    = false;
     Clock::time_point last_send_{};
     Clock::time_point last_eliciting_send_{};
+    Clock::time_point first_unanswered_{};  ///< the first ack-eliciting packet since last_recv_
     bool              sent_data_ = false;   ///< the last packet built carried data
 
     // — receiving —

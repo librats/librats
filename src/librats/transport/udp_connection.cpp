@@ -807,7 +807,7 @@ void UdpConnection::note_data_gap(Clock::duration gap, Clock::time_point now) {
     // we speak up (kQuietProbe).
     data_gap_   = (data_gap_ * 7 + gap) / 8;
     quiet_wait_ = (std::max)(Clock::duration(kQuietProbe), data_gap_ * kQuietGaps);
-    quiet_due_  = quiet_wait_ < kKeepAlive ? now + quiet_wait_ : kNever;
+    quiet_due_  = quiet_wait_ < keep_alive() ? now + quiet_wait_ : kNever;
 }
 
 void UdpConnection::nudge(Clock::time_point now) {
@@ -1099,7 +1099,10 @@ size_t UdpConnection::finish_packet(uint8_t* buf, size_t header, size_t pn_len, 
     recovery_.on_packet_sent(now, total, eliciting, data, repair, probe);
     note_sent(total);
     last_send_ = now;
-    if (eliciting) last_eliciting_send_ = now;
+    if (eliciting) {
+        last_eliciting_send_ = now;
+        if (first_unanswered_ <= last_recv_) first_unanswered_ = now;
+    }
     return total;
 }
 
@@ -1625,6 +1628,13 @@ void UdpConnection::close(CloseReason reason, Clock::time_point now) {
         flush_events();
         return;
     }
+    if (established() && reason == CloseReason::ReactorShutdown) {
+        // Nothing is waited for, but it is a leaving all the same: a peer that
+        // took it for a failure would keep a place for us and dial us again.
+        fail(now, reason, kCloseOrderly);
+        events_ = 0;
+        return;
+    }
     abort(now);
 }
 
@@ -1672,6 +1682,8 @@ PathStats UdpConnection::path_stats() const noexcept {
     s.live_sent       = live_send_.sent();
     s.live_expired    = live_send_.expired();
     s.live_repair_bytes = live_send_.parity_sent();
+    s.heard_at        = last_recv_;
+    if (first_unanswered_ > last_recv_) s.unanswered_since = first_unanswered_;
     return s;
 }
 
@@ -1687,7 +1699,7 @@ void UdpConnection::release_memory() {
 std::optional<Clock::time_point> UdpConnection::next_deadline() const noexcept {
     if (dead()) return std::nullopt;
     // Silence from the peer ends the connection whatever else is outstanding.
-    Clock::time_point due = last_recv_ + kIdleTimeout;
+    Clock::time_point due = last_recv_ + config_.idle_timeout;
     if (hs_deadline_ != kNever) due = (std::min)(due, hs_deadline_);
     if (!established()) return due;
 
@@ -1706,15 +1718,15 @@ std::optional<Clock::time_point> UdpConnection::next_deadline() const noexcept {
     if (const auto e = live_send_.next_expiry(one_way())) due = (std::min)(due, *e);
     if (const auto e = live_recv_.next_expiry())          due = (std::min)(due, *e);
     // Keep-alive: proof we are here, and a NAT mapping kept open.
-    due = (std::min)(due, last_send_ + kKeepAlive);
+    due = (std::min)(due, last_send_ + keep_alive());
     return due;
 }
 
 void UdpConnection::tick(Clock::time_point now) {
     if (dead()) return;
-    if (now - last_recv_ >= kIdleTimeout) {
+    if (now - last_recv_ >= config_.idle_timeout) {
         LOG_DEBUG("udp", "Connection " << local_cid_ << " to " << remote_.to_string() << " idle for "
-                  << kIdleTimeout.count() << "s; closing");
+                  << config_.idle_timeout.count() << " ms; closing");
         die(CloseReason::IdleTimeout);
         flush_events();
         return;
@@ -1753,13 +1765,13 @@ void UdpConnection::tick(Clock::time_point now) {
         // already showed it where we are.
         if (now - last_send_ >= quiet_wait_) send_packet(now, false, false, false, /*keepalive=*/true);
         if (now - last_data_recv_ >= kQuietSteady) quiet_wait_ *= 2;
-        quiet_due_ = quiet_wait_ < kKeepAlive ? now + quiet_wait_ : kNever;
+        quiet_due_ = quiet_wait_ < keep_alive() ? now + quiet_wait_ : kNever;
     }
     // Say something now and then: it keeps the peer's idle timer from firing and
     // a NAT's mapping for the socket open. Not ack-eliciting, so a lost one costs
     // nothing — no timer, no window — and an idle connection stays idle to the
     // congestion controller.
-    if (now - last_send_ >= kKeepAlive && send_packet(now, false, false, false, /*keepalive=*/true) == 0) {
+    if (now - last_send_ >= keep_alive() && send_packet(now, false, false, false, /*keepalive=*/true) == 0) {
         // Nothing could go — a responder whose dialer never proved its address has
         // spent what it may send. The keep-alive is due again a period from now,
         // not at once: a deadline left in the past would spin the reactor.

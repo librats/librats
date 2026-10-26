@@ -76,6 +76,7 @@ UdpMuxLimits udp_limits_for(const NodeConfig& config, const Identity& identity) 
     UdpMuxLimits limits;
     if (config.udp_receive_window != 0) limits.receive_window = config.udp_receive_window;
     if (config.udp_receive_budget != 0) limits.receive_budget = config.udp_receive_budget;
+    if (config.udp_idle_timeout.count() != 0) limits.idle_timeout = config.udp_idle_timeout;
     limits.offload = config.udp_offload;
     // Stateless resets are keyed by something that survives a restart, so a node
     // that comes back on the same port can still tell its old peers it has

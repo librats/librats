@@ -193,6 +193,17 @@ struct PathStats {
     /// path carries that is not the source's: a source sizing itself to
     /// `bandwidth_bps` leaves room for it.
     uint64_t live_repair_bytes = 0;
+    /// When the peer was last heard — any packet of its, a keep-alive too — on
+    /// the steady clock: a path gone quiet for seconds is one that may be lost,
+    /// long before the connection gives up on it. The epoch where the transport
+    /// does not say (TCP).
+    std::chrono::steady_clock::time_point heard_at{};
+    /// Since when something sent to the peer that it answers has gone without
+    /// an answer — the first such packet since it was last heard; the epoch
+    /// while nothing is owed one, or where the transport does not say (TCP). Of
+    /// a peer that only listens, the one sign it is gone: it is never heard
+    /// unless asked.
+    std::chrono::steady_clock::time_point unanswered_since{};
 };
 
 /// Connection lifecycle. A connection moves strictly forward through these.

@@ -19,6 +19,15 @@
  * is set — after that many consecutive failed dials without ever connecting (it
  * "gives up", freeing memory and pruning the store). A successful connection
  * resets the attempt counter, so only persistently-dead addresses are reaped.
+ *
+ * Lost peers (Config::lost_for): a connection closed by neither side — the peer
+ * went quiet past the transport's idle deadline, or stopped answering — was not
+ * ended, so its peer is dialed again, at the addresses it was last known at and
+ * the endpoint its packets came from, for lost_for, until it is connected again
+ * over any route (it may be the one to dial: both sides of a lost link try) or
+ * given up on (on_given_up()). Where the host's network changes those dials
+ * start over at once: what was tried before went out on the network that went.
+ * A peer that left — it closed, or this node did — is not dialed again.
  */
 
 #include "librats/util/rats_export.h"
@@ -31,7 +40,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -53,7 +64,15 @@ public:
         std::chrono::milliseconds max_backoff{60000};
         std::chrono::milliseconds tick{1000};
         std::chrono::milliseconds dial_timeout{15000};  ///< assume an in-flight dial is dead after this if no connect/fail event arrives (backstop only)
+        std::chrono::milliseconds lost_for{0};          ///< dial a lost peer again for this long (see above); 0 = never
     };
+
+    /// Whether a connection that closed for `reason` was lost rather than ended:
+    /// neither side closed it — the peer went quiet past the idle deadline or
+    /// stopped answering.
+    static bool lost(CloseReason reason) noexcept {
+        return reason == CloseReason::IdleTimeout || reason == CloseReason::PeerReset;
+    }
 
     ReconnectionService();
     explicit ReconnectionService(Config config);
@@ -76,6 +95,14 @@ public:
     /// use as a bootstrap source when peer count is low.
     std::vector<Address> known_peers(size_t n) const;
 
+    /// The peers lost and being dialed again (Config::lost_for), until each is
+    /// back or given up on.
+    std::vector<PeerId> lost_peers() const;
+
+    /// Called for a lost peer not back within Config::lost_for, on the service's
+    /// thread. Set before start().
+    void on_given_up(std::function<void(const PeerId&)> handler);
+
     void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
@@ -87,6 +114,7 @@ private:
         int                                   attempts = 0;     ///< failed dials since the target was last seen connected
         std::chrono::steady_clock::time_point next_attempt;     ///< earliest time to (re)dial
         std::chrono::steady_clock::time_point dial_deadline;    ///< backstop: give up waiting on the in-flight dial after this
+        std::optional<PeerId>                 lost;             ///< a lost peer's, dropped with it, not the app's
 
         /// Record that this target is connected as of `now`: no dial is in flight
         /// any more and the failure streak resets, so a later drop re-dials at once
@@ -100,8 +128,16 @@ private:
         }
     };
 
+    /// A peer lost, and until when it is dialed again.
+    struct Lost {
+        std::chrono::steady_clock::time_point until;
+    };
+
     void on_connected(const Peer& peer);
-    void on_disconnected(const PeerId& id);
+    void on_disconnected(const PeerId& id, CloseReason reason);
+    void on_network_changed();
+    /// Under mutex_: `id` is back or given up on.
+    void forget_lost(const PeerId& id);
     void on_dial_failed(const Address& address);
     void loop();
     std::chrono::milliseconds backoff_for(int attempts) const;
@@ -121,6 +157,11 @@ private:
 
     mutable std::mutex                       mutex_;
     std::unordered_map<Address, Target>      targets_;  ///< keyed by the peer Address
+    /// Where each connected peer can be dialed, as last seen: what a lost one is
+    /// dialed at. Only with lost_for.
+    std::unordered_map<PeerId, std::vector<Address>, PeerId::Hash> known_;
+    std::unordered_map<PeerId, Lost, PeerId::Hash>                 lost_;
+    std::function<void(const PeerId&)>                             given_up_;
 };
 
 } // namespace librats

@@ -66,6 +66,7 @@ UdpConnectionConfig UdpMux::connection_config(DialProfile profile) noexcept {
     c.congestion = congestion_;
     c.dial       = profile;
     c.max_window = limits_.receive_window;
+    c.idle_timeout = limits_.idle_timeout;
     c.budget     = &receive_budget_;
     return c;
 }

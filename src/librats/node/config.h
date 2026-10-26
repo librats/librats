@@ -8,6 +8,7 @@
 #include "librats/util/rats_export.h"
 #include "librats/core/types.h"   // TransportKind, CongestionAlgorithm
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -76,6 +77,12 @@ struct RATS_API NodeConfig {
     /// it, out-of-order packets are refused (their senders repair them and slow
     /// down), except for a small share every connection keeps regardless.
     size_t udp_receive_budget = 0;
+
+    /// Silence from a peer after which its UDP connection is closed as lost
+    /// (CloseReason::IdleTimeout); keep-alives go out at least four times within
+    /// it. 0 uses the library default (45 s). Shorter finds a lost peer sooner
+    /// — ReconnectionService then dials it again — and costs keep-alives.
+    std::chrono::milliseconds udp_idle_timeout{0};
 
     /// Whether UDP uses the kernel's segmentation offload where the running
     /// system has it (Linux UDP_SEGMENT/UDP_GRO, Windows USO/URO): a run of
