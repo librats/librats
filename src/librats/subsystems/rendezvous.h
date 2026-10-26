@@ -55,7 +55,17 @@
  * own as a rule — say Hello to each other too, and a server tells each peer
  * the others it is connected to (Servers): as it says Hello, and again as it
  * answers a registration when one has come since. A node keeps them as it
- * likes (on_servers()): Rendezvous dials only Config::servers.
+ * likes (on_servers()).
+ *
+ * Of many servers a node knows — `Config::candidates`, as many as it was told
+ * of — it meets at a few, `Config::choose`, and every node under the same key
+ * must pick the same ones although their lists differ in part: the ones that
+ * rank first by a hash of the key and each server's IP (rendezvous hashing,
+ * choose()). Two nodes whose lists differ in fewer than `choose` servers each
+ * share the first of the servers both know, so they meet. A server is one by
+ * its IP — of two at one address, the first listed — so many ports of one
+ * host weigh no more than one. The chosen are resolved and picked on the
+ * worker as it starts, then dialed and kept as Config::servers are.
  *
  * ── Wire format (MessageType::Rendezvous), big-endian ───────────────────────
  *   [u8 ver=1][u8 op]
@@ -114,6 +124,11 @@ public:
 
         /// Servers to dial and keep ("host:port", a name or an address).
         std::vector<HostEndpoint> servers;
+        /// Servers to choose from: `choose` of them per key (choose()) are
+        /// dialed and kept as `servers` are. One whose name does not resolve
+        /// is passed over.
+        std::vector<HostEndpoint> candidates;
+        size_t                    choose = 2;
         /// The keys this node is met under, registered with every server.
         std::vector<std::string> keys;
         /// How often each key is registered again: the others not reached are
@@ -151,6 +166,12 @@ public:
     using Key = std::array<uint8_t, 32>;
     static Key key_of(const std::string& key);
 
+    /// The `count` of `candidates` that `key` meets at: those ranking first by
+    /// a hash of the key and each one's IP, best first; of two at one IP, the
+    /// first listed. The same wherever the same servers are known.
+    static std::vector<Address> choose(const Key& key, const std::vector<Address>& candidates,
+                                       size_t count);
+
     Rendezvous();
     explicit Rendezvous(Config config);
     ~Rendezvous() override;
@@ -162,6 +183,9 @@ public:
     /// The servers connected now: peers that said Hello, or connected at an
     /// address of Config::servers.
     std::vector<PeerId> servers() const;
+    /// The servers chosen of Config::candidates, once the worker has picked
+    /// them: every key's, best first.
+    std::vector<Address> chosen() const;
     /// Whether `peer` is one of them. Known as it connects, in any connected
     /// handler, for a server of Config::servers.
     bool is_server(const PeerId& peer) const;
@@ -232,6 +256,8 @@ private:
 
     // — worker —
     void loop();
+    /// Resolve Config::candidates and add the chosen to the servers dialed.
+    void choose_servers();
     void dial_servers(std::chrono::steady_clock::time_point now);
     void hand_on_unreached(std::chrono::steady_clock::time_point now);
     void refresh(std::chrono::steady_clock::time_point now);
@@ -249,6 +275,7 @@ private:
     std::thread             worker_;
     // Client.
     std::vector<ServerDial>                              server_dials_;
+    std::vector<Address>                                 chosen_;
     std::unordered_set<PeerId, PeerId::Hash>             servers_;     ///< said Hello
     std::unordered_set<PeerId, PeerId::Hash>             at_servers_;  ///< at a server address
     std::vector<std::function<void(const PeerId&)>>      found_handlers_;

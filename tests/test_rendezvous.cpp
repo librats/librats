@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -736,4 +737,82 @@ TEST(Rendezvous, AServerTellsAPeerOfTheServersOnceAndNeverOfItself) {
     a.stop();
     second.stop();
     first.stop();
+}
+
+// Every node under a key picks the same servers of those it knows, whatever
+// their order; the keys spread over the servers; a host is one server however
+// many ports it has.
+TEST(Rendezvous, ChoosesTheSameServersOfThoseKnownWhateverTheirOrder) {
+    const std::vector<Address> servers{Address("192.0.2.1", 7700), Address("192.0.2.2", 7700),
+                                       Address("192.0.2.3", 7700), Address("2001:db8::4", 7700)};
+    std::vector<Address> reversed(servers.rbegin(), servers.rend());
+    std::map<std::string, int> first;
+    for (int i = 0; i < 200; ++i) {
+        const Rendezvous::Key key = Rendezvous::key_of("room " + std::to_string(i));
+        const std::vector<Address> chosen = Rendezvous::choose(key, servers, 2);
+        ASSERT_EQ(chosen.size(), 2u);
+        EXPECT_EQ(Rendezvous::choose(key, reversed, 2), chosen);
+        EXPECT_EQ(Rendezvous::choose(key, servers, 1), std::vector<Address>{chosen.front()});
+        EXPECT_EQ(Rendezvous::choose(key, servers, 9).size(), servers.size());
+        ++first[chosen.front().to_string()];
+    }
+    ASSERT_EQ(first.size(), servers.size()) << "a server never chosen first";
+    for (const auto& [server, times] : first)
+        EXPECT_TRUE(times > 20 && times < 80) << server << " first " << times << " of 200";
+
+    const Rendezvous::Key key = Rendezvous::key_of("room");
+    const std::vector<Address> one_host{Address("192.0.2.9", 7700), Address("192.0.2.9", 7701)};
+    EXPECT_EQ(Rendezvous::choose(key, one_host, 2), std::vector<Address>{one_host.front()});
+    EXPECT_TRUE(Rendezvous::choose(key, {}, 2).empty());
+}
+
+// Two whose lists differ in fewer servers each than they choose share the
+// first of those both know: every key, they meet.
+TEST(Rendezvous, TwoWhoseListsDifferInPartChooseOneServerAlike) {
+    const Address only_a("192.0.2.1", 7700), only_b("192.0.2.4", 7700);
+    const std::vector<Address> both{Address("192.0.2.2", 7700), Address("192.0.2.3", 7700)};
+    std::vector<Address> a{only_a}, b{only_b};
+    a.insert(a.end(), both.begin(), both.end());
+    b.insert(b.end(), both.begin(), both.end());
+    for (int i = 0; i < 200; ++i) {
+        const Rendezvous::Key key = Rendezvous::key_of("room " + std::to_string(i));
+        const std::vector<Address> at_a = Rendezvous::choose(key, a, 2);
+        const std::vector<Address> at_b = Rendezvous::choose(key, b, 2);
+        const Address best_both = Rendezvous::choose(key, both, 1).front();
+        EXPECT_NE(std::find(at_a.begin(), at_a.end(), best_both), at_a.end());
+        EXPECT_NE(std::find(at_b.begin(), at_b.end(), best_both), at_b.end());
+    }
+}
+
+// Nodes given servers to choose from meet at the ones they chose. On loopback
+// every server has one IP, so is one host: the first each was given is the
+// one chosen, and nodes given the same first meet there, and there alone.
+TEST(Rendezvous, NodesMeetAtTheServersTheyChoseOfThoseTheyKnow) {
+    std::vector<std::unique_ptr<Node>> servers;
+    std::vector<Rendezvous*> serving_at;
+    std::vector<HostEndpoint> at;
+    for (int i = 0; i < 3; ++i) {
+        servers.push_back(std::make_unique<Node>(node_config()));
+        serving_at.push_back(servers.back()->add_subsystem(std::make_unique<Rendezvous>(serving())));
+        ASSERT_TRUE(servers.back()->start());
+        at.emplace_back("127.0.0.1", servers.back()->listen_port());
+    }
+    const auto knowing = [&](std::vector<HostEndpoint> candidates) {
+        Rendezvous::Config config = meeting("room", 0);
+        config.candidates = std::move(candidates);
+        config.choose = 2;
+        return config;
+    };
+    Node a(node_config()), b(node_config());
+    auto* at_a = a.add_subsystem(std::make_unique<Rendezvous>(knowing({at[1], at[0], at[2]})));
+    b.add_subsystem(std::make_unique<Rendezvous>(knowing({at[1], at[2]})));
+    ASSERT_TRUE(a.start() && b.start());
+    EXPECT_TRUE(wait_for([&] { return connected(a, b); }));
+    EXPECT_EQ(at_a->chosen(), std::vector<Address>{Address("127.0.0.1", at[1].port)});
+    EXPECT_EQ(at_a->servers(), std::vector<PeerId>{servers[1]->local_id()});
+    EXPECT_EQ(serving_at[1]->registrations(), 2u);
+    EXPECT_EQ(servers[0]->peer_count() + servers[2]->peer_count(), 0u) << "dialed one not chosen";
+    b.stop();
+    a.stop();
+    for (auto& server : servers) server->stop();
 }

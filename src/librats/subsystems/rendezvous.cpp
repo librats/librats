@@ -116,6 +116,34 @@ Rendezvous::Key Rendezvous::key_of(const std::string& key) {
     return out;
 }
 
+std::vector<Address> Rendezvous::choose(const Key& key, const std::vector<Address>& candidates,
+                                        size_t count) {
+    struct Ranked {
+        uint64_t rank;
+        Address  at;
+    };
+    std::vector<Ranked> ranked;
+    for (const Address& at : candidates) {
+        if (std::any_of(ranked.begin(), ranked.end(),
+                        [&](const Ranked& r) { return r.at.ip == at.ip; }))
+            continue;
+        // SHA-256(key ‖ ip): its first eight bytes, big-endian.
+        Bytes input(key.begin(), key.end());
+        const ByteView ip = at.ip.bytes();
+        input.insert(input.end(), ip.begin(), ip.end());
+        uint8_t hash[32];
+        rats_sha256_hash(hash, input.data(), input.size());
+        uint64_t rank = 0;
+        for (int i = 0; i < 8; ++i) rank = (rank << 8) | hash[i];
+        ranked.push_back({rank, at});
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const Ranked& a, const Ranked& b) { return a.rank > b.rank; });
+    std::vector<Address> out;
+    for (size_t i = 0; i < ranked.size() && i < count; ++i) out.push_back(ranked[i].at);
+    return out;
+}
+
 Rendezvous::Rendezvous() : Rendezvous(Config()) {}
 
 Rendezvous::Rendezvous(Config config) : config_(std::move(config)) {
@@ -171,6 +199,11 @@ std::vector<PeerId> Rendezvous::servers() const {
     for (const PeerId& peer : at_servers_)
         if (servers_.count(peer) == 0) out.push_back(peer);
     return out;
+}
+
+std::vector<Address> Rendezvous::chosen() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return chosen_;
 }
 
 bool Rendezvous::is_server(const PeerId& peer) const {
@@ -514,6 +547,7 @@ void Rendezvous::on_servers_told(const PeerId& server, ByteView body) {
 // ── Worker ──────────────────────────────────────────────────────────────────
 
 void Rendezvous::loop() {
+    choose_servers();
     std::unique_lock<std::mutex> lock(mutex_);
     while (running_.load()) {
         lock.unlock();
@@ -526,8 +560,42 @@ void Rendezvous::loop() {
     }
 }
 
+void Rendezvous::choose_servers() {
+    if (config_.candidates.empty() || config_.choose == 0 || keys_.empty()) return;
+    // Config::servers resolved first, so that one chosen too is dialed once.
+    for (size_t i = 0; i < server_dials_.size(); ++i) {
+        const std::optional<Address> resolved = resolve(server_dials_[i].at);
+        std::lock_guard<std::mutex> lock(mutex_);
+        server_dials_[i].resolved = resolved;
+    }
+    std::vector<Address> candidates;
+    for (const HostEndpoint& at : config_.candidates) {
+        if (!running_.load()) return;
+        // Resolving blocks: not under the lock a reactor thread takes.
+        if (const std::optional<Address> resolved = resolve(at)) candidates.push_back(*resolved);
+    }
+    std::vector<Address> chosen;
+    for (const Key& key : keys_)
+        for (const Address& at : choose(key, candidates, config_.choose))
+            if (std::find(chosen.begin(), chosen.end(), at) == chosen.end()) chosen.push_back(at);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    chosen_ = chosen;
+    for (const Address& at : chosen) {
+        // One of Config::servers already, as it was last resolved.
+        if (std::any_of(server_dials_.begin(), server_dials_.end(),
+                        [&](const ServerDial& s) { return s.resolved == at; }))
+            continue;
+        server_dials_.push_back(
+            ServerDial{HostEndpoint(at.ip.to_string(), at.port), at, {}, config_.redial});
+    }
+    LOG_INFO("rendezvous", "Chose " << chosen.size() << " of " << candidates.size()
+             << " server(s) known");
+}
+
 void Rendezvous::dial_servers(Clock::time_point now) {
-    if (server_dials_.empty()) return;  // fixed at construction
+    // Grown only by choose_servers(), on this thread.
+    if (server_dials_.empty()) return;
     std::vector<Address> connected;
     for (const PeerInfo& info : network_->peers())
         connected.insert(connected.end(), info.addresses.begin(), info.addresses.end());
