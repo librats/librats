@@ -567,8 +567,11 @@ TEST(ReconnectionServiceTest, APeerThatLeavesIsNotDialedAgain) {
     us.connect(*Address::parse("127.0.0.1:" + std::to_string(them->listen_port())));
     ASSERT_TRUE(wait_for([&] { return us.peer_count() == 1; }));
     them->stop();
-    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 0; }, 5s));
+    // The table drops the peer before the disconnect callbacks run: wait for the
+    // callback itself, not for peer_count().
+    ASSERT_TRUE(wait_for([&] { return closed != -1; }, 5s));
     EXPECT_EQ(closed, static_cast<int>(CloseReason::PeerClosed)) << "a stopping node says goodbye";
+    EXPECT_EQ(us.peer_count(), 0u);
     std::this_thread::sleep_for(300ms);
     EXPECT_TRUE(svc->lost_peers().empty());
     EXPECT_EQ(svc->target_count(), 0u);
