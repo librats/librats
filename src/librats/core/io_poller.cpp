@@ -72,7 +72,7 @@ public:
         if (epfd_ < 0) {
             LOG_POLLER_ERROR("epoll_create1 failed: " + std::string(strerror(errno)));
         } else {
-            LOG_POLLER_INFO("Created epoll instance (fd=" + std::to_string(epfd_) + ")");
+            LOG_POLLER_DEBUG("Created epoll instance (fd=" + std::to_string(epfd_) + ")");
         }
     }
     
@@ -187,7 +187,7 @@ public:
         if (kqfd_ < 0) {
             LOG_POLLER_ERROR("kqueue() failed: " + std::string(strerror(errno)));
         } else {
-            LOG_POLLER_INFO("Created kqueue instance (fd=" + std::to_string(kqfd_) + ")");
+            LOG_POLLER_DEBUG("Created kqueue instance (fd=" + std::to_string(kqfd_) + ")");
         }
     }
     

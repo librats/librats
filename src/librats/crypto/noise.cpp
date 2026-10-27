@@ -291,7 +291,7 @@ void NoiseSymmetricState::split(NoiseCipherState& c1, NoiseCipherState& c2) {
     secure_zero(temp_k1, NOISE_KEY_SIZE);
     secure_zero(temp_k2, NOISE_KEY_SIZE);
     
-    LOG_NOISE_INFO("SymmetricState split into two transport CipherStates");
+    LOG_NOISE_DEBUG("SymmetricState split into two transport CipherStates");
 }
 
 void NoiseSymmetricState::clear() {
@@ -489,7 +489,7 @@ NoiseError NoiseHandshakeState::write_message(
             mix_dh(s_.private_key, re_.public_key);
             
             handshake_complete_ = true;
-            LOG_NOISE_INFO("Handshake complete (initiator)");
+            LOG_NOISE_DEBUG("Handshake complete (initiator)");
         }
     } else {
         if (message_index_ == 1) {
@@ -619,7 +619,7 @@ NoiseError NoiseHandshakeState::read_message(
             mix_dh(e_.private_key, rs_.public_key);
             
             handshake_complete_ = true;
-            LOG_NOISE_INFO("Handshake complete (responder)");
+            LOG_NOISE_DEBUG("Handshake complete (responder)");
         }
     }
     

@@ -263,11 +263,11 @@ void cleanup_socket_library() {
 
 #ifdef _WIN32
     WSACleanup();
-    LOG_SOCKET_INFO("Windows Socket API cleaned up");
+    LOG_SOCKET_DEBUG("Windows Socket API cleaned up");
 #endif
 
     socket_library_initialized = false;
-    LOG_SOCKET_INFO("Socket library cleaned up");
+    LOG_SOCKET_DEBUG("Socket library cleaned up");
 }
 
 // ── connect_with_timeout ────────────────────────────────────────────────────
@@ -797,7 +797,7 @@ std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size, int t
     }
 
     if (bytes_received == 0) {
-        LOG_SOCKET_INFO("Connection closed by peer on socket " << socket);
+        LOG_SOCKET_DEBUG("Connection closed by peer on socket " << socket);
         report(TcpRecvStatus::Closed);
         return {};
     }
@@ -860,7 +860,7 @@ static std::vector<uint8_t> receive_exact_bytes(socket_t socket, size_t num_byte
         }
 
         if (bytes_received == 0) {
-            LOG_SOCKET_INFO("Connection closed by peer while receiving exact bytes on socket " << socket);
+            LOG_SOCKET_DEBUG("Connection closed by peer while receiving exact bytes on socket " << socket);
             return {};
         }
 
