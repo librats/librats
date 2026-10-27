@@ -98,6 +98,8 @@ bool RoutingTable::node_seen(const NodeId& id, const Address& endpoint,
 
 bool RoutingTable::add_node(NodeEntry e) {
     if (e.id == self_) return false;
+    // Nowhere to send to (a contact saved or told that never was one).
+    if (e.endpoint.port == 0 || e.endpoint.ip.is_any()) return false;
     const int idx = bucket_index(e.id);
     Bucket& b = buckets_[idx];
 

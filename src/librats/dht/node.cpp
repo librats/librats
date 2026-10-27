@@ -70,6 +70,16 @@ void Node::on_datagram(const std::vector<uint8_t>& data, const Address& from, Ti
     auto msg = KrpcProtocol::decode_message(data);
     if (!msg) return;
 
+    // Contacts handed out that no one is reached at — the wildcard address, port 0 —
+    // or that are the other family's network (an IPv6 node to an IPv4 node) are
+    // dropped before any lookup or the table takes them: each would cost a failed
+    // send every lookup.
+    auto& nodes = msg->nodes;
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [this](const KrpcNode& n) {
+                    return n.port == 0 || n.ip.is_any() || n.ip.is_v6() != ipv6_;
+                }),
+                nodes.end());
+
     switch (msg->type) {
         case KrpcMessageType::Query:    handle_query(*msg, from, now); break;
         case KrpcMessageType::Response: handle_response(*msg, from, now); break;

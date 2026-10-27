@@ -156,6 +156,38 @@ TEST(DhtNode, FindPeersClientLookup) {
     EXPECT_EQ(found.front(), p);
 }
 
+// A reply that names contacts no one is reached at — the wildcard address, port 0 —
+// or of the other family's network: none is queried or kept, the rest are.
+TEST(DhtNode, ContactsNoOneIsReachedAtAreNeitherQueriedNorKept) {
+    RecordingTransport tp;
+    Node node(tp, nid(0x00), false);
+    const NodeId target = nid(0x55);
+    const Address seed("10.0.0.1", 1);
+    node.routing_table().node_seen(nid(0xF0), seed, 20);
+    node.find_peers(target, {}, {}, at(0));
+    auto q = to_ep(tp, seed);
+    ASSERT_NE(q, nullptr);
+
+    const Address good("6.6.6.6", 6881);
+    const std::vector<KrpcNode> named = {
+        KrpcNode(nid(0x56), librats::IpAddress::parse("0.0.0.0").value(), 0),
+        KrpcNode(nid(0x57), librats::IpAddress::parse("4.4.4.4").value(), 0),
+        KrpcNode(nid(0x58), librats::IpAddress::parse("0.0.0.0").value(), 6881),
+        KrpcNode(nid(0x59), librats::IpAddress::parse("2001:db8::1").value(), 6881),
+        KrpcNode(nid(0x5A), good.ip, good.port),
+    };
+    tp.clear();
+    node.on_datagram(enc(KrpcProtocol::create_get_peers_response_with_nodes(
+                         q->transaction_id, nid(0xF0), named, "tok")),
+                     seed, at(0));
+
+    ASSERT_EQ(tp.sent.size(), 1u);
+    EXPECT_EQ(tp.sent.front().first, good);
+    const auto kept = node.routing_table().find_closest(target, 16, /*include_unconfirmed=*/true);
+    for (const auto& entry : kept)
+        EXPECT_TRUE(entry.endpoint == seed || entry.endpoint == good) << entry.endpoint.to_string();
+}
+
 TEST(DhtNode, BootstrapQueriesRouter) {
     RecordingTransport tp;
     Node node(tp, nid(0x00), false);

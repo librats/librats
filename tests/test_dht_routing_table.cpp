@@ -75,6 +75,15 @@ TEST(DhtRoutingTable, HeardAboutIsUnconfirmed) {
     EXPECT_EQ(rt.find_closest(id, kBucketSize, true).size(), 1u);  // visible when seeding lookups
 }
 
+TEST(DhtRoutingTable, AContactWithNowhereToSendToIsNeverStored) {
+    RoutingTable rt(kZeroSelf);
+    EXPECT_FALSE(rt.node_seen(id_in_bucket(3, 1), Address("0.0.0.0", 6881), 10));
+    EXPECT_FALSE(rt.node_seen(id_in_bucket(3, 2), Address("10.0.0.1", 0), 10));
+    rt.heard_about(id_in_bucket(3, 3), Address("::", 6881));
+    EXPECT_EQ(rt.size(), 0u);
+    EXPECT_TRUE(rt.find_closest(id_in_bucket(3, 1), 8, /*include_unconfirmed=*/true).empty());
+}
+
 TEST(DhtRoutingTable, SelfIsNeverStored) {
     RoutingTable rt(kZeroSelf);
     EXPECT_FALSE(rt.node_seen(kZeroSelf, ep(0), 10));
