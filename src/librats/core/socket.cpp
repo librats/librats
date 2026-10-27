@@ -175,7 +175,7 @@ static socket_t create_tcp_client_v4(const std::string& host, int port, int time
         return RATS_INVALID_SOCKET;
     }
 
-    LOG_SOCKET_INFO("Successfully connected to " << resolved_ip << ":" << port);
+    LOG_SOCKET_DEBUG("Successfully connected to " << resolved_ip << ":" << port);
     return client_socket;
 }
 
@@ -223,7 +223,7 @@ static socket_t create_tcp_client_v6(const std::string& host, int port, int time
         return RATS_INVALID_SOCKET;
     }
 
-    LOG_SOCKET_INFO("Successfully connected to IPv6 " << resolved_ip << ":" << port);
+    LOG_SOCKET_DEBUG("Successfully connected to IPv6 " << resolved_ip << ":" << port);
     return client_socket;
 }
 
@@ -246,11 +246,11 @@ bool init_socket_library() {
         LOG_SOCKET_ERROR("WSAStartup failed: " << result);
         return false;
     }
-    LOG_SOCKET_INFO("Windows Socket API initialized");
+    LOG_SOCKET_DEBUG("Windows Socket API initialized");
 #endif
 
     socket_library_initialized = true;
-    LOG_SOCKET_INFO("Socket library initialized");
+    LOG_SOCKET_DEBUG("Socket library initialized");
     return true;
 }
 
@@ -445,7 +445,7 @@ socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
     // Try IPv6 first
     socket_t client_socket = create_tcp_client_v6(host, port, timeout_ms);
     if (client_socket != RATS_INVALID_SOCKET) {
-        LOG_SOCKET_INFO("Successfully connected using IPv6");
+        LOG_SOCKET_DEBUG("Successfully connected using IPv6");
         return client_socket;
     }
 
@@ -453,7 +453,7 @@ socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
     LOG_SOCKET_DEBUG("IPv6 connection failed, trying IPv4");
     client_socket = create_tcp_client_v4(host, port, timeout_ms);
     if (client_socket != RATS_INVALID_SOCKET) {
-        LOG_SOCKET_INFO("Successfully connected using IPv4");
+        LOG_SOCKET_DEBUG("Successfully connected using IPv4");
         return client_socket;
     }
 
@@ -563,7 +563,7 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
         return RATS_INVALID_SOCKET;
     }
 
-    LOG_SOCKET_INFO(af_label << " server listening on port " << port << " (backlog: " << backlog << ")");
+    LOG_SOCKET_DEBUG(af_label << " server listening on port " << port << " (backlog: " << backlog << ")");
     return server_socket;
 }
 
@@ -582,14 +582,14 @@ socket_t accept_client(socket_t server_socket) {
         char client_ip[INET_ADDRSTRLEN];
         auto* addr_in = reinterpret_cast<sockaddr_in*>(&client_addr);
         inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, INET_ADDRSTRLEN);
-        LOG_SOCKET_INFO("Client connected from " << client_ip << ":" << ntohs(addr_in->sin_port));
+        LOG_SOCKET_DEBUG("Client connected from " << client_ip << ":" << ntohs(addr_in->sin_port));
     } else if (client_addr.ss_family == AF_INET6) {
         char client_ip[INET6_ADDRSTRLEN];
         auto* addr_in6 = reinterpret_cast<sockaddr_in6*>(&client_addr);
         inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, INET6_ADDRSTRLEN);
-        LOG_SOCKET_INFO("Client connected from IPv6 [" << client_ip << "]:" << ntohs(addr_in6->sin6_port));
+        LOG_SOCKET_DEBUG("Client connected from IPv6 [" << client_ip << "]:" << ntohs(addr_in6->sin6_port));
     } else {
-        LOG_SOCKET_INFO("Client connected from unknown address family");
+        LOG_SOCKET_DEBUG("Client connected from unknown address family");
     }
 
     return client_socket;
@@ -1068,12 +1068,12 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     if (port == 0) {
         int actual_port = get_bound_port(udp_socket);
         if (actual_port > 0) {
-            LOG_SOCKET_INFO(af_label << " UDP socket bound to ephemeral port " << actual_port);
+            LOG_SOCKET_DEBUG(af_label << " UDP socket bound to ephemeral port " << actual_port);
         } else {
-            LOG_SOCKET_INFO(af_label << " UDP socket bound to ephemeral port (unknown)");
+            LOG_SOCKET_DEBUG(af_label << " UDP socket bound to ephemeral port (unknown)");
         }
     } else {
-        LOG_SOCKET_INFO(af_label << " UDP socket bound to port " << port);
+        LOG_SOCKET_DEBUG(af_label << " UDP socket bound to port " << port);
     }
 
     return udp_socket;

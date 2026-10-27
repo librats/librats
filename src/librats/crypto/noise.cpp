@@ -209,7 +209,7 @@ void NoiseSymmetricState::initialize_symmetric(const char* protocol_name) {
     /* ck = h */
     memcpy(ck_, h_, NOISE_HASH_SIZE);
     
-    LOG_NOISE_INFO("SymmetricState initialized with protocol: " << protocol_name);
+    LOG_NOISE_DEBUG("SymmetricState initialized with protocol: " << protocol_name);
 }
 
 void NoiseSymmetricState::mix_key(const uint8_t* input_key_material, size_t len) {
@@ -407,7 +407,7 @@ NoiseError NoiseHandshakeState::initialize(
     message_index_ = 0;
     handshake_complete_ = false;
     
-    LOG_NOISE_INFO("HandshakeState initializing as " << (is_initiator ? "initiator" : "responder"));
+    LOG_NOISE_DEBUG("HandshakeState initializing as " << (is_initiator ? "initiator" : "responder"));
     
     /* Initialize symmetric state with protocol name */
     symmetric_.initialize_symmetric(NOISE_PROTOCOL_NAME);
@@ -434,7 +434,7 @@ NoiseError NoiseHandshakeState::initialize(
     }
     
     initialized_ = true;
-    LOG_NOISE_INFO("HandshakeState initialized successfully");
+    LOG_NOISE_DEBUG("HandshakeState initialized successfully");
     return NoiseError::OK;
 }
 
@@ -657,12 +657,12 @@ NoiseError NoiseHandshakeState::split(NoiseCipherState& send_cipher, NoiseCipher
         /* Initiator: c1 is for sending, c2 is for receiving */
         send_cipher = std::move(c1);
         recv_cipher = std::move(c2);
-        LOG_NOISE_INFO("HandshakeState split: initiator (c1=send, c2=recv)");
+        LOG_NOISE_DEBUG("HandshakeState split: initiator (c1=send, c2=recv)");
     } else {
         /* Responder: c2 is for sending, c1 is for receiving */
         send_cipher = std::move(c2);
         recv_cipher = std::move(c1);
-        LOG_NOISE_INFO("HandshakeState split: responder (c2=send, c1=recv)");
+        LOG_NOISE_DEBUG("HandshakeState split: responder (c2=send, c1=recv)");
     }
     
     return NoiseError::OK;
@@ -690,7 +690,7 @@ NoiseSession::~NoiseSession() {
 
 NoiseError NoiseSession::start(bool is_initiator, const NoiseKeyPair* static_keypair,
                                const uint8_t* prologue, size_t prologue_len) {
-    LOG_NOISE_INFO("Session starting as " << (is_initiator ? "initiator" : "responder"));
+    LOG_NOISE_DEBUG("Session starting as " << (is_initiator ? "initiator" : "responder"));
     transport_ready_ = false;
     NoiseError err = handshake_.initialize(is_initiator, static_keypair, prologue, prologue_len);
     if (err != NoiseError::OK) {
@@ -750,7 +750,7 @@ NoiseError NoiseSession::handshake_step(
             return err;
         }
         transport_ready_ = true;
-        LOG_NOISE_INFO("Session transport ready - handshake complete");
+        LOG_NOISE_DEBUG("Session transport ready - handshake complete");
     }
     
     return NoiseError::OK;

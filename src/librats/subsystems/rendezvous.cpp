@@ -411,7 +411,7 @@ void Rendezvous::on_moved(const PeerId& peer) {
     for (const PeerId& other : others) network_->send(other, MessageType::Rendezvous, ByteView(told));
     const Bytes answer = peers_message(kOpMoved, others, known);
     network_->send(peer, MessageType::Rendezvous, ByteView(answer));
-    LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " moved; telling "
+    LOG_INFO("rendezvous", "Peer " << peer.short_hex() << " moved; telling "
               << others.size() << " other(s)");
 }
 
@@ -510,7 +510,7 @@ void Rendezvous::on_peers(const PeerId& server, ByteView body, bool moved) {
         if (peer.id == network_->local_id() || peer.endpoints.empty() ||
             (!moved && std::find(connected.begin(), connected.end(), peer.id) != connected.end()))
             continue;
-        LOG_DEBUG("rendezvous", "Told of " << peer.id.short_hex() << (moved ? ", moved," : "")
+        LOG_INFO("rendezvous", "Told of " << peer.id.short_hex() << (moved ? ", moved," : "")
                   << " at " << peer.endpoints.front().to_string() << "; dialing");
         bool dialed = false;
         if (dial_)
@@ -653,7 +653,7 @@ void Rendezvous::hand_on_unreached(Clock::time_point now) {
         if (moved ? network_->answers(peer)
                   : std::find(connected.begin(), connected.end(), peer) != connected.end())
             continue;
-        LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " not reached by dialing; "
+        LOG_INFO("rendezvous", "Peer " << peer.short_hex() << " not reached by dialing; "
                   << (relay ? "relaying" : "punching"));
         // The dials were a punch, timed by the server: a NAT they did not get
         // through most likely maps anew for each destination, where no punch

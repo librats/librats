@@ -802,7 +802,8 @@ void Node::on_established(Connection& conn) {
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     } else if (outcome.result == PeerTable::AddResult::Replaced) {
-        LOG_DEBUG("node", "Peer " << conn.remote_id().short_hex() << " moved to another link");
+        LOG_INFO("node", "Peer " << conn.remote_id().short_hex() << " moved to another link (over "
+                 << to_string(conn.transport()) << ")");
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_rerouted_) cb(handle);
     }

@@ -241,7 +241,7 @@ void Node::find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_pee
     // The result line: total peers, how long it took, and (capped) which ones.
     auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
-        LOG_INFO("dht.find", "find_peers " << short_hex(info_hash) << " → " << all.size()
+        LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << " → " << all.size()
                              << " peer(s) in " << (ms < 0 ? 0 : ms) << "ms"
                              << (all.empty() ? "" : ": " + format_peers(all)));
         if (cb) cb(all);
@@ -265,7 +265,7 @@ void Node::announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_
     };
     auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
-        LOG_INFO("dht.find", "announce " << short_hex(info_hash) << " complete in "
+        LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << " complete in "
                              << (ms < 0 ? 0 : ms) << "ms (" << all.size() << " peer(s) seen)");
         if (cb) cb(all);
     };

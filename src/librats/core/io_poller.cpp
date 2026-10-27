@@ -403,7 +403,7 @@ public:
                             std::to_string(GetLastError()));
             return;
         }
-        LOG_POLLER_INFO("Created IOCP poller");
+        LOG_POLLER_DEBUG("Created IOCP poller");
 
         // The readiness thread for listen/connecting sockets. It parks on the
         // condition variable whenever there is nothing in WSAPoll mode, which on a
@@ -1250,7 +1250,7 @@ private:
 class PollPoller final : public IOPoller {
 public:
     PollPoller() {
-        LOG_POLLER_INFO("Created poll() poller");
+        LOG_POLLER_DEBUG("Created poll() poller");
     }
     
     ~PollPoller() override = default;

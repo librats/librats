@@ -145,7 +145,7 @@ std::vector<std::string> get_local_interface_addresses_v4() {
     freeifaddrs(ifaddr);
 #endif
     
-    LOG_NETUTILS_INFO("Found " << addresses.size() << " local IPv4 addresses");
+    LOG_NETUTILS_DEBUG("Found " << addresses.size() << " local IPv4 addresses");
     return addresses;
 }
 
@@ -229,7 +229,7 @@ std::vector<std::string> get_local_interface_addresses_v6() {
     freeifaddrs(ifaddr);
 #endif
     
-    LOG_NETUTILS_INFO("Found " << addresses.size() << " local IPv6 addresses");
+    LOG_NETUTILS_DEBUG("Found " << addresses.size() << " local IPv6 addresses");
     return addresses;
 }
 
@@ -271,7 +271,7 @@ std::string resolve_hostname(const std::string& hostname) {
     
     freeaddrinfo(result);
     
-    LOG_NETUTILS_INFO("Resolved " << hostname << " to " << ip_str);
+    LOG_NETUTILS_DEBUG("Resolved " << hostname << " to " << ip_str);
     return std::string(ip_str);
 }
 
@@ -466,7 +466,7 @@ std::vector<std::string> get_local_interface_addresses() {
     auto ipv6_addresses = get_local_interface_addresses_v6();
     addresses.insert(addresses.end(), ipv6_addresses.begin(), ipv6_addresses.end());
     
-    LOG_NETUTILS_INFO("Found " << addresses.size() << " total local interface addresses ("
+    LOG_NETUTILS_DEBUG("Found " << addresses.size() << " total local interface addresses ("
                       << ipv4_addresses.size() << " IPv4, " << ipv6_addresses.size() << " IPv6)");
 
     return addresses;
@@ -597,7 +597,7 @@ std::vector<std::string> get_default_gateways() {
     // Always add heuristics as a fallback so callers have something to try
     append_gateway_heuristics(gateways);
 
-    LOG_NETUTILS_INFO("Detected " << gateways.size() << " default gateway candidate(s)");
+    LOG_NETUTILS_DEBUG("Detected " << gateways.size() << " default gateway candidate(s)");
     return gateways;
 }
 

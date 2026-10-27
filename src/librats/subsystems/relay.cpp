@@ -563,7 +563,7 @@ void Relay::State::handle_open(const PeerId& from, uint32_t circuit, ByteView bo
         return;
     }
 
-    LOG_DEBUG("relay", "Carrying a circuit from " << from.short_hex() << " to "
+    LOG_INFO("relay", "Carrying a circuit from " << from.short_hex() << " to "
               << dst->short_hex() << (meter->cid ? " (forwarding datagrams)" : ""));
 
     Bytes msg = message(kOpIncoming, far_id, PeerId::kSize + 4 + 8);
@@ -636,7 +636,7 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
     put_u32(msg, config.window);
     if (cid != 0) put_u64(msg, cid);
     send(from, msg);
-    LOG_DEBUG("relay", "Accepted a circuit from " << src->short_hex() << " via "
+    LOG_INFO("relay", "Accepted a circuit from " << src->short_hex() << " via "
               << from.short_hex() << (cid ? " (forwarded datagrams)" : ""));
 }
 
@@ -1008,7 +1008,7 @@ void Relay::State::on_peer_connected(const Peer& peer) {
     // the peer table prefers the direct link at both ends and swaps the route with
     // no disconnect event — the application never sees the seam.
     if (HolePunchService* hole_punch = punch.load()) {
-        LOG_DEBUG("relay", "Relayed peer " << peer.id().short_hex()
+        LOG_INFO("relay", "Relayed peer " << peer.id().short_hex()
                   << " is up; trying to replace the circuit with a direct link");
         hole_punch->punch(peer.id());
     }

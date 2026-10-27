@@ -509,7 +509,7 @@ void HolePunch::service_sessions() {
         for (auto it = sessions_.begin(); it != sessions_.end();) {
             const PeerId& target = it->first;
             if (std::find(connected.begin(), connected.end(), target) != connected.end()) {
-                LOG_DEBUG("punch", "Punch to " << target.short_hex() << " succeeded");
+                LOG_INFO("punch", "Punch to " << target.short_hex() << " succeeded");
                 it = sessions_.erase(it);
                 continue;
             }
@@ -521,7 +521,7 @@ void HolePunch::service_sessions() {
             // one thing that makes a punch work — starting together.
             const bool initiator = it->second.initiator;
             if (!initiator || ++it->second.attempt >= config_.attempts) {
-                LOG_DEBUG("punch", "Giving up on " << target.short_hex() << " for now");
+                LOG_INFO("punch", "Giving up on " << target.short_hex() << " for now");
                 // Cooldown is the INITIATOR's verdict on a target and nobody else's.
                 // A responder round ending means only that the Sync never came — the
                 // initiator is very likely mid-retry at that exact moment (its round

@@ -310,8 +310,11 @@ void DhtDiscovery::on_peers(const std::vector<Address>& peers, const InfoHash& /
             }
         }
         if (dial == Redials::Dial::None) continue;
-        LOG_DEBUG("dht-discovery", (dial == Redials::Dial::First ? "Dialing" : "Punching")
-                                       << " discovered peer " << peer.to_string());
+        if (dial == Redials::Dial::First) {
+            LOG_INFO("dht-discovery", "Dialing discovered peer " << peer.to_string());
+        } else {
+            LOG_DEBUG("dht-discovery", "Punching discovered peer " << peer.to_string());
+        }
         // The first dial races TCP in, for a network that blocks UDP; a punch is
         // the shared datagram socket's alone.
         if (dial == Redials::Dial::First || !dial_ ||
