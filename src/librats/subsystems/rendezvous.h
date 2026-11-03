@@ -129,7 +129,8 @@ public:
         /// is passed over.
         std::vector<HostEndpoint> candidates;
         size_t                    choose = 2;
-        /// The keys this node is met under, registered with every server.
+        /// The keys this node is met under, registered with every server;
+        /// set_keys() changes them as it runs.
         std::vector<std::string> keys;
         /// How often each key is registered again: the others not reached are
         /// told of anew, and tried again.
@@ -152,7 +153,7 @@ public:
 
         /// Be a server: keep who registered what, and introduce them.
         bool serve = false;
-        size_t max_keys_per_peer = 4;
+        size_t max_keys_per_peer = 16;
         /// Peers registered under one key; one past it is answered all the
         /// same, but kept nowhere, so nobody else is told of it.
         size_t max_peers_per_key = 64;
@@ -179,6 +180,13 @@ public:
     void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
+
+    /// The keys this node is met under from now on, in place of Config::keys
+    /// or the last given: one new registered with every server at once, one
+    /// left out no longer registered again — a server keeps it until this
+    /// node's link to it ends, as there is no unregistering. Servers chosen
+    /// of Config::candidates stay those of the keys at the start. Any thread.
+    void set_keys(const std::vector<std::string>& keys);
 
     /// The servers connected now: peers that said Hello, or connected at an
     /// address of Config::servers.
@@ -246,6 +254,7 @@ private:
 
     // — outgoing —
     void register_keys(const PeerId& server);
+    void register_keys(const PeerId& server, const std::vector<Key>& keys);
     /// Server: tell `peer` of the other servers, if any came since it was last
     /// told.
     void tell_servers(const PeerId& peer);
@@ -263,7 +272,7 @@ private:
     void refresh(std::chrono::steady_clock::time_point now);
 
     Config                config_;
-    std::vector<Key>      keys_;  ///< config_.keys, hashed
+    std::vector<Key>      keys_;  ///< config_.keys, hashed, or set_keys()'; under mutex_
     PeerNetwork*          network_  = nullptr;
     ServiceRegistry*      services_ = nullptr;
     DialService*          dial_     = nullptr;

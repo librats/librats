@@ -7,6 +7,10 @@
  * A peer is allowed a burst of packets per short window; cross the threshold and it's
  * banned for a while. Cheap and bounded — a single counter + two timestamps per IP,
  * with the tracking table capped. Consulted before any incoming packet is processed.
+ *
+ * Loopback is never limited: whatever floods from this host is this host's own,
+ * and several nodes on one host — tests, a developer's — share 127.0.0.1, whose
+ * queries together would cross a threshold meant for one peer.
  */
 
 #include "librats/core/ip_address.h"

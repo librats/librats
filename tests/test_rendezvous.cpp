@@ -264,6 +264,41 @@ TEST(Rendezvous, PeersOfOneKeyMeetThroughTheServerAndOnlyThey) {
     server.stop();
 }
 
+// Keys given as a node runs are registered at once: it meets those under the
+// new one, and starting with none it meets nobody until given one.
+TEST(Rendezvous, KeysGivenAsANodeRunsAreRegisteredAtOnce) {
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node a(node_config()), b(node_config()), c(node_config());
+    Rendezvous::Config none = meeting("", port);
+    none.keys.clear();
+    none.refresh = 60s;  // nothing again but what set_keys() does
+    auto* at_a = a.add_subsystem(std::make_unique<Rendezvous>(none));
+    b.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    c.add_subsystem(std::make_unique<Rendezvous>(meeting("bob", port)));
+    ASSERT_TRUE(a.start() && b.start() && c.start());
+    ASSERT_TRUE(wait_for([&] { return at_a->servers().size() == 1; }));
+    ASSERT_TRUE(wait_for([&] { return rendezvous->registrations() == 2; }));
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(a.peer_count(), 1u) << "met under no key";
+
+    at_a->set_keys({"ann"});
+    EXPECT_TRUE(wait_for([&] { return connected(a, b); }));
+    EXPECT_FALSE(connected(a, c));
+    // Another as well: the one before kept, the new one registered.
+    at_a->set_keys({"ann", "bob"});
+    EXPECT_TRUE(wait_for([&] { return connected(a, c); }));
+    EXPECT_TRUE(wait_for([&] { return rendezvous->registrations() == 4; }));
+
+    c.stop();
+    b.stop();
+    a.stop();
+    server.stop();
+}
+
 // A server of the config is known for one as it connects, before it says a
 // word: in a connected handler, which runs before the subsystem's own.
 TEST(Rendezvous, AServerOfTheConfigIsKnownAsItConnects) {

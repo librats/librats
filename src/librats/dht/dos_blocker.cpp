@@ -4,7 +4,19 @@
 namespace librats {
 namespace dht {
 
+namespace {
+bool is_loopback(const IpAddress& ip) {
+    const uint8_t* b = ip.bytes().data();
+    if (ip.is_v4()) return b[0] == 127;
+    if (!ip.is_v6()) return false;
+    for (size_t i = 0; i < 15; ++i)
+        if (b[i] != 0) return false;
+    return b[15] == 1;
+}
+} // namespace
+
 bool DosBlocker::allow(const IpAddress& ip, TimePoint now) {
+    if (is_loopback(ip)) return true;
     Entry& e = table_[ip];
 
     if (e.banned_until > now) return false;  // still serving a ban

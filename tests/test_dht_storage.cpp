@@ -77,3 +77,23 @@ TEST(DhtDosBlocker, BlocksFloodThenRecovers) {
     EXPECT_TRUE(dos.allow(ip, at_min(6)));                           // ban elapsed → allowed again
     EXPECT_TRUE(dos.allow(*IpAddress::parse("8.8.8.8"), at_sec(0))); // a different IP is independent
 }
+
+// Loopback is this host's own — several nodes on it share the address — and is
+// never limited.
+TEST(DhtDosBlocker, NeverLimitsLoopback) {
+    DosBlocker dos;
+    for (const char* text : {"127.0.0.1", "127.1.2.3", "::1"}) {
+        const IpAddress ip = *IpAddress::parse(text);
+        int allowed = 0;
+        for (int i = 0; i < 200; ++i)
+            if (dos.allow(ip, at_sec(0))) ++allowed;
+        EXPECT_EQ(allowed, 200) << text;
+    }
+    EXPECT_EQ(dos.tracked(), 0u);
+    EXPECT_FALSE([&] {
+        const IpAddress near = *IpAddress::parse("::2");
+        bool all = true;
+        for (int i = 0; i < 60; ++i) all = dos.allow(near, at_sec(0)) && all;
+        return all;
+    }()) << "::2 is not loopback";
+}

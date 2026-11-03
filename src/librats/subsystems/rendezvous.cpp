@@ -166,8 +166,9 @@ void Rendezvous::attach(NodeContext& ctx) {
     network_->on_peer_disconnected(
         [this](const PeerId& peer, CloseReason) { on_disconnected(peer); });
     network_->on_peer_moved([this](const Peer& peer) { on_moved(peer.id()); });
-    // Whether a link to a peer answers is in its path samples.
-    if (!keys_.empty())
+    // Whether a link to a peer answers is in its path samples. A node with no
+    // keys yet may be given some (set_keys()), and one with no servers met none.
+    if (!keys_.empty() || !server_dials_.empty())
         network_->on_peer_path([this](const Peer& peer, const PathStats& path) { on_path(peer.id(), path); });
 }
 
@@ -177,7 +178,12 @@ void Rendezvous::start() {
         std::lock_guard<std::mutex> lock(mutex_);
         refresh_at_ = Clock::now() + config_.refresh;
     }
-    if (!server_dials_.empty() || !keys_.empty()) worker_ = std::thread([this] { loop(); });
+    bool keys = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        keys = !keys_.empty();
+    }
+    if (!server_dials_.empty() || keys) worker_ = std::thread([this] { loop(); });
 }
 
 void Rendezvous::stop() {
@@ -317,17 +323,49 @@ void Rendezvous::on_hello(const PeerId& server) {
     }
     if (found)
         for (const auto& handler : found_handlers_) handler(server);
+    size_t keys = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        keys = keys_.size();
+    }
     LOG_INFO("rendezvous", "Server " << server.short_hex() << " is up; registering "
-             << keys_.size() << " key(s)");
+             << keys << " key(s)");
     register_keys(server);
 }
 
 void Rendezvous::register_keys(const PeerId& server) {
-    for (const Key& key : keys_) {
+    std::vector<Key> keys;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        keys = keys_;
+    }
+    register_keys(server, keys);
+}
+
+void Rendezvous::register_keys(const PeerId& server, const std::vector<Key>& keys) {
+    for (const Key& key : keys) {
         Bytes message{kVersion, kOpRegister};
         message.insert(message.end(), key.begin(), key.end());
         network_->send(server, MessageType::Rendezvous, ByteView(message));
     }
+}
+
+void Rendezvous::set_keys(const std::vector<std::string>& keys) {
+    std::vector<Key> hashed;
+    for (const std::string& key : keys) hashed.push_back(key_of(key));
+    std::vector<Key> added;
+    std::vector<PeerId> servers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const Key& key : hashed)
+            if (std::find(keys_.begin(), keys_.end(), key) == keys_.end()) added.push_back(key);
+        keys_ = std::move(hashed);
+        if (running_.load()) servers.assign(servers_.begin(), servers_.end());
+    }
+    if (added.empty()) return;
+    LOG_DEBUG("rendezvous", "Registering " << added.size() << " new key(s) with "
+              << servers.size() << " server(s)");
+    for (const PeerId& server : servers) register_keys(server, added);
 }
 
 bool Rendezvous::spend(const PeerId& peer) {
@@ -561,7 +599,12 @@ void Rendezvous::loop() {
 }
 
 void Rendezvous::choose_servers() {
-    if (config_.candidates.empty() || config_.choose == 0 || keys_.empty()) return;
+    std::vector<Key> keys;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        keys = keys_;
+    }
+    if (config_.candidates.empty() || config_.choose == 0 || keys.empty()) return;
     // Config::servers resolved first, so that one chosen too is dialed once.
     for (size_t i = 0; i < server_dials_.size(); ++i) {
         const std::optional<Address> resolved = resolve(server_dials_[i].at);
@@ -575,7 +618,7 @@ void Rendezvous::choose_servers() {
         if (const std::optional<Address> resolved = resolve(at)) candidates.push_back(*resolved);
     }
     std::vector<Address> chosen;
-    for (const Key& key : keys_)
+    for (const Key& key : keys)
         for (const Address& at : choose(key, candidates, config_.choose))
             if (std::find(chosen.begin(), chosen.end(), at) == chosen.end()) chosen.push_back(at);
 

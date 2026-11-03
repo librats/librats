@@ -168,11 +168,11 @@ TEST(DhtDiscoveryTest, HashIsDeterministicPerKey) {
 }
 
 // A peer found is dialed at once, then again as found again — no oftener than
-// every, for as long as `for` after it was first found.
+// every in its first stretch, and after it no oftener than slow.
 TEST(DhtDiscoveryTest, RedialsWhatItFindsForAWhile) {
     using Dial = DhtDiscovery::Redials::Dial;
     using Clock = DhtDiscovery::Redials::Clock;
-    DhtDiscovery::Redials redials(5s, 20s);
+    DhtDiscovery::Redials redials(5s, 20s, 25s);
     const Address a("203.0.113.1", 4000);
     const Address b("203.0.113.2", 4000);
     const Clock::time_point t0{};
@@ -183,12 +183,70 @@ TEST(DhtDiscoveryTest, RedialsWhatItFindsForAWhile) {
     EXPECT_EQ(redials.found(a, t0 + 5s), Dial::Again);
     EXPECT_EQ(redials.found(a, t0 + 9s), Dial::None);
     EXPECT_EQ(redials.found(a, t0 + 10s), Dial::Again);
-    EXPECT_EQ(redials.found(a, t0 + 21s), Dial::None);  // for long enough
+    EXPECT_EQ(redials.found(a, t0 + 21s), Dial::None);  // past its first stretch: slow
 
     redials.forget_older_than(t0 + 15s);  // b, last found at 1 s
     EXPECT_EQ(redials.size(), 1u);
     EXPECT_EQ(redials.found(b, t0 + 30s), Dial::First);
-    EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);
+    EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);   // 20 s after the last
+    EXPECT_EQ(redials.found(a, t0 + 35s), Dial::Again);  // 25 s after
+}
+
+// In its first stretch a peer found is punched on its own time, every `every`,
+// whether the DHT hands it out again or not (that is once a round, 30 s: two
+// behind NATs punching that seldom may never overlap).
+TEST(DhtDiscoveryTest, RedialsPunchOnTheirOwnTimeInTheFirstStretch) {
+    using Dial = DhtDiscovery::Redials::Dial;
+    using Clock = DhtDiscovery::Redials::Clock;
+    using Addresses = std::vector<Address>;
+    DhtDiscovery::Redials redials(5s, 20s, 25s);
+    const Address a("203.0.113.1", 4000);
+    const Clock::time_point t0{};
+
+    EXPECT_FALSE(redials.next_due().has_value());  // none found
+    EXPECT_EQ(redials.found(a, t0), Dial::First);
+    EXPECT_EQ(redials.next_due(), t0 + 5s);
+    EXPECT_TRUE(redials.due(t0 + 4s).empty());
+    EXPECT_EQ(redials.due(t0 + 5s), Addresses{a});
+    EXPECT_TRUE(redials.due(t0 + 5s).empty());          // punched just now
+    EXPECT_EQ(redials.found(a, t0 + 7s), Dial::None);   // found again: punched at 5 s
+    EXPECT_EQ(redials.next_due(), t0 + 10s);
+    EXPECT_EQ(redials.due(t0 + 12s), Addresses{a});     // a late wake: the next 5 s on
+    EXPECT_EQ(redials.next_due(), t0 + 17s);
+    EXPECT_EQ(redials.due(t0 + 17s), Addresses{a});
+    EXPECT_FALSE(redials.next_due().has_value());       // 22 s is past the stretch
+    EXPECT_TRUE(redials.due(t0 + 22s).empty());
+
+    // Found connected: nothing left to punch.
+    const Address b("203.0.113.2", 4000);
+    EXPECT_EQ(redials.found(b, t0 + 30s), Dial::First);
+    EXPECT_EQ(redials.next_due(), t0 + 35s);
+    redials.connected(b);
+    EXPECT_FALSE(redials.next_due().has_value());
+    EXPECT_TRUE(redials.due(t0 + 35s).empty());
+}
+
+// A peer found while it was away — the DHT keeps its announce half an hour —
+// and back later at the same address is still punched, once a round for as
+// long as it is found: its own punches, every few seconds, then land while
+// ours keep our NAT open to it. (Left at its first two minutes, it was never
+// dialed again, and two behind NATs never met.)
+TEST(DhtDiscoveryTest, RedialsAPeerFoundForAsLongAsItIsFound) {
+    using Dial = DhtDiscovery::Redials::Dial;
+    using Clock = DhtDiscovery::Redials::Clock;
+    DhtDiscovery::Redials redials(5s, 20s, 25s);
+    const Address a("203.0.113.1", 4000);
+    const Clock::time_point t0{};
+
+    EXPECT_EQ(redials.found(a, t0), Dial::First);
+    for (auto at = t0 + 5s; at <= t0 + 20s; at += 5s) EXPECT_EQ(redials.due(at).size(), 1u);
+    int punched = 0;
+    for (auto at = t0 + 30s; at <= t0 + 30min; at += 30s) {  // a search round
+        if (redials.found(a, at) == Dial::Again) ++punched;
+        redials.forget_older_than(at - 10min);
+    }
+    EXPECT_EQ(punched, 59);  // every round from 30 s to 30 min
+    EXPECT_EQ(redials.size(), 1u);
 }
 
 // A peer found connected, whose link then goes, is dialed for anew however long
@@ -196,12 +254,12 @@ TEST(DhtDiscoveryTest, RedialsWhatItFindsForAWhile) {
 TEST(DhtDiscoveryTest, RedialsAPeerFoundConnectedOnceItsLinkIsGone) {
     using Dial = DhtDiscovery::Redials::Dial;
     using Clock = DhtDiscovery::Redials::Clock;
-    DhtDiscovery::Redials redials(5s, 20s);
+    DhtDiscovery::Redials redials(5s, 20s, 25s);
     const Address a("203.0.113.1", 4000);
     const Clock::time_point t0{};
 
     EXPECT_EQ(redials.found(a, t0), Dial::First);
-    EXPECT_EQ(redials.found(a, t0 + 30s), Dial::None);  // for long enough
+    EXPECT_EQ(redials.found(a, t0 + 3s), Dial::None);
     redials.connected(a);
     EXPECT_EQ(redials.found(a, t0 + 600s), Dial::First);
     EXPECT_EQ(redials.found(a, t0 + 605s), Dial::Again);
@@ -286,6 +344,159 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaDht) {
     a.stop();
 }
 
+// Keys given are the hashes, each once, in place of the discovery key; set as
+// the node runs, they replace those before.
+TEST(DhtDiscoveryTest, KeysGivenAreTheHashes) {
+    Node node(listening_config());
+    auto cfg = disc_config({});
+    cfg.keys = {"one", "two"};
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+    EXPECT_EQ(d->discovery_hashes(),
+              (std::vector<InfoHash>{DhtDiscovery::hash_for_key("one"), DhtDiscovery::hash_for_key("two")}));
+    EXPECT_EQ(d->discovery_hash(), DhtDiscovery::hash_for_key("one"));
+
+    ASSERT_TRUE(node.start());
+    d->set_keys({"three", "two", "three"});
+    EXPECT_EQ(d->discovery_hashes(),
+              (std::vector<InfoHash>{DhtDiscovery::hash_for_key("three"), DhtDiscovery::hash_for_key("two")}));
+    d->set_keys(std::vector<std::string>{});
+    EXPECT_TRUE(d->discovery_hashes().empty());
+    node.stop();
+}
+
+// A key set as the node runs is searched at once, not at the next round: two
+// nodes that have no key alike meet as soon as one seeks the other's — one
+// that only announces it, and seeks nobody — announced as its DHT came to
+// know a node, not lost to the bootstrap and left for a minute. (A third node,
+// the seed, keeps the announce: a node's own search never asks itself.)
+TEST(DhtDiscoveryTest, AKeySetAsItRunsIsSearchedAtOnce) {
+    Node seed(listening_config());
+    auto disc_seed = std::make_unique<DhtDiscovery>(disc_config({}));
+    DhtDiscovery* ds = disc_seed.get();
+    ds->set_keys(std::vector<std::string>{});
+    seed.add_subsystem(std::move(disc_seed));
+    ASSERT_TRUE(seed.start());
+    ASSERT_TRUE(wait_for([&] { return ds->dht_port() != 0; }, 5s));
+    const std::vector<HostEndpoint> bootstrap{HostEndpoint("127.0.0.1", ds->dht_port())};
+
+    Node a(listening_config());
+    auto cfg_a = disc_config(bootstrap);
+    cfg_a.search_interval = 60s;
+    cfg_a.announce_interval = 60s;
+    auto disc_a = std::make_unique<DhtDiscovery>(cfg_a);
+    disc_a->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Announce}});
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+
+    // b searches and announces once a minute: only a key new goes at once.
+    Node b(listening_config());
+    auto cfg_b = disc_config(bootstrap);
+    cfg_b.keys = {"elsewhere"};
+    cfg_b.search_interval = 60s;
+    cfg_b.announce_interval = 60s;
+    auto disc_b = std::make_unique<DhtDiscovery>(cfg_b);
+    DhtDiscovery* db = disc_b.get();
+    b.add_subsystem(std::move(disc_b));
+    ASSERT_TRUE(b.start());
+
+    std::this_thread::sleep_for(2s);
+    EXPECT_EQ(a.peer_count(), 0u);
+    EXPECT_EQ(b.peer_count(), 0u);
+
+    db->set_keys(std::vector<DhtDiscovery::Key>{{"elsewhere"}, {"meet-here", DhtDiscovery::Use::Search}});
+    EXPECT_TRUE(wait_for([&] { return a.peer_count() >= 1 && b.peer_count() >= 1; }, 20s))
+        << "a=" << a.peer_count() << " b=" << b.peer_count();
+
+    b.stop();
+    a.stop();
+    seed.stop();
+}
+
+// A key announced alone seeks nobody: what its announces hand back (an announce
+// is a search first) is not dialed. Put to search as well, the same key is.
+TEST(DhtDiscoveryTest, AKeyAnnouncedAloneDialsNobody) {
+    SilentPort mapped;
+    // The seed keeps both announces: a node's own search never asks itself.
+    Node seed(listening_config());
+    auto disc_seed = std::make_unique<DhtDiscovery>(disc_config({}));
+    DhtDiscovery* ds = disc_seed.get();
+    ds->set_keys(std::vector<std::string>{});
+    seed.add_subsystem(std::move(disc_seed));
+    ASSERT_TRUE(seed.start());
+    ASSERT_TRUE(wait_for([&] { return ds->dht_port() != 0; }, 5s));
+    const std::vector<HostEndpoint> bootstrap{HostEndpoint("127.0.0.1", ds->dht_port())};
+
+    // b announces the port the router forwards to it, where nothing answers.
+    Node b(listening_config());
+    b.add_subsystem(std::make_unique<FakePortMapping>(mapped.port()));
+    auto disc_b = std::make_unique<DhtDiscovery>(disc_config(bootstrap));
+    disc_b->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Announce}});
+    b.add_subsystem(std::move(disc_b));
+    ASSERT_TRUE(b.start());
+    std::this_thread::sleep_for(2s);
+
+    // a announces the same key every second — each announce a lookup that
+    // hands b's port back — and dials none of it.
+    Node a(listening_config());
+    auto disc_a = std::make_unique<DhtDiscovery>(disc_config(bootstrap));
+    DhtDiscovery* da = disc_a.get();
+    da->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Announce}});
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    std::this_thread::sleep_for(5s);
+    EXPECT_EQ(mapped.initials(), 0) << "a key announced alone dialed what it found";
+
+    // The same key searched too: b's port is found, and dialed.
+    da->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Both}});
+    EXPECT_TRUE(wait_for([&] { return mapped.initials() > 0; }, 15s));
+
+    a.stop();
+    b.stop();
+    seed.stop();
+}
+
+// An announce made while the node's DHT knows no node goes nowhere: it waits
+// until the DHT knows one, not until the next announce a minute on.
+TEST(DhtDiscoveryTest, AnAnnounceWaitsForTheDhtToKnowANode) {
+    // a knows no node (nothing answers where it bootstraps) until b asks it.
+    Node a(listening_config());
+    auto cfg_a = disc_config({HostEndpoint("127.0.0.1", 9)});
+    cfg_a.search_interval = 60s;
+    cfg_a.announce_interval = 60s;
+    auto disc_a = std::make_unique<DhtDiscovery>(cfg_a);
+    DhtDiscovery* da = disc_a.get();
+    da->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Announce}});
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return da->dht_port() != 0; }, 5s));
+    std::this_thread::sleep_for(1s);
+
+    // b keeps what a announces once a knows it; c asks b.
+    Node b(listening_config());
+    auto disc_b = std::make_unique<DhtDiscovery>(disc_config({HostEndpoint("127.0.0.1", da->dht_port())}));
+    DhtDiscovery* db = disc_b.get();
+    db->set_keys(std::vector<std::string>{});
+    b.add_subsystem(std::move(disc_b));
+    ASSERT_TRUE(b.start());
+    ASSERT_TRUE(wait_for([&] { return db->dht_port() != 0; }, 5s));
+    std::this_thread::sleep_for(2s);
+
+    Node c(listening_config());
+    auto disc_c = std::make_unique<DhtDiscovery>(disc_config({HostEndpoint("127.0.0.1", db->dht_port())}));
+    disc_c->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Search}});
+    c.add_subsystem(std::move(disc_c));
+    ASSERT_TRUE(c.start());
+
+    EXPECT_TRUE(wait_for([&] { return a.peer_count() >= 1 && c.peer_count() >= 1; }, 20s))
+        << "a=" << a.peer_count() << " c=" << c.peer_count();
+
+    c.stop();
+    b.stop();
+    a.stop();
+}
+
 // A port the router forwards to the node's is the one announced: whoever finds
 // the node dials that.
 TEST(DhtDiscoveryTest, AnnouncesThePortTheRouterForwards) {
@@ -351,6 +562,43 @@ TEST(DhtDiscoveryTest, AnnouncesThePortStunSeesTheSharedSocketAt) {
     stun.stop();
 }
 
+// A node's own addresses — this host's, where STUN sees it, the router's — at
+// a port of its own are told from others': a key it announces and searches
+// hands them back, and they are not dialed. Another node on this host listens
+// at another port, and another host at the same port is another's.
+TEST(DhtDiscoveryTest, ItsOwnAddressesAreToldFromOthers) {
+    FixedStunServer stun("9.9.9.9", 41234);
+    ASSERT_TRUE(stun.start());
+
+    Node a(listening_config());
+    a.add_subsystem(std::make_unique<FakePortMapping>(40001));  // the router's 1.2.3.4:40001
+    auto cfg = disc_config({});
+    cfg.discover_external_ip = true;
+    cfg.stun_servers = {HostEndpoint("127.0.0.1", stun.port())};
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    a.add_subsystem(std::move(disc));
+    ASSERT_TRUE(a.start());
+    const uint16_t listen = a.listen_port();
+    const IpAddress loopback = *IpAddress::parse("127.0.0.1");
+
+    EXPECT_TRUE(d->is_own(Address{loopback, listen}));
+    EXPECT_TRUE(d->is_own(Address{*IpAddress::parse("::1"), listen}));
+    EXPECT_TRUE(d->is_own(Address{*IpAddress::parse("1.2.3.4"), 40001}));
+    EXPECT_TRUE(wait_for([&] { return d->is_own(Address{*IpAddress::parse("9.9.9.9"), 41234}); }, 10s))
+        << "where STUN sees the shared socket";
+
+    EXPECT_FALSE(d->is_own(Address{loopback, static_cast<uint16_t>(listen + 1)})) << "another node here";
+    if (listen != 41234 && listen != 40001)
+        EXPECT_FALSE(d->is_own(Address{*IpAddress::parse("9.9.9.9"), listen}))
+            << "another device behind the same NAT, at our listen port";
+    EXPECT_FALSE(d->is_own(Address{*IpAddress::parse("5.6.7.8"), listen})) << "another host";
+    EXPECT_FALSE(d->is_own(Address{*IpAddress::parse("1.2.3.4"), 40002}));
+
+    a.stop();
+    stun.stop();
+}
+
 // A peer found and not reached is dialed again as found again: a punch, dense
 // probes, which two nodes behind NATs get through on once their dials cross.
 TEST(DhtDiscoveryTest, PunchesAPeerFoundAndNotReached) {
@@ -376,6 +624,55 @@ TEST(DhtDiscoveryTest, PunchesAPeerFoundAndNotReached) {
 
     b.stop();
     a.stop();
+}
+
+// A peer found once — the next search a minute on — is punched all the same,
+// every redial_every in its first stretch: two behind NATs that punched only
+// as they found each other again (once a round) might never overlap.
+TEST(DhtDiscoveryTest, PunchesAPeerFoundOnceOnItsOwnTime) {
+    SilentPort mapped;
+    // The seed keeps b's announce: a node's own search never asks itself.
+    Node seed(listening_config());
+    auto disc_seed = std::make_unique<DhtDiscovery>(disc_config({}));
+    DhtDiscovery* ds = disc_seed.get();
+    ds->set_keys(std::vector<std::string>{});
+    seed.add_subsystem(std::move(disc_seed));
+    ASSERT_TRUE(seed.start());
+    ASSERT_TRUE(wait_for([&] { return ds->dht_port() != 0; }, 5s));
+    const std::vector<HostEndpoint> bootstrap{HostEndpoint("127.0.0.1", ds->dht_port())};
+
+    // b announces the port the router forwards to it, where nothing answers.
+    Node b(listening_config());
+    b.add_subsystem(std::make_unique<FakePortMapping>(mapped.port()));
+    auto cfg_b = disc_config(bootstrap);
+    cfg_b.search_interval = 60s;
+    cfg_b.announce_interval = 60s;
+    auto disc_b = std::make_unique<DhtDiscovery>(cfg_b);
+    disc_b->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Announce}});
+    b.add_subsystem(std::move(disc_b));
+    ASSERT_TRUE(b.start());
+    std::this_thread::sleep_for(2s);
+
+    // c searches once, finds b's port, and is not handed it again for a minute.
+    Node c(listening_config());
+    auto cfg_c = disc_config(bootstrap);
+    cfg_c.search_interval = 60s;
+    cfg_c.announce_interval = 60s;
+    cfg_c.redial_every = 2s;
+    cfg_c.redial_for = 20s;
+    auto disc_c = std::make_unique<DhtDiscovery>(cfg_c);
+    disc_c->set_keys(std::vector<DhtDiscovery::Key>{{"meet-here", DhtDiscovery::Use::Search}});
+    c.add_subsystem(std::move(disc_c));
+    ASSERT_TRUE(c.start());
+
+    // The first dial's three Initials, then three punches of eight — where
+    // finding it alone gave one punch at most.
+    EXPECT_TRUE(wait_for([&] { return mapped.initials() >= 3 + 3 * 8; }, 15s))
+        << mapped.initials() << " Initials";
+
+    c.stop();
+    b.stop();
+    seed.stop();
 }
 
 // Dual-stack: the subsystem brings up BOTH a v4 and a v6 Kademlia network, each on
