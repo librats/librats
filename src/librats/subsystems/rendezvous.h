@@ -27,8 +27,21 @@
  * circuit through the server (Relay's Serving puts it first), up in a round
  * trip, over which Relay has HolePunch try again, a direct link taking the
  * circuit's place unseen if one does. Without a Relay, HolePunchService.
- * A registration lasts while its connection does; registering again, every
+ * A registration lasts while its connection does, or until the peer takes it
+ * back (Unregister: a key left out of set_keys()); registering again, every
  * `refresh`, is answered again, so a peer not reached is tried again.
+ *
+ * A key may be watched instead (`Config::watched`, set_watched()): to know
+ * whether anyone is there — a friend online — without meeting them, which a
+ * registration would (and be met by every device under each of a hundred
+ * keys). A watcher gives each server its whole list (Watch, replacing the
+ * last) and is answered with how many are registered under each, itself not
+ * counted (Watched); then told again of a key whenever that changes — a peer
+ * registers, takes it back or is gone. No address, no introduction: whom it
+ * meets it dials as it chooses (registering under the key, as a friend rung
+ * is). Of several servers, a key's count is the most any of them tells; a
+ * server lost counts no longer (on_watched() then says so). Servers that know
+ * each other do not share watches: a key is watched where it is registered.
  *
  * A peer that moves — another network, a VPN switched on, a NAT that gave it
  * another port — keeps its connection to the server, which follows it there
@@ -75,6 +88,9 @@
  *                                                              server → peer
  *     op=3 Moved    as Peers: dial them even if connected      server → peer
  *     op=4 Servers  [u8 count] × { [u8 ip_len][ip][u16 port] }  server → peer
+ *     op=5 Watch    [u16 count] × [32B key]: the whole list      peer → server
+ *     op=6 Watched  [u16 count] × { [32B key][u16 registered] } server → peer
+ *     op=7 Unregister [32B key]                                peer → server
  * The first endpoint of each in Peers is where the server sees its UDP packets
  * come from; the others are what it identified itself with (its listen port at
  * the address seen, and the ones it advertised: another on the same network
@@ -83,7 +99,10 @@
  * Trust: a server's word on where a peer is, is acted on with a few dense dials,
  * the exposure PeerExchange and HolePunch already accept, and only from a peer
  * that said Hello. A server bounds what it keeps: keys per peer, peers per key,
- * keys in all, and registrations per peer per second.
+ * keys in all, watches per peer, watchers per key, watches in all, and
+ * requests (registrations, watches) per peer per second. A server of an older
+ * version ignores Watch and Unregister: nothing is watched there, and what is
+ * registered stays so until the link ends, as it did.
  *
  * Threading: handlers run on reactor threads; one worker thread dials servers,
  * registers again and hands unreached peers on. All state is behind one mutex,
@@ -132,6 +151,9 @@ public:
         /// The keys this node is met under, registered with every server;
         /// set_keys() changes them as it runs.
         std::vector<std::string> keys;
+        /// The keys watched at every server, kWatchesAtMost of them at most;
+        /// set_watched() changes them as it runs.
+        std::vector<std::string> watched;
         /// How often each key is registered again: the others not reached are
         /// told of anew, and tried again.
         std::chrono::milliseconds refresh{30000};
@@ -158,14 +180,25 @@ public:
         /// same, but kept nowhere, so nobody else is told of it.
         size_t max_peers_per_key = 64;
         size_t max_keys = 4096;
-        /// Registrations one peer may make per window.
-        size_t                    request_budget = 8;
+        /// Keys one peer watches (past them, the rest of its list is not),
+        /// watchers of one key, and watches over every peer.
+        size_t max_watches_per_peer = 512;
+        size_t max_watchers_per_key = 256;
+        size_t max_watches = 65536;
+        /// Registrations one peer may make per window: all its keys at once,
+        /// twice (one that becomes another person's takes back as many as it
+        /// registers). Taking back costs nothing.
+        size_t                    request_budget = 32;
+        /// Watches (each a whole list) one peer may send per window.
+        size_t                    watch_budget = 4;
         std::chrono::milliseconds request_window{1000};
     };
 
     /// What a key is registered as: a SHA-256 of it.
     using Key = std::array<uint8_t, 32>;
     static Key key_of(const std::string& key);
+    /// The most keys one Watch names: a longer list is watched in part.
+    static constexpr size_t kWatchesAtMost = 512;
 
     /// The `count` of `candidates` that `key` meets at: those ranking first by
     /// a hash of the key and each one's IP, best first; of two at one IP, the
@@ -183,10 +216,20 @@ public:
 
     /// The keys this node is met under from now on, in place of Config::keys
     /// or the last given: one new registered with every server at once, one
-    /// left out no longer registered again — a server keeps it until this
-    /// node's link to it ends, as there is no unregistering. Servers chosen
-    /// of Config::candidates stay those of the keys at the start. Any thread.
+    /// left out taken back (Unregister). Servers chosen of Config::candidates
+    /// stay those of the keys at the start. Any thread.
     void set_keys(const std::vector<std::string>& keys);
+
+    /// The keys watched from now on, in place of Config::watched or the last
+    /// given, told to every server at once if they differ. A key no longer
+    /// watched is no longer told of. Any thread.
+    void set_watched(const std::vector<std::string>& keys);
+    /// How many are registered under a watched key now, as told: the most of
+    /// any server's count; 0 for one not told of, or not watched.
+    size_t registered(const std::string& key) const;
+    /// That count of a watched key changed: a server told so, or the one that
+    /// told it was lost. Runs on a reactor thread; register before start().
+    void on_watched(std::function<void(const std::string& key, size_t registered)> handler);
 
     /// The servers connected now: peers that said Hello, or connected at an
     /// address of Config::servers.
@@ -207,6 +250,8 @@ public:
     // — diagnostics and tests —
     /// Registrations this node keeps as a server, over every key.
     size_t registrations() const;
+    /// Watches this node keeps as a server, over every key.
+    size_t watches() const;
     /// Peers told of by servers and handed on, unreached, to a relay or a punch.
     uint64_t handed_on() const noexcept { return handed_on_.load(); }
 
@@ -229,6 +274,16 @@ private:
         std::chrono::steady_clock::time_point window_started{};
         size_t                                spent = 0;
     };
+    /// Client: a key watched, and as given.
+    struct Watch {
+        Key         key;
+        std::string name;
+    };
+    /// Server: what each watcher is to be told, key by key: how many others
+    /// are registered there.
+    using Tell = std::unordered_map<PeerId, std::vector<std::pair<Key, size_t>>, PeerId::Hash>;
+    /// Client: watched keys whose count changed, as given, and the count now.
+    using Changes = std::vector<std::pair<std::string, size_t>>;
 
     // — reactor threads —
     void handle(const Peer& from, ByteView payload);
@@ -240,6 +295,21 @@ private:
     void on_hello(const PeerId& server);
     /// Server: `peer` registered `key`.
     void on_register(const PeerId& peer, const Key& key);
+    /// Server: `peer` took `key` back.
+    void on_unregister(const PeerId& peer, const Key& key);
+    /// Server: `peer` watches what `body` names, in place of what it did.
+    void on_watch(const PeerId& peer, ByteView body);
+    /// Client: a server told how many are under keys watched.
+    void on_watched_told(const PeerId& server, ByteView body);
+    /// Server, under mutex_: what `key`'s watchers are to be told now.
+    void tell_watchers(const Key& key, Tell& tell) const;
+    /// Server: a Watched message to each, after the lock.
+    void send_told(const Tell& tell);
+    /// Client, under mutex_: `key`'s count, the most any server tells, noted
+    /// in `changes` if it is not what it was.
+    void recount(const Key& key, Changes& changes);
+    /// Client: the handlers told, after the lock.
+    void run_watched(const Changes& changes);
     /// Client: a server told of the other servers.
     void on_servers_told(const PeerId& server, ByteView body);
     /// Client: a server told of peers; dial them — `moved`: connected or not.
@@ -249,12 +319,18 @@ private:
     /// Client: a path sample of `peer`'s link; one gone dead — a peer's or a
     /// server's — has the servers spoken to.
     void on_path(const PeerId& peer, const PathStats& path);
-    /// Server: whether `peer` may make another request now (Budget).
+    /// Server: whether `peer` may make another request now (Budget): a
+    /// registration, or a watch.
     bool spend(const PeerId& peer);
+    bool spend_watch(const PeerId& peer);
 
     // — outgoing —
     void register_keys(const PeerId& server);
     void register_keys(const PeerId& server, const std::vector<Key>& keys);
+    void unregister_keys(const PeerId& server, const std::vector<Key>& keys);
+    /// Client: give `server` the list watched (none: nothing, unless
+    /// `even_none` — a list emptied is told).
+    void send_watch(const PeerId& server, bool even_none = false);
     /// Server: tell `peer` of the other servers, if any came since it was last
     /// told.
     void tell_servers(const PeerId& peer);
@@ -289,6 +365,14 @@ private:
     std::unordered_set<PeerId, PeerId::Hash>             at_servers_;  ///< at a server address
     std::vector<std::function<void(const PeerId&)>>      found_handlers_;
     std::vector<std::function<void(const PeerId&, const std::vector<Address>&)>> servers_handlers_;
+    std::vector<std::function<void(const std::string&, size_t)>> watched_handlers_;
+    std::vector<Watch>                                   watched_;  ///< config_.watched, or set_watched()'s
+    /// Changed since the last refresh: told again then, in case a server's
+    /// budget dropped what was sent.
+    bool                                                 watched_changed_ = false;
+    /// Each server's counts of keys watched, as it told them.
+    std::unordered_map<PeerId, std::map<Key, size_t>, PeerId::Hash> counts_;
+    std::map<Key, size_t>                                seen_;  ///< the most of counts_, not 0
     std::unordered_map<PeerId, Unreached, PeerId::Hash>  unreached_;
     std::chrono::steady_clock::time_point                refresh_at_{};
     std::chrono::steady_clock::time_point                spoken_at_{};  ///< on a dead link
@@ -296,6 +380,10 @@ private:
     std::map<Key, Registered>                                        registered_;
     std::unordered_map<PeerId, std::vector<Key>, PeerId::Hash>       keys_of_;
     std::unordered_map<PeerId, Budget, PeerId::Hash>                 budgets_;
+    std::unordered_map<PeerId, Budget, PeerId::Hash>                 watch_budgets_;
+    std::map<Key, std::unordered_set<PeerId, PeerId::Hash>>          watchers_;
+    std::unordered_map<PeerId, std::vector<Key>, PeerId::Hash>       watches_of_;
+    size_t                                                           watch_count_ = 0;
     uint64_t                                                         servers_came_ = 0;  ///< Hellos heard
     std::unordered_map<PeerId, uint64_t, PeerId::Hash>               servers_told_;  ///< servers_came_ as told
 };

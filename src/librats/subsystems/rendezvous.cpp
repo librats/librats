@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace librats {
 
@@ -24,6 +25,9 @@ constexpr uint8_t kOpRegister = 1;
 constexpr uint8_t kOpPeers    = 2;
 constexpr uint8_t kOpMoved    = 3;
 constexpr uint8_t kOpServers  = 4;
+constexpr uint8_t kOpWatch    = 5;
+constexpr uint8_t kOpWatched  = 6;
+constexpr uint8_t kOpUnregister = 7;
 
 /// Peers one Peers message names, and endpoints each: a cap on what one
 /// server's word makes this node dial.
@@ -32,9 +36,10 @@ constexpr size_t kMaxEndpoints       = 4;
 /// Servers one Servers message names.
 constexpr size_t kMaxServersPerMessage = 64;
 
-/// The longest honest message: a full Peers.
+/// The longest honest message: a full Peers, or a full Watched.
 constexpr size_t kMaxMessageSize =
-    3 + kMaxPeersPerMessage * (PeerId::kSize + 1 + kMaxEndpoints * (1 + 16 + 2));
+    (std::max)(3 + kMaxPeersPerMessage * (PeerId::kSize + 1 + kMaxEndpoints * (1 + 16 + 2)),
+               4 + Rendezvous::kWatchesAtMost * (std::tuple_size_v<Rendezvous::Key> + 2));
 
 /// How often the worker looks at what is due, at most this far apart.
 constexpr auto kTick = std::chrono::milliseconds(250);
@@ -148,6 +153,13 @@ Rendezvous::Rendezvous() : Rendezvous(Config()) {}
 
 Rendezvous::Rendezvous(Config config) : config_(std::move(config)) {
     for (const std::string& key : config_.keys) keys_.push_back(key_of(key));
+    for (const std::string& key : config_.watched) {
+        const Key hashed = key_of(key);
+        if (watched_.size() < kWatchesAtMost &&
+            std::none_of(watched_.begin(), watched_.end(),
+                         [&](const Watch& w) { return w.key == hashed; }))
+            watched_.push_back({hashed, key});
+    }
     for (const HostEndpoint& at : config_.servers)
         server_dials_.push_back(ServerDial{at, std::nullopt, {}, config_.redial});
 }
@@ -196,7 +208,13 @@ void Rendezvous::stop() {
     registered_.clear();
     keys_of_.clear();
     budgets_.clear();
+    watch_budgets_.clear();
     servers_told_.clear();
+    watchers_.clear();
+    watches_of_.clear();
+    watch_count_ = 0;
+    counts_.clear();
+    seen_.clear();
 }
 
 std::vector<PeerId> Rendezvous::servers() const {
@@ -228,6 +246,22 @@ size_t Rendezvous::registrations() const {
     return n;
 }
 
+size_t Rendezvous::watches() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return watch_count_;
+}
+
+size_t Rendezvous::registered(const std::string& key) const {
+    const Key hashed = key_of(key);
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = seen_.find(hashed);
+    return it == seen_.end() ? 0 : it->second;
+}
+
+void Rendezvous::on_watched(std::function<void(const std::string&, size_t)> handler) {
+    watched_handlers_.push_back(std::move(handler));
+}
+
 // ── Inbound ─────────────────────────────────────────────────────────────────
 
 void Rendezvous::handle(const Peer& from, ByteView payload) {
@@ -245,6 +279,19 @@ void Rendezvous::handle(const Peer& from, ByteView payload) {
             on_register(from.id(), key);
             break;
         }
+        case kOpUnregister: {
+            if (!config_.serve || body.size() != std::tuple_size_v<Key>) return;
+            Key key;
+            std::memcpy(key.data(), body.data(), key.size());
+            on_unregister(from.id(), key);
+            break;
+        }
+        case kOpWatch:
+            if (config_.serve) on_watch(from.id(), body);
+            break;
+        case kOpWatched:
+            on_watched_told(from.id(), body);
+            break;
         case kOpPeers:
             on_peers(from.id(), body, /*moved=*/false);
             break;
@@ -297,40 +344,77 @@ void Rendezvous::on_servers(
 }
 
 void Rendezvous::on_disconnected(const PeerId& peer) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    servers_.erase(peer);
-    at_servers_.erase(peer);
-    budgets_.erase(peer);
-    servers_told_.erase(peer);
-    const auto keys = keys_of_.find(peer);
-    if (keys == keys_of_.end()) return;
-    for (const Key& key : keys->second) {
-        const auto it = registered_.find(key);
-        if (it == registered_.end()) continue;
-        it->second.peers.erase(peer);
-        if (it->second.peers.empty()) registered_.erase(it);
+    Tell tell;
+    Changes changes;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        servers_.erase(peer);
+        at_servers_.erase(peer);
+        budgets_.erase(peer);
+        watch_budgets_.erase(peer);
+        servers_told_.erase(peer);
+        // A server lost: what it told counts no longer.
+        if (const auto counts = counts_.find(peer); counts != counts_.end()) {
+            const std::map<Key, size_t> told = std::move(counts->second);
+            counts_.erase(counts);
+            for (const auto& [key, n] : told) recount(key, changes);
+        }
+        if (const auto watches = watches_of_.find(peer); watches != watches_of_.end()) {
+            for (const Key& key : watches->second) {
+                const auto it = watchers_.find(key);
+                if (it == watchers_.end()) continue;
+                it->second.erase(peer);
+                if (it->second.empty()) watchers_.erase(it);
+            }
+            watch_count_ -= watches->second.size();
+            watches_of_.erase(watches);
+        }
+        if (const auto keys = keys_of_.find(peer); keys != keys_of_.end()) {
+            for (const Key& key : keys->second) {
+                const auto it = registered_.find(key);
+                if (it == registered_.end()) continue;
+                it->second.peers.erase(peer);
+                if (it->second.peers.empty()) registered_.erase(it);
+                tell_watchers(key, tell);
+            }
+            keys_of_.erase(keys);
+        }
     }
-    keys_of_.erase(keys);
+    send_told(tell);
+    run_watched(changes);
 }
 
 void Rendezvous::on_hello(const PeerId& server) {
     bool found = false;
+    bool again = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!servers_.insert(server).second) return;
-        ++servers_came_;
-        found = at_servers_.count(server) == 0;
+        if (servers_.insert(server).second) {
+            ++servers_came_;
+            found = at_servers_.count(server) == 0;
+        } else {
+            again = true;
+        }
     }
     if (found)
         for (const auto& handler : found_handlers_) handler(server);
     size_t keys = 0;
+    size_t watched = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         keys = keys_.size();
+        watched = watched_.size();
     }
-    LOG_INFO("rendezvous", "Server " << server.short_hex() << " is up; registering "
-             << keys << " key(s)");
+    // Said again when a link to the server lost a race to another (rerouted):
+    // what went on the one lost may be lost with it.
+    if (again) {
+        LOG_DEBUG("rendezvous", "Server " << server.short_hex() << " said Hello again");
+    } else {
+        LOG_INFO("rendezvous", "Server " << server.short_hex() << " is up; registering "
+                 << keys << " key(s), watching " << watched);
+    }
     register_keys(server);
+    send_watch(server);
 }
 
 void Rendezvous::register_keys(const PeerId& server) {
@@ -350,37 +434,121 @@ void Rendezvous::register_keys(const PeerId& server, const std::vector<Key>& key
     }
 }
 
+void Rendezvous::unregister_keys(const PeerId& server, const std::vector<Key>& keys) {
+    for (const Key& key : keys) {
+        Bytes message{kVersion, kOpUnregister};
+        message.insert(message.end(), key.begin(), key.end());
+        network_->send(server, MessageType::Rendezvous, ByteView(message));
+    }
+}
+
 void Rendezvous::set_keys(const std::vector<std::string>& keys) {
     std::vector<Key> hashed;
     for (const std::string& key : keys) hashed.push_back(key_of(key));
-    std::vector<Key> added;
+    std::vector<Key> added, removed;
     std::vector<PeerId> servers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Key& key : hashed)
             if (std::find(keys_.begin(), keys_.end(), key) == keys_.end()) added.push_back(key);
+        for (const Key& key : keys_)
+            if (std::find(hashed.begin(), hashed.end(), key) == hashed.end()) removed.push_back(key);
         keys_ = std::move(hashed);
         if (running_.load()) servers.assign(servers_.begin(), servers_.end());
     }
-    if (added.empty()) return;
-    LOG_DEBUG("rendezvous", "Registering " << added.size() << " new key(s) with "
-              << servers.size() << " server(s)");
-    for (const PeerId& server : servers) register_keys(server, added);
+    if (added.empty() && removed.empty()) return;
+    LOG_DEBUG("rendezvous", "Registering " << added.size() << " new key(s), taking back "
+              << removed.size() << ", with " << servers.size() << " server(s)");
+    for (const PeerId& server : servers) {
+        unregister_keys(server, removed);
+        register_keys(server, added);
+    }
 }
 
-bool Rendezvous::spend(const PeerId& peer) {
+void Rendezvous::set_watched(const std::vector<std::string>& keys) {
+    std::vector<Watch> watched;
+    for (const std::string& key : keys) {
+        const Key hashed = key_of(key);
+        if (watched.size() < kWatchesAtMost &&
+            std::none_of(watched.begin(), watched.end(),
+                         [&](const Watch& w) { return w.key == hashed; }))
+            watched.push_back({hashed, key});
+    }
+    if (watched.size() < keys.size())
+        LOG_DEBUG("rendezvous", "Watching " << watched.size() << " of " << keys.size() << " key(s)");
+    std::vector<PeerId> servers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool same = watched.size() == watched_.size() &&
+                          std::equal(watched.begin(), watched.end(), watched_.begin(),
+                                     [](const Watch& a, const Watch& b) { return a.key == b.key; });
+        if (same) return;
+        // One no longer watched is no longer told of.
+        for (auto it = seen_.begin(); it != seen_.end();) {
+            const Key& key = it->first;
+            if (std::none_of(watched.begin(), watched.end(), [&](const Watch& w) { return w.key == key; }))
+                it = seen_.erase(it);
+            else
+                ++it;
+        }
+        for (auto& [server, counts] : counts_)
+            for (auto it = counts.begin(); it != counts.end();) {
+                const Key& key = it->first;
+                if (std::none_of(watched.begin(), watched.end(), [&](const Watch& w) { return w.key == key; }))
+                    it = counts.erase(it);
+                else
+                    ++it;
+            }
+        watched_ = std::move(watched);
+        watched_changed_ = true;
+        if (running_.load()) servers.assign(servers_.begin(), servers_.end());
+    }
+    for (const PeerId& server : servers) send_watch(server, /*even_none=*/true);
+}
+
+void Rendezvous::send_watch(const PeerId& server, bool even_none) {
+    Bytes message{kVersion, kOpWatch, 0, 0};
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const Watch& w : watched_) {
+            message.insert(message.end(), w.key.begin(), w.key.end());
+            ++count;
+        }
+    }
+    if (count == 0 && !even_none) return;
+    message[2] = static_cast<uint8_t>(count >> 8);
+    message[3] = static_cast<uint8_t>(count);
+    network_->send(server, MessageType::Rendezvous, ByteView(message));
+}
+
+namespace {
+
+/// Whether one more fits in `budget`'s window (a Rendezvous::Budget).
+template <typename Budget>
+bool spend_of(Budget& budget, size_t most, std::chrono::milliseconds window) {
     const auto now = Clock::now();
-    Budget& budget = budgets_[peer];
-    if (now - budget.window_started > config_.request_window) {
+    if (now - budget.window_started > window) {
         budget.window_started = now;
         budget.spent = 0;
     }
-    return ++budget.spent <= config_.request_budget;
+    return ++budget.spent <= most;
+}
+
+} // namespace
+
+bool Rendezvous::spend(const PeerId& peer) {
+    return spend_of(budgets_[peer], config_.request_budget, config_.request_window);
+}
+
+bool Rendezvous::spend_watch(const PeerId& peer) {
+    return spend_of(watch_budgets_[peer], config_.watch_budget, config_.request_window);
 }
 
 void Rendezvous::on_register(const PeerId& peer, const Key& key) {
     std::vector<PeerId> others;
     bool kept = false;
+    Tell tell;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!spend(peer)) return;
@@ -404,7 +572,9 @@ void Rendezvous::on_register(const PeerId& peer, const Key& key) {
             }
         }
         if (keys.empty()) keys_of_.erase(peer);
+        if (kept) tell_watchers(key, tell);
     }
+    send_told(tell);
     tell_servers(peer);
     if (others.empty() && !kept) return;
 
@@ -421,6 +591,163 @@ void Rendezvous::on_register(const PeerId& peer, const Key& key) {
     }
     LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " registered, meeting "
               << others.size() << " other(s)");
+}
+
+void Rendezvous::on_unregister(const PeerId& peer, const Key& key) {
+    Tell tell;
+    {
+        // Free: it only lessens what is kept, and what it tells watchers a
+        // registration (spent) told before.
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto keys = keys_of_.find(peer);
+        if (keys == keys_of_.end()) return;
+        const auto at = std::find(keys->second.begin(), keys->second.end(), key);
+        if (at == keys->second.end()) return;
+        keys->second.erase(at);
+        if (keys->second.empty()) keys_of_.erase(keys);
+        if (const auto it = registered_.find(key); it != registered_.end()) {
+            it->second.peers.erase(peer);
+            if (it->second.peers.empty()) registered_.erase(it);
+        }
+        tell_watchers(key, tell);
+    }
+    send_told(tell);
+    LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " took a key back");
+}
+
+void Rendezvous::on_watch(const PeerId& peer, ByteView body) {
+    Reader read(body);
+    const uint8_t* count_p = read.take(2);
+    if (!count_p) return;
+    const size_t count = (size_t(count_p[0]) << 8) | count_p[1];
+    if (count > kWatchesAtMost || read.n != count * std::tuple_size_v<Key>) return;
+    std::vector<std::pair<Key, size_t>> answer;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!spend_watch(peer)) return;
+        // In place of what it watched.
+        if (const auto old = watches_of_.find(peer); old != watches_of_.end()) {
+            for (const Key& key : old->second) {
+                const auto it = watchers_.find(key);
+                if (it == watchers_.end()) continue;
+                it->second.erase(peer);
+                if (it->second.empty()) watchers_.erase(it);
+            }
+            watch_count_ -= old->second.size();
+            watches_of_.erase(old);
+        }
+        std::vector<Key> kept;
+        for (size_t i = 0; i < count; ++i) {
+            Key key;
+            std::memcpy(key.data(), read.take(key.size()), key.size());
+            if (kept.size() >= config_.max_watches_per_peer || watch_count_ >= config_.max_watches)
+                break;
+            if (std::find(kept.begin(), kept.end(), key) != kept.end()) continue;
+            auto& watchers = watchers_[key];
+            if (watchers.size() >= config_.max_watchers_per_key) {
+                if (watchers.empty()) watchers_.erase(key);
+                continue;
+            }
+            watchers.insert(peer);
+            kept.push_back(key);
+            ++watch_count_;
+            const auto it = registered_.find(key);
+            const size_t n = it == registered_.end()
+                                 ? 0
+                                 : it->second.peers.size() - it->second.peers.count(peer);
+            answer.emplace_back(key, n);
+        }
+        if (!kept.empty()) watches_of_[peer] = std::move(kept);
+    }
+    // Every key kept answered, those none is under too: the watcher's counts
+    // are this server's from now on.
+    Tell tell;
+    tell[peer] = std::move(answer);
+    send_told(tell);
+    LOG_DEBUG("rendezvous", "Peer " << peer.short_hex() << " watches " << tell[peer].size()
+              << " key(s)");
+}
+
+void Rendezvous::tell_watchers(const Key& key, Tell& tell) const {
+    const auto watchers = watchers_.find(key);
+    if (watchers == watchers_.end()) return;
+    const auto it = registered_.find(key);
+    for (const PeerId& watcher : watchers->second) {
+        const size_t n =
+            it == registered_.end() ? 0 : it->second.peers.size() - it->second.peers.count(watcher);
+        auto& told = tell[watcher];
+        // Once per key: a later count in place of an earlier one.
+        const auto same = std::find_if(told.begin(), told.end(),
+                                       [&](const auto& t) { return t.first == key; });
+        if (same != told.end()) {
+            same->second = n;
+        } else {
+            told.emplace_back(key, n);
+        }
+    }
+}
+
+void Rendezvous::send_told(const Tell& tell) {
+    for (const auto& [watcher, told] : tell) {
+        Bytes message{kVersion, kOpWatched, 0, 0};
+        size_t count = 0;
+        for (const auto& [key, n] : told) {
+            if (count == kWatchesAtMost) break;  // never more: one per key watched
+            message.insert(message.end(), key.begin(), key.end());
+            put_u16(message, static_cast<uint16_t>((std::min)(n, size_t(0xFFFF))));
+            ++count;
+        }
+        message[2] = static_cast<uint8_t>(count >> 8);
+        message[3] = static_cast<uint8_t>(count);
+        network_->send(watcher, MessageType::Rendezvous, ByteView(message));
+    }
+}
+
+void Rendezvous::on_watched_told(const PeerId& server, ByteView body) {
+    if (!is_server(server)) return;
+    Reader read(body);
+    const uint8_t* count_p = read.take(2);
+    if (!count_p) return;
+    const size_t count = (size_t(count_p[0]) << 8) | count_p[1];
+    if (count > kWatchesAtMost || read.n != count * (std::tuple_size_v<Key> + 2)) return;
+    Changes changes;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_.load()) return;
+        for (size_t i = 0; i < count; ++i) {
+            Key key;
+            std::memcpy(key.data(), read.take(key.size()), key.size());
+            const uint8_t* n_p = read.take(2);
+            const size_t n = (size_t(n_p[0]) << 8) | n_p[1];
+            if (std::none_of(watched_.begin(), watched_.end(),
+                             [&](const Watch& w) { return w.key == key; }))
+                continue;  // no longer watched
+            counts_[server][key] = n;
+            recount(key, changes);
+        }
+    }
+    run_watched(changes);
+}
+
+void Rendezvous::recount(const Key& key, Changes& changes) {
+    size_t most = 0;
+    for (const auto& [server, counts] : counts_)
+        if (const auto it = counts.find(key); it != counts.end()) most = (std::max)(most, it->second);
+    const auto seen = seen_.find(key);
+    const size_t was = seen == seen_.end() ? 0 : seen->second;
+    if (most == was) return;
+    if (most == 0) {
+        seen_.erase(seen);
+    } else {
+        seen_[key] = most;
+    }
+    for (const Watch& w : watched_)
+        if (w.key == key) changes.emplace_back(w.name, most);
+}
+
+void Rendezvous::run_watched(const Changes& changes) {
+    for (const auto& [key, n] : changes)
+        for (const auto& handler : watched_handlers_) handler(key, n);
 }
 
 void Rendezvous::on_moved(const PeerId& peer) {
@@ -709,13 +1036,20 @@ void Rendezvous::hand_on_unreached(Clock::time_point now) {
 
 void Rendezvous::refresh(Clock::time_point now) {
     std::vector<PeerId> servers;
+    bool watch = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (now < refresh_at_) return;
         refresh_at_ = now + config_.refresh;
         servers.assign(servers_.begin(), servers_.end());
+        // A list changed since is told again: changed more often than a
+        // server's budget allows, the last may have been dropped.
+        watch = std::exchange(watched_changed_, false);
     }
-    for (const PeerId& server : servers) register_keys(server);
+    for (const PeerId& server : servers) {
+        register_keys(server);
+        if (watch) send_watch(server, /*even_none=*/true);
+    }
 }
 
 } // namespace librats

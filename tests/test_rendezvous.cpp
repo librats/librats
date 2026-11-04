@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -850,4 +851,250 @@ TEST(Rendezvous, NodesMeetAtTheServersTheyChoseOfThoseTheyKnow) {
     b.stop();
     a.stop();
     for (auto& server : servers) server->stop();
+}
+
+namespace {
+
+/// A node met at the server at `port` under no key, watching `watched`.
+Rendezvous::Config watching(const std::vector<std::string>& watched, uint16_t port) {
+    Rendezvous::Config c = meeting("", port);
+    c.keys.clear();
+    c.watched = watched;
+    return c;
+}
+
+/// What a Rendezvous's on_watched() said, key by key: the last count.
+class Watched {
+public:
+    explicit Watched(Rendezvous& rendezvous) {
+        rendezvous.on_watched([this](const std::string& key, size_t n) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_[key] = n;
+            ++times_;
+        });
+    }
+    std::optional<size_t> last(const std::string& key) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = last_.find(key);
+        if (it == last_.end()) return std::nullopt;
+        return it->second;
+    }
+    int times() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return times_;
+    }
+
+private:
+    mutable std::mutex            mutex_;
+    std::map<std::string, size_t> last_;
+    int                           times_ = 0;
+};
+
+} // namespace
+
+// A watcher is told as peers register under a key and as they are gone — how
+// many, and nothing more: it meets none of them.
+TEST(Rendezvous, AWatcherIsToldAsAKeyIsRegisteredAndAsItsPeersGo) {
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config());
+    auto* at_w = w.add_subsystem(std::make_unique<Rendezvous>(watching({"ann"}, port)));
+    Watched told(*at_w);
+    ASSERT_TRUE(w.start());
+    ASSERT_TRUE(wait_for([&] { return rendezvous->watches() == 1; }));
+    EXPECT_EQ(at_w->registered("ann"), 0u);
+
+    Node a(node_config()), b(node_config());
+    a.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    b.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    ASSERT_TRUE(a.start());
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+    EXPECT_EQ(told.last("ann"), std::optional<size_t>(1));
+    ASSERT_TRUE(b.start());
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 2; }));
+
+    b.stop();
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+    a.stop();
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 0; }));
+    EXPECT_EQ(told.last("ann"), std::optional<size_t>(0));
+    EXPECT_EQ(w.peer_count(), 1u) << "met those under the key watched";
+
+    w.stop();
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 0; }));
+    server.stop();
+}
+
+// A key left out of set_keys() is taken back at the server: its watchers are
+// told, and nobody is introduced under it any more.
+TEST(Rendezvous, AKeyLeftOutIsTakenBack) {
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config()), a(node_config()), c(node_config());
+    auto* at_w = w.add_subsystem(std::make_unique<Rendezvous>(watching({"ann"}, port)));
+    Rendezvous::Config both = meeting("ann", port);
+    both.keys = {"ann", "bob"};
+    both.refresh = 60s;
+    auto* at_a = a.add_subsystem(std::make_unique<Rendezvous>(both));
+    ASSERT_TRUE(w.start() && a.start());
+    ASSERT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+    ASSERT_EQ(rendezvous->registrations(), 2u);
+
+    at_a->set_keys({"bob"});
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 0; }));
+    EXPECT_TRUE(wait_for([&] { return rendezvous->registrations() == 1; }));
+    c.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    ASSERT_TRUE(c.start());
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+    std::this_thread::sleep_for(300ms);
+    EXPECT_FALSE(connected(c, a)) << "introduced under a key taken back";
+
+    c.stop();
+    a.stop();
+    w.stop();
+    server.stop();
+}
+
+// What is watched is replaced whole; one no longer watched is not told of, and
+// a watcher under the key itself is not counted.
+TEST(Rendezvous, WatchedKeysAreReplacedWholeAndTheWatcherIsNotCounted) {
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config()), a(node_config()), b(node_config());
+    Rendezvous::Config config = watching({"ann", "bob"}, port);
+    config.keys = {"ann"};
+    auto* at_w = w.add_subsystem(std::make_unique<Rendezvous>(config));
+    Watched told(*at_w);
+    ASSERT_TRUE(w.start());
+    ASSERT_TRUE(wait_for(
+        [&] { return rendezvous->watches() == 2 && rendezvous->registrations() == 1; }));
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(at_w->registered("ann"), 0u) << "counted itself";
+
+    a.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    ASSERT_TRUE(a.start());
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+
+    at_w->set_watched({"bob"});
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 1; }));
+    EXPECT_EQ(at_w->registered("ann"), 0u);
+    const int times = told.times();
+    a.stop();
+    b.add_subsystem(std::make_unique<Rendezvous>(meeting("bob", port)));
+    ASSERT_TRUE(b.start());
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("bob") == 1; }));
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(told.times(), times + 1) << "told of a key no longer watched";
+
+    at_w->set_watched({});
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 0; }));
+
+    b.stop();
+    w.stop();
+    server.stop();
+}
+
+// A server lost counts no longer: its watchers are told so.
+TEST(Rendezvous, AServerLostCountsNoLonger) {
+    Node server(node_config());
+    server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config()), a(node_config());
+    auto* at_w = w.add_subsystem(std::make_unique<Rendezvous>(watching({"ann"}, port)));
+    Watched told(*at_w);
+    a.add_subsystem(std::make_unique<Rendezvous>(meeting("ann", port)));
+    ASSERT_TRUE(w.start() && a.start());
+    ASSERT_TRUE(wait_for([&] { return at_w->registered("ann") == 1; }));
+
+    server.stop();
+    EXPECT_TRUE(wait_for([&] { return at_w->registered("ann") == 0; }));
+    EXPECT_EQ(told.last("ann"), std::optional<size_t>(0));
+    a.stop();
+    w.stop();
+}
+
+// A server keeps so many watches of a peer, and so many watchers of a key.
+TEST(Rendezvous, AServerKeepsSoManyWatches) {
+    Rendezvous::Config config = serving();
+    config.max_watches_per_peer = 2;
+    config.max_watchers_per_key = 1;
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(config));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config()), v(node_config());
+    w.add_subsystem(std::make_unique<Rendezvous>(watching({"ann", "bob", "cat"}, port)));
+    ASSERT_TRUE(w.start());
+    ASSERT_TRUE(wait_for([&] { return rendezvous->watches() == 2; }));
+    v.add_subsystem(std::make_unique<Rendezvous>(watching({"ann", "dan"}, port)));
+    ASSERT_TRUE(v.start());
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 3; })) << "dan alone of the second";
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(rendezvous->watches(), 3u);
+
+    v.stop();
+    w.stop();
+    server.stop();
+}
+
+// Malformed watches are dropped.
+TEST(Rendezvous, IgnoresMalformedWatches) {
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(serving()));
+    ASSERT_TRUE(server.start());
+    Node a(node_config());
+    ASSERT_TRUE(a.start());
+    a.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return a.peer_count() == 1; }));
+    const PeerId to = server.local_id();
+    const Rendezvous::Key key = Rendezvous::key_of("ann");
+    Bytes short_one{1, 5, 0, 2};  // says two, names one
+    short_one.insert(short_one.end(), key.begin(), key.end());
+    a.send(to, MessageType::Rendezvous, ByteView(short_one));
+    const Bytes too_many{1, 5, 0xFF, 0xFF};
+    a.send(to, MessageType::Rendezvous, ByteView(too_many));
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(rendezvous->watches(), 0u);
+    Bytes good{1, 5, 0, 1};
+    good.insert(good.end(), key.begin(), key.end());
+    a.send(to, MessageType::Rendezvous, ByteView(good));
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 1; }));
+    a.stop();
+    server.stop();
+}
+
+// A list watched changed faster than a server's budget allows is told again at
+// the refresh: the server ends up with the last.
+TEST(Rendezvous, AWatchPastTheBudgetIsToldAgain) {
+    Rendezvous::Config config = serving();
+    config.watch_budget = 1;
+    Node server(node_config());
+    auto* rendezvous = server.add_subsystem(std::make_unique<Rendezvous>(config));
+    ASSERT_TRUE(server.start());
+    const uint16_t port = server.listen_port();
+
+    Node w(node_config());
+    Rendezvous::Config watcher = watching({"ann"}, port);
+    watcher.refresh = 1500ms;  // past the server's window of a second
+    auto* at_w = w.add_subsystem(std::make_unique<Rendezvous>(watcher));
+    ASSERT_TRUE(w.start());
+    ASSERT_TRUE(wait_for([&] { return rendezvous->watches() == 1; }));
+    at_w->set_watched({"ann", "bob"});  // in the same window: dropped
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(rendezvous->watches(), 1u);
+    EXPECT_TRUE(wait_for([&] { return rendezvous->watches() == 2; }, 5s));
+    w.stop();
+    server.stop();
 }
