@@ -193,8 +193,11 @@ void UdpConnection::on_long(const LongPacket& p, size_t len, Clock::time_point n
 
         case LongType::Close:
             // Believed only while the handshake runs: afterwards a goodbye comes
-            // sealed, and an unsealed one is anyone's forgery.
-            if (phase_ != Phase::Handshaking) return;
+            // sealed, and an unsealed one is anyone's forgery. For a dialer that
+            // is until the responder shows it has its keys (confirmed_): until it
+            // gets our last message it has none to seal a goodbye with, and one
+            // that stops before then — a node going — can only say so unsealed.
+            if (phase_ != Phase::Handshaking && confirmed_) return;
             LOG_DEBUG("udp", "Handshake with " << remote_.to_string() << " refused (" << p.error << ")");
             die(CloseReason::PeerReset);
             return;

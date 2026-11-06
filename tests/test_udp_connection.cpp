@@ -761,6 +761,23 @@ TEST(UdpConnectionTest, ANodeStoppingSaysAnOrderlyGoodbyeAtOnce) {
     EXPECT_EQ(p.b.conn->close_reason(), CloseReason::PeerClosed) << "a leaving, not a failure";
 }
 
+// The dialer has its keys once it sends the third message, the responder only as it
+// gets it: one that stops before then can only say so unsealed — and is believed,
+// or the dialer would hold a link to nobody until its repeats ran out.
+TEST(UdpConnectionTest, AResponderStoppingBeforeItHasItsKeysEndsTheDialersLink) {
+    Pair p(true, 10ms);
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        return from == p.a.addr() && is_handshake(d, udp::LongType::Handshake);
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.established(); }));
+    ASSERT_TRUE(p.b.conn);
+    ASSERT_FALSE(p.b.established());
+    p.b.conn->close(CloseReason::ReactorShutdown, p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::PeerReset);
+}
+
 TEST(UdpConnectionTest, AStatelessResetEndsTheConnection) {
     Pair p(true);
     ASSERT_TRUE(p.connect());
