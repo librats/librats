@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "librats/dht/dht.h"
+#include "librats/dht/persistence.h"
 #include "librats/core/socket.h"
+#include "librats/util/fs.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -419,6 +421,35 @@ TEST_F(DhtTest, NodeIdPersistedAcrossRestart) {
         client2.load_routing_table();
         EXPECT_EQ(client2.get_node_id(), saved_id);
     }
+}
+
+// A node of a moment starts from another's warm set: the contacts of the table saved
+// in its seed directory, never that node's id, and nothing written there.
+TEST_F(DhtTest, SeedDirectoryGivesContactsButNotTheNodeId) {
+    const std::string seed_dir = "./test_dht_seed";
+    const std::string path = seed_dir + "/dht_routing.json";
+    NodeId theirs{};
+    theirs.fill(0x5a);
+    std::vector<dht::NodeEntry> contacts;
+    for (uint8_t i = 1; i <= 3; ++i) {
+        NodeId id{};
+        id.fill(i);
+        contacts.emplace_back(id, Address(*IpAddress::parse("10.0.0." + std::to_string(i)),
+                                          static_cast<uint16_t>(6900 + i)));
+        contacts.back().record_success(10);
+    }
+    create_directories(seed_dir.c_str());
+    ASSERT_TRUE(dht::save_routing_table(path, theirs, contacts));
+    const std::string saved = read_file_text_cpp(path);
+
+    DhtClient client(0, "127.0.0.1", "", AddressFamily::IPv4);
+    client.set_seed_directory(seed_dir);
+    ASSERT_TRUE(client.start());
+    EXPECT_EQ(client.get_routing_table_size(), 3u);
+    EXPECT_NE(client.get_node_id(), theirs) << "its id its own";
+    client.stop();
+    EXPECT_EQ(read_file_text_cpp(path), saved) << "nothing written in the seed's directory";
+    delete_file(path.c_str());
 }
 
 // Test data directory configuration

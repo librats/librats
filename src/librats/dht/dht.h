@@ -87,6 +87,11 @@ public:
     bool save_routing_table();
     bool load_routing_table();
     void set_data_directory(const std::string& directory);
+    /// Another node's data directory: start() takes the contacts of the
+    /// table saved there besides this one's own — never its node id, and
+    /// nothing is written there. A node of a moment (no data directory of its
+    /// own) so starts from the warm set of one that lasts.
+    void set_seed_directory(const std::string& directory);
 
 #ifdef RATS_SEARCH_FEATURES
     void set_spider_mode(bool enable);
@@ -101,6 +106,9 @@ public:
 #endif
 
 private:
+    /// The table file of `directory` for one family.
+    static std::string table_path(const std::string& directory, bool ipv6);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

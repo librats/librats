@@ -44,6 +44,7 @@ struct DhtClient::Impl {
     int           port = 0;
     std::string   bind_address;
     std::string   data_directory;
+    std::string   seed_directory;   // another node's: its table's contacts, read at start
     AddressFamily family = AddressFamily::IPv4;
     bool          ipv6 = false;
     NodeId        self{};               // authoritative once the node exists; cached otherwise
@@ -150,6 +151,16 @@ bool DhtClient::start() {
             impl_->self = loaded;
             LOG_INFO("dht", "restored identity " << dht::short_hex(impl_->self)
                             << " and " << contacts.size() << " contact(s) from disk");
+        }
+    }
+    // Another node's contacts besides: its id is its own, never taken.
+    if (!impl_->seed_directory.empty() && impl_->seed_directory != impl_->data_directory) {
+        NodeId theirs{};
+        std::vector<dht::NodeEntry> seeds;
+        if (dht::load_routing_table(table_path(impl_->seed_directory, impl_->ipv6), theirs, seeds)) {
+            LOG_INFO("dht", "seeded with " << seeds.size() << " contact(s) of "
+                            << impl_->seed_directory);
+            contacts.insert(contacts.end(), seeds.begin(), seeds.end());
         }
     }
 
@@ -389,16 +400,19 @@ size_t DhtClient::get_active_announces_count() const {
 AddressFamily DhtClient::address_family() const { return impl_->family; }
 bool DhtClient::is_ipv6() const { return impl_->ipv6; }
 
-std::string DhtClient::routing_table_file_path() const {
+std::string DhtClient::table_path(const std::string& directory, bool ipv6) {
     // One routing-table file per data dir (plus the IPv6 variant). The name is
     // deliberately port-independent: an ephemeral (port 0) node binds a different port
     // each run, so a port in the name would mean it never finds its own saved identity
     // + warm set on restart.
-    const char* suffix = impl_->ipv6 ? "_v6" : "";
+    const char* suffix = ipv6 ? "_v6" : "";
     const std::string name = std::string("dht_routing") + suffix + ".json";
-    if (!impl_->data_directory.empty() && impl_->data_directory != ".")
-        return impl_->data_directory + "/" + name;
+    if (!directory.empty() && directory != ".") return directory + "/" + name;
     return name;
+}
+
+std::string DhtClient::routing_table_file_path() const {
+    return table_path(impl_->data_directory, impl_->ipv6);
 }
 
 bool DhtClient::save_routing_table() {
@@ -431,6 +445,7 @@ bool DhtClient::load_routing_table() {
 }
 
 void DhtClient::set_data_directory(const std::string& directory) { impl_->data_directory = directory; }
+void DhtClient::set_seed_directory(const std::string& directory) { impl_->seed_directory = directory; }
 
 #ifdef RATS_SEARCH_FEATURES
 void DhtClient::set_spider_mode(bool enable) {

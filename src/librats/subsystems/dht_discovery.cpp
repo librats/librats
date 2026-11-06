@@ -164,6 +164,7 @@ std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
 
     auto client = std::make_unique<DhtClient>(config_.dht_port, bind_for(config_.bind_address, v6),
                                               config_.data_dir, family);
+    client->set_seed_directory(config_.seed_dir);
     if (!client->start()) {
         LOG_WARN("dht-discovery", label << " DHT client failed to start (skipping this family)");
         return nullptr;

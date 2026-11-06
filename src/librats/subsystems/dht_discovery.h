@@ -82,7 +82,12 @@ public:
     struct Config {
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral
         std::string               bind_address = "";
-        std::string               data_dir = "";         ///< routing-table persistence dir (empty = cwd). Set to the node's data_dir to co-locate state.
+        std::string               data_dir = "";         ///< routing-table persistence dir (empty = nothing kept). Set to the node's data_dir to co-locate state.
+        /// Another node's data_dir: the contacts of its saved tables seed
+        /// these at start, its node ids never taken, nothing written there
+        /// (DhtClient::set_seed_directory()). A node of a moment, with no
+        /// data_dir, so starts from the warm set of one that lasts.
+        std::string               seed_dir = "";
         bool                      enable_ipv4 = true;    ///< run the IPv4 Kademlia network
         bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
         std::string               discovery_key = "";  ///< DHT namespace. Empty → the node's `protocol` (resolved at attach), so peers of the same app/version discover each other and mismatched protocols (which can't handshake anyway) don't even meet. Set non-empty to override with a custom discovery network.
