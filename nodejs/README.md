@@ -24,6 +24,9 @@ You could build with it:
 
 Things to know before you pick it:
 
+- **The networking is native.** Sockets, encryption and delivery run in C++ on
+  their own threads, not on the event loop, so one node keeps thousands of peers
+  connected and moves gigabits per second.
 - **It runs in Node.js, not in the browser.** It is a native addon, so it needs
   Node.js 20+ on Windows, Linux or macOS, and it is compiled when installed.
 - **It speaks its own protocol.** It uses the BitTorrent DHT to find peers, but it
