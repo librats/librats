@@ -44,13 +44,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/DEgITx/librats.git",
+    "url": "https://github.com/librats/librats.git",
     "directory": "nodejs"
   },
   "bugs": {
-    "url": "https://github.com/DEgITx/librats/issues"
+    "url": "https://github.com/librats/librats/issues"
   },
-  "homepage": "https://github.com/DEgITx/librats/tree/master/nodejs#readme",
+  "homepage": "https://github.com/librats/librats/tree/master/nodejs#readme",
   "dependencies": {
     "node-addon-api": "^8.5.0"
   },
