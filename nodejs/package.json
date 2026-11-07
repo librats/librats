@@ -1,7 +1,7 @@
 {
   "name": "librats",
   "version": "0.3.1",
-  "description": "Node.js bindings for librats - A high-performance peer-to-peer networking library",
+  "description": "Peer-to-peer networking for Node.js: encrypted connections with no server, peer discovery over the DHT and mDNS, NAT traversal, pub/sub, JSON messages and file transfer",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "engines": {
@@ -31,7 +31,14 @@
     "upnp",
     "noise",
     "encryption",
-    "native"
+    "native",
+    "p2p-network",
+    "decentralized",
+    "mesh",
+    "nat-traversal",
+    "hole-punching",
+    "chat",
+    "messaging"
   ],
   "author": "librats team",
   "license": "MIT",
@@ -43,7 +50,7 @@
   "bugs": {
     "url": "https://github.com/DEgITx/librats/issues"
   },
-  "homepage": "https://github.com/DEgITx/librats#readme",
+  "homepage": "https://github.com/DEgITx/librats/tree/master/nodejs#readme",
   "dependencies": {
     "node-addon-api": "^8.5.0"
   },

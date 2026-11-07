@@ -27,6 +27,7 @@ and stops a node.
 
 - Node.js 20 or newer
 - CMake 3.14 or newer
+- Python 3, for node-gyp
 - A C++17 compiler: Visual Studio (Build Tools) 2017+ on Windows,
   `build-essential` on Linux, Xcode Command Line Tools on macOS
 

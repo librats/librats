@@ -1,17 +1,54 @@
+<p align="center">
+  <a href="https://librats.com"><img src="https://raw.githubusercontent.com/DEgITx/librats/master/docs/logo.png" alt="librats: fast, secure, simple p2p library" width="600"></a>
+</p>
+
 # librats for Node.js
 
-Node.js bindings for [librats](../README.md), a peer-to-peer networking library
-written in C++. With it, Node programs connect to each other directly, with no
-server in between, and exchange messages over encrypted connections. They can
-find each other on the local network or through the BitTorrent DHT, get through
-NATs, and use pub/sub, JSON messages and file transfer on top.
+[![npm](https://img.shields.io/npm/v/librats.svg)](https://www.npmjs.com/package/librats)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/DEgITx/librats/blob/master/LICENSE)
+[![node: >=20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 
-The bindings follow the librats C API closely, one call per method. This page
-explains how to use them. [`lib/index.d.ts`](lib/index.d.ts) is the full
-reference, with every option and its default.
+**Peer-to-peer networking for Node.js.** Your programs connect to each other
+directly, with no server in between, over encrypted connections. They find
+each other on the local network or across the internet, get through home
+routers, and exchange messages, JSON values and files.
+
+You could build with it:
+
+- a chat or messenger with no server
+- an app whose copies on several computers keep each other in sync
+- a tool that finds other copies of itself on the local network
+- file sharing, or live audio and video between peers
+- a Node service that talks to apps built on librats in other languages: the
+  same library exists for C++, C, Python, Java/Android, React Native and iOS
+
+Things to know before you pick it:
+
+- **It runs in Node.js, not in the browser.** It is a native addon, so it needs
+  Node.js 20+ on Windows, Linux or macOS, and it is compiled when installed.
+- **It speaks its own protocol.** It uses the BitTorrent DHT to find peers, but it
+  connects only to other librats programs, not to WebRTC, libp2p or BitTorrent
+  clients.
+
+## Documentation
+
+- **This page** is the guide: installation, the concepts, and every feature with
+  an example.
+- **[`index.d.ts`](https://github.com/DEgITx/librats/blob/master/nodejs/lib/index.d.ts)**
+  is the full API reference, every method and option with its default. The types
+  ship with the package, so your editor shows the same text on hover.
+- **[Examples](https://github.com/DEgITx/librats/tree/master/nodejs/examples)**:
+  runnable scripts, a chat, pub/sub, file transfer.
+- **[librats.com](https://librats.com)** and the
+  [main README](https://github.com/DEgITx/librats#readme) describe the library as
+  a whole, how it works inside, and the other languages.
+- **Questions and bugs:**
+  [GitHub issues](https://github.com/DEgITx/librats/issues).
+
+On this page:
 
 - [Installation](#installation)
-- [A first node](#a-first-node)
+- [Hello, world](#hello-world) and [a first real node](#a-first-real-node)
 - [Example: a chat with no server](#example-a-chat-with-no-server)
 - [Connecting to peers](#connecting-to-peers) and [who can connect](#who-can-connect)
 - [Sending messages](#sending-messages), including bulk and live audio/video
@@ -25,27 +62,71 @@ reference, with every option and its default.
 npm install librats
 ```
 
-There is no prebuilt binary: installing compiles librats with CMake and then the
-addon with node-gyp. You need:
+There is no prebuilt binary yet: installing compiles the C++ library and the
+addon, which takes a few minutes the first time. You need:
 
 - Node.js 20 or newer
 - CMake 3.14 or newer
-- a C++17 compiler: Visual Studio Build Tools 2017+ on Windows,
-  `build-essential` on Linux, Xcode Command Line Tools on macOS
+- Python 3, which node-gyp runs on
+- a C++17 compiler: Visual Studio Build Tools 2017+ on Windows (the "Desktop
+  development with C++" workload), `build-essential` on Linux, Xcode Command
+  Line Tools on macOS
 
-[INSTALLATION.md](INSTALLATION.md) describes the build steps and what to do
-when they fail. `npm run verify` loads the addon and starts a node, which is a
-quick way to check the result.
+If the install fails, it is almost always one of these missing or not on the
+`PATH`; [INSTALLATION.md](https://github.com/DEgITx/librats/blob/master/nodejs/INSTALLATION.md)
+goes through the build step by step. The [hello world](#hello-world) below is a
+quick check that the install worked.
 
-The package is CommonJS and works from ES modules and TypeScript too; the type
-definitions are included:
+The package is CommonJS and works from ES modules and TypeScript too:
 
 ```javascript
-const { RatsNode } = require('librats');        // CommonJS
+const { RatsNode } = require('librats');         // CommonJS
 import { RatsNode, setLogLevel } from 'librats'; // ES module or TypeScript
 ```
 
-## A first node
+## Hello, world
+
+Two nodes in one script, so it runs on one machine with nothing else to set up:
+
+```javascript
+const { RatsNode, setLogLevel } = require('librats');
+
+setLogLevel('warn');   // librats logs its startup at 'info'; keep the output short
+
+const alice = new RatsNode();
+const bob = new RatsNode();
+
+bob.on('greeting', (peerId, data) => {
+  console.log(`bob got "${data}" from ${peerId.slice(0, 8)}…`);
+  alice.destroy();     // a node keeps the process running until it is destroyed
+  bob.destroy();
+});
+
+alice.onPeerConnected((peerId) => {
+  console.log(`alice is connected to ${peerId.slice(0, 8)}…`);
+  alice.send(peerId, 'greeting', 'hello, bob');
+});
+
+alice.start();
+bob.start();
+alice.connect('127.0.0.1', bob.listenPort);
+```
+
+```text
+alice is connected to de975867…
+bob got "hello, bob" from bafc5b54…
+```
+
+What happened: each node got a **peer id**, a long hex string that is its
+identity. `start()` opened a port, picked by the system because none was given.
+Alice dialed Bob's port; the two exchanged keys, and once each knew who the other
+is, `onPeerConnected` fired. Alice then sent a message on a **channel** named
+`'greeting'`, and Bob's handler for that channel received it.
+
+In a real app each node is a separate program, usually on its own computer, and
+the nodes find each other by themselves instead of being told an address.
+
+## A first real node
 
 ```javascript
 const { RatsNode } = require('librats');
@@ -60,8 +141,8 @@ node.start();
 console.log('I am', node.localId, 'on port', node.listenPort);
 ```
 
-Run the same script on a second machine in the same network and the two nodes
-find each other, connect, and greet each other. To connect by hand instead, call
+Run this script on two computers in the same network. The nodes find each other,
+connect, and greet each other. To connect by hand instead, call
 `node.connect('192.168.1.10', 8080)` after `start()`.
 
 A few things to know from the start:
@@ -157,12 +238,12 @@ function print(text) {
 }
 ```
 
-The script is in the repository as [`examples/chat.js`](examples/chat.js). To try
-it, open two terminals, on one computer or on two in the same network:
+To try it, save it as `chat.js` in a project where librats is installed, and
+run it in two terminals, on one computer or on two in the same network:
 
 ```bash
-node examples/chat.js alice
-node examples/chat.js bob
+node chat.js alice
+node chat.js bob
 ```
 
 ```text
@@ -190,7 +271,7 @@ What happens and where the limits are:
 - **There is no history.** A message reaches whoever is connected at the moment.
   `broadcastJson` sends it to every connected peer and the peers do not pass it
   on, so a large room needs every member connected to every other.
-  [`examples/gossipsub_chat.js`](examples/gossipsub_chat.js) is the same chat over
+  [`examples/gossipsub_chat.js`](https://github.com/DEgITx/librats/blob/master/nodejs/examples/gossipsub_chat.js) is the same chat over
   pub/sub, where messages also spread through intermediate peers.
 
 ## Connecting to peers
@@ -532,22 +613,30 @@ settings apply to the whole library, every node in the process.
 
 | | |
 |---|---|
-| [`chat.js`](examples/chat.js) | the chat above |
-| [`gossipsub_chat.js`](examples/gossipsub_chat.js) | the same chat over pub/sub |
-| [`basic_client.js`](examples/basic_client.js) | channels, JSON and peer events |
-| [`file_transfer.js`](examples/file_transfer.js) | sending and receiving files |
+| [`chat.js`](https://github.com/DEgITx/librats/blob/master/nodejs/examples/chat.js) | the chat above |
+| [`gossipsub_chat.js`](https://github.com/DEgITx/librats/blob/master/nodejs/examples/gossipsub_chat.js) | the same chat over pub/sub |
+| [`basic_client.js`](https://github.com/DEgITx/librats/blob/master/nodejs/examples/basic_client.js) | channels, JSON and peer events |
+| [`file_transfer.js`](https://github.com/DEgITx/librats/blob/master/nodejs/examples/file_transfer.js) | sending and receiving files |
+
+The examples are in the repository, not in the npm package. Each one says how
+to run it at the top. To use one in your own project, copy it and change
+`require('../lib/index')` to `require('librats')`. To run them where they are,
+from a clone:
 
 ```bash
-node examples/basic_client.js 8080
-node examples/basic_client.js 8081 127.0.0.1 8080
+git clone https://github.com/DEgITx/librats.git
+cd librats/nodejs
+npm install
+node examples/basic_client.js 8080                    # one terminal
+node examples/basic_client.js 8081 127.0.0.1 8080     # another
 ```
 
-## Testing
+## Working on the bindings
 
-```bash
-npm test
-```
+In a clone, `npm install` builds everything and `npm test` runs the tests.
+[INSTALLATION.md](https://github.com/DEgITx/librats/blob/master/nodejs/INSTALLATION.md)
+explains how the build is put together.
 
 ## License
 
-MIT, see [LICENSE](../LICENSE).
+MIT, see [LICENSE](https://github.com/DEgITx/librats/blob/master/LICENSE).
