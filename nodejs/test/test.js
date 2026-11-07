@@ -65,6 +65,14 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
     it('rejects an unknown log level', function () {
       assert.throws(() => setLogLevel('loud'), TypeError);
     });
+
+    it('offers every export by name to an ES module', async function () {
+      const { pathToFileURL } = require('url');
+      const esm = await import(pathToFileURL(require.resolve('../lib/index')).href);
+      for (const name of Object.keys(require('../lib/index'))) {
+        assert.strictEqual(esm[name], require('../lib/index')[name], name);
+      }
+    });
   });
 
   describe('configuration', function () {

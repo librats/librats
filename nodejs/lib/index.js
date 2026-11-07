@@ -156,11 +156,16 @@ function parsed(handler) {
   return (peerId, text) => handler(peerId, JSON.parse(text));
 }
 
+// Names only, no `key: value`: Node finds the named exports an ES module may
+// import by scanning this literal, and the scan stops at the first property
+// that is not a plain name (`import { setLogLevel } from 'librats'` then fails).
+const { version, setLogLevel, setLogFile, LIVE_MAX_LIFETIME_MS, LIVE_MAX_PAYLOAD } = addon;
+
 module.exports = {
   RatsNode,
-  version: addon.version,
-  setLogLevel: addon.setLogLevel,
-  setLogFile: addon.setLogFile,
-  LIVE_MAX_LIFETIME_MS: addon.LIVE_MAX_LIFETIME_MS,
-  LIVE_MAX_PAYLOAD: addon.LIVE_MAX_PAYLOAD,
+  version,
+  setLogLevel,
+  setLogFile,
+  LIVE_MAX_LIFETIME_MS,
+  LIVE_MAX_PAYLOAD,
 };
