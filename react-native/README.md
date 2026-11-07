@@ -127,7 +127,7 @@ All opt-in, before `start()`:
 
 | Call | What it does |
 |------|--------------|
-| `enableDht({ port?, discoveryKey? })` | Finds peers through the mainline DHT; the key defaults to `protocol`. |
+| `enableDht({ port?, discoveryKey? })` | Finds peers through the mainline DHT; the key defaults to `protocol`. `dhtSetKeys([...])` replaces the keys, also after `start()` — joining and leaving rooms without a new node. |
 | `enableMdns()` | Finds peers on the local network. On iOS 14+ raw multicast needs the `com.apple.developer.networking.multicast` entitlement. |
 | `enablePeerExchange()` | Connected peers trade addresses, so one contact is enough. |
 | `enablePortMapping({ upnp?, natpmp? })` | Asks the router to forward the listen port. Moot on cellular CGNAT. |
@@ -326,7 +326,7 @@ Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
 `broadcast`, `peerWritable`, `pathStats`, `onMessage`, `onPeerConnected`,
 `onPeerDisconnected`, `onDialFailed`, `onPeerWritable`, `onPeerPath`.
 
-Discovery and NAT traversal: `enableDht`, `enableMdns`, `enablePeerExchange`,
+Discovery and NAT traversal: `enableDht`, `dhtSetKeys`, `enableMdns`, `enablePeerExchange`,
 `enablePortMapping`, `enableHolePunch`, `punchPeer`, `enableRelay`,
 `connectViaRelay`.
 
@@ -339,7 +339,10 @@ Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 
 JSON messaging: `enableJson`, `onJson`, `onceJson`, `offJson`, `sendJson`,
 `broadcastJson`. Ping and reconnection: `enablePing`, `peerRttMs`,
-`enableReconnect`, `addReconnect`, `removeReconnect`.
+`enableReconnect`, `enableReconnectLost`, `addReconnect`, `removeReconnect`.
+
+Process-wide, exported from the package itself: `setLogLevel`, `setLogFile`,
+`libraryVersion`.
 
 Not here: the storage and BitTorrent modules.
 
@@ -429,7 +432,8 @@ Two things showed up on Android that are worth knowing:
   ```
 
   Timestamps and colors are left off on this path because logcat adds its own.
-  The default level is still `INFO`; the file sink is unchanged.
+  The default level is still `INFO`; `setLogLevel('warn')` from the package
+  quiets it for a release build. The file sink is unchanged.
 
 ### Things that cost a build to find
 

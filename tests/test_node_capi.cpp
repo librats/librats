@@ -706,6 +706,24 @@ TEST(NodeCApiTest, FileOfferReachesThePeer) {
 }
 
 // One contact is enough: b learns of a from the hub it shares with it, and dials.
+// The DHT's keys can be replaced once it is enabled; what that does to the
+// lookups is DhtDiscovery's to test. Not started: no bootstrap is dialed here.
+TEST(NodeCApiTest, DhtKeysCanBeSet) {
+    rats_t node = make_server();
+    const char* keys[] = {"room/a", "room/b"};
+    EXPECT_EQ(rats_dht_set_keys(node, keys, 2), RATS_ERR_NOT_ENABLED);
+
+    ASSERT_EQ(rats_enable_dht(node, 0, nullptr), RATS_OK);
+    EXPECT_EQ(rats_dht_set_keys(node, keys, 2), RATS_OK);
+    EXPECT_EQ(rats_dht_set_keys(node, nullptr, 0), RATS_OK);   // none: found by nobody
+    EXPECT_EQ(rats_dht_set_keys(node, nullptr, 1), RATS_ERR_INVALID_ARG);
+    const char* with_null[] = {"room/a", nullptr};
+    EXPECT_EQ(rats_dht_set_keys(node, with_null, 2), RATS_ERR_INVALID_ARG);
+    const char* with_empty[] = {""};
+    EXPECT_EQ(rats_dht_set_keys(node, with_empty, 1), RATS_ERR_INVALID_ARG);
+    rats_destroy(node);
+}
+
 TEST(NodeCApiTest, PeerExchangeIntroducesPeers) {
     rats_t hub = make_server();
     rats_t a   = make_server();

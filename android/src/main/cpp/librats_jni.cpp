@@ -65,7 +65,8 @@ struct {
         jfieldID protocol, data_dir, security, listen_port, bind_address, dial_only,
                  max_peers, transports, preferred_transport, transport_fallback_ms,
                  send_queue_limit, path_sample_ms, congestion_control,
-                 udp_receive_window, udp_receive_budget, udp_offload, reactor_threads,
+                 udp_receive_window, udp_receive_budget, udp_offload, udp_idle_timeout_ms,
+                 reactor_threads,
                  network_monitor;
     } config;
 } J;
@@ -159,6 +160,7 @@ bool cache_ids(JNIEnv* env) {
     J.config.udp_receive_window    = field(config, "udpReceiveWindow", "J");
     J.config.udp_receive_budget    = field(config, "udpReceiveBudget", "J");
     J.config.udp_offload           = field(config, "udpOffload", "Z");
+    J.config.udp_idle_timeout_ms   = field(config, "udpIdleTimeoutMs", "I");
     J.config.reactor_threads       = field(config, "reactorThreads", "I");
     J.config.network_monitor       = field(config, "networkMonitor", "Z");
     env->DeleteLocalRef(config);
@@ -526,6 +528,8 @@ Java_com_librats_RatsNode_nativeCreate(JNIEnv* env, jclass, jobject config) {
     cfg.udp_receive_window  = static_cast<size_t>(env->GetLongField(config, J.config.udp_receive_window));
     cfg.udp_receive_budget  = static_cast<size_t>(env->GetLongField(config, J.config.udp_receive_budget));
     cfg.disable_udp_offload = env->GetBooleanField(config, J.config.udp_offload) ? 0 : 1;
+    cfg.udp_idle_timeout_ms =
+        static_cast<uint32_t>(env->GetIntField(config, J.config.udp_idle_timeout_ms));
     cfg.reactor_threads     = static_cast<size_t>(env->GetIntField(config, J.config.reactor_threads));
     cfg.disable_network_monitor = env->GetBooleanField(config, J.config.network_monitor) ? 0 : 1;
 
@@ -734,6 +738,25 @@ Java_com_librats_RatsNode_nativeEnableDht(JNIEnv* env, jclass, jlong ptr, jint d
                                           jstring discovery_key) {
     Utf8 key(env, discovery_key);
     return rats_enable_dht(node_of(ptr), static_cast<uint16_t>(dht_port), key.get());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeDhtSetKeys(JNIEnv* env, jclass, jlong ptr, jobjectArray keys) {
+    const jsize n = keys ? env->GetArrayLength(keys) : 0;
+    std::vector<std::string> owned;
+    std::vector<const char*> ptrs;
+    owned.reserve(static_cast<size_t>(n));
+    ptrs.reserve(static_cast<size_t>(n));
+    for (jsize i = 0; i < n; ++i) {
+        auto s = static_cast<jstring>(env->GetObjectArrayElement(keys, i));
+        if (!s) return RATS_ERR_INVALID_ARG;   // a null key
+        Utf8 key(env, s);
+        env->DeleteLocalRef(s);
+        if (env->ExceptionCheck()) return RATS_ERR_INVALID_ARG;
+        owned.emplace_back(key.get());
+    }
+    for (const auto& k : owned) ptrs.push_back(k.c_str());
+    return rats_dht_set_keys(node_of(ptr), ptrs.data(), ptrs.size());
 }
 
 JNIEXPORT jint JNICALL
@@ -967,6 +990,11 @@ Java_com_librats_RatsNode_nativePeerRttMs(JNIEnv* env, jclass, jlong ptr, jstrin
 JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeEnableReconnect(JNIEnv*, jclass, jlong ptr) {
     return rats_enable_reconnect(node_of(ptr));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeEnableReconnectLost(JNIEnv*, jclass, jlong ptr, jint lost_for_ms) {
+    return rats_enable_reconnect_lost(node_of(ptr), static_cast<uint32_t>(lost_for_ms));
 }
 
 JNIEXPORT jint JNICALL

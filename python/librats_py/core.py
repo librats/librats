@@ -14,7 +14,7 @@ the pointer until the node is destroyed.
 import json
 import sys
 import weakref
-from ctypes import byref, c_int, c_size_t, c_uint64, string_at
+from ctypes import byref, c_char_p, c_int, c_size_t, c_uint64, string_at
 from typing import Any, Callable, List, Optional
 
 from .ctypes_wrapper import (
@@ -426,6 +426,19 @@ class RatsNode:
         """
         check_error(self._lib.rats_enable_dht(self._h, dht_port, _b(discovery_key)), "enable_dht")
 
+    def dht_set_keys(self, keys: List[str]) -> None:
+        """The keys the DHT announces and searches from now on, in place of the
+        ``discovery_key`` or the keys set before: a new one is announced and
+        searched at once, one gone no longer is. An empty list leaves none, so
+        the node finds and is found by nobody over the DHT. Needs
+        :meth:`enable_dht`; works before and after start, from any thread.
+        """
+        if isinstance(keys, (str, bytes)):
+            raise TypeError("keys must be a list of strings, not a single string")
+        encoded = [k.encode("utf-8") for k in keys]
+        array = (c_char_p * len(encoded))(*encoded)
+        check_error(self._lib.rats_dht_set_keys(self._h, array, len(encoded)), "dht_set_keys")
+
     def enable_mdns(self) -> None:
         """mDNS discovery on the local network."""
         check_error(self._lib.rats_enable_mdns(self._h), "enable_mdns")
@@ -633,6 +646,15 @@ class RatsNode:
         """Redial dropped peers with backoff; with ``data_dir`` the list survives
         restarts. Enable before start."""
         check_error(self._lib.rats_enable_reconnect(self._h), "enable_reconnect")
+
+    def enable_reconnect_lost(self, lost_for_ms: int) -> None:
+        """:meth:`enable_reconnect`, and a peer *lost* — its connection closed
+        by neither side: gone quiet past the idle timeout, or stopped answering —
+        is dialed again where it was last known for ``lost_for_ms``, until it is
+        back over any route. A peer that left is not. Enable before start,
+        instead of :meth:`enable_reconnect`."""
+        check_error(self._lib.rats_enable_reconnect_lost(self._h, lost_for_ms),
+                    "enable_reconnect_lost")
 
     def add_reconnect(self, host: str, port: int) -> None:
         """Keep an address connected. May be called while running."""

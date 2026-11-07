@@ -22,6 +22,19 @@
 #include <librats/subsystems/relay.h>
 #include <librats/util/json.h>
 #include <librats/util/network_utils.h>
+#include <librats/util/version.h>
+
+// logger.h names its levels DEBUG and ERROR. CocoaPods defines DEBUG=1 for a
+// pod's Debug build (and windows.h defines ERROR), which would rewrite the enum;
+// the macros are set aside for the include and restored after it. The levels
+// are then reached by value, never by name.
+#pragma push_macro("DEBUG")
+#pragma push_macro("ERROR")
+#undef DEBUG
+#undef ERROR
+#include <librats/util/logger.h>
+#pragma pop_macro("ERROR")
+#pragma pop_macro("DEBUG")
 
 #include <limits>
 #include <stdexcept>
@@ -321,6 +334,9 @@ void HybridRatsNode::configure(const RatsConfig& config) {
     cfg->udp_receive_budget = to_size(*config.udpReceiveBudget, "udpReceiveBudget");
   }
   if (config.udpOffload) cfg->udp_offload = *config.udpOffload;
+  if (config.udpIdleTimeoutMs) {
+    cfg->udp_idle_timeout = std::chrono::milliseconds(to_u32(*config.udpIdleTimeoutMs, "udpIdleTimeoutMs"));
+  }
 
   if (config.reactorThreads) {
     cfg->reactor_threads = to_size(*config.reactorThreads, "reactorThreads");
@@ -510,6 +526,14 @@ void HybridRatsNode::enableDht(const std::optional<DhtConfig>& config) {
     if (config && config->discoveryKey) cfg.discovery_key = *config->discoveryKey;
     return std::make_unique<rats::DhtDiscovery>(std::move(cfg));
   });
+}
+
+void HybridRatsNode::dhtSetKeys(const std::vector<std::string>& keys) {
+  auto& dht = require(dht_, "enableDht()");
+  for (const auto& key : keys) {
+    if (key.empty()) throw std::invalid_argument("dhtSetKeys: a key must not be empty");
+  }
+  dht.set_keys(keys);   // any thread, before or after start
 }
 
 void HybridRatsNode::enableMdns() {
@@ -772,6 +796,43 @@ void HybridRatsNode::enableReconnect() {
     return std::make_unique<rats::ReconnectionService>(cfg);
   });
 }
+
+void HybridRatsNode::enableReconnectLost(double lostForMs) {
+  const uint32_t lost_for = to_u32(lostForMs, "lostForMs");
+  enable(reconnect_, "enableReconnectLost()", [&] {
+    rats::ReconnectionService::Config cfg;
+    if (config_ != nullptr && !config_->data_dir.empty()) {
+      cfg.store_path = config_->data_dir + "/peers.json";
+    }
+    cfg.lost_for = std::chrono::milliseconds(lost_for);
+    return std::make_unique<rats::ReconnectionService>(cfg);
+  });
+}
+
+// ── process-wide ────────────────────────────────────────────────────────────
+
+void HybridRatsNode::setLogLevel(const std::string& level) {
+  // LogLevel's values, in order; named by value (see the include above).
+  int value = -1;
+  if (level == "debug") value = 0;
+  else if (level == "info") value = 1;
+  else if (level == "warn") value = 2;
+  else if (level == "error") value = 3;
+  else throw std::invalid_argument("setLogLevel: expected 'debug', 'info', 'warn' or 'error', got '" + level + "'");
+  rats::Logger::getInstance().set_log_level(static_cast<rats::LogLevel>(value));
+}
+
+void HybridRatsNode::setLogFile(const std::optional<std::string>& path) {
+  auto& logger = rats::Logger::getInstance();
+  if (path && !path->empty()) {
+    logger.set_log_file_path(*path);
+    logger.set_file_logging_enabled(true);
+  } else {
+    logger.set_file_logging_enabled(false);
+  }
+}
+
+std::string HybridRatsNode::getLibraryVersion() { return rats::version::STRING; }
 
 void HybridRatsNode::addReconnect(const std::string& host, double port) {
   auto& reconnect = require(reconnect_, "enableReconnect()");

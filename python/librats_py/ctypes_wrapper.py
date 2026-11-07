@@ -155,6 +155,7 @@ _SIGNATURES = [
     ("rats_on", _E, [_N, _S, MessageCallbackType, c_void_p]),
     # discovery
     ("rats_enable_dht", _E, [_N, c_uint16, _S]),
+    ("rats_dht_set_keys", _E, [_N, POINTER(c_char_p), c_size_t]),
     ("rats_enable_mdns", _E, [_N]),
     ("rats_enable_peer_exchange", _E, [_N]),
     # NAT traversal
@@ -192,6 +193,7 @@ _SIGNATURES = [
     ("rats_peer_rtt_ms", c_int64, [_N, _S]),
     # reconnection
     ("rats_enable_reconnect", _E, [_N]),
+    ("rats_enable_reconnect_lost", _E, [_N, c_uint32]),
     ("rats_add_reconnect", _E, [_N, _S, c_uint16]),
     ("rats_remove_reconnect", _E, [_N, _S, c_uint16]),
     # BitTorrent (RATS_ERR_NOT_ENABLED in builds without RATS_SEARCH_FEATURES)

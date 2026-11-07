@@ -155,7 +155,7 @@ All of these are enabled before `start()`.
 
 | Subsystem | Enable | Then |
 | --- | --- | --- |
-| DHT discovery | `enable_dht(dht_port=0, discovery_key=None)` | peers found are dialed automatically |
+| DHT discovery | `enable_dht(dht_port=0, discovery_key=None)` | peers found are dialed automatically; `dht_set_keys([...])` changes the keys, also while running |
 | mDNS discovery | `enable_mdns()` | — |
 | Peer exchange | `enable_peer_exchange()` | peers share the addresses of peers they hold |
 | Port mapping | `enable_port_mapping(upnp=True, natpmp=True)` | — |
@@ -166,6 +166,7 @@ All of these are enabled before `start()`.
 | File transfer | `enable_file_transfer(temp_dir=None)` | see below |
 | Ping | `enable_ping()` | `peer_rtt_ms(peer_id)` — `None` until measured |
 | Reconnection | `enable_reconnect()` | `add_reconnect(host, port)`, `remove_reconnect(host, port)` |
+| Reconnection, lost peers too | `enable_reconnect_lost(lost_for_ms)` | as above; a peer lost (not one that left) is redialed where it was last seen for `lost_for_ms` |
 | BitTorrent | `enable_bittorrent(...)` | `bt_add_magnet`, `bt_add_torrent_file`, `bt_remove_torrent` — only in libraries built with `RATS_SEARCH_FEATURES` |
 
 ### NAT traversal

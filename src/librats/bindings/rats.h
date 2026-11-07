@@ -379,6 +379,13 @@ RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb 
  *  could handshake find each other. */
 RATS_API rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key);
 
+/** The keys the DHT announces and searches from now on, in place of the
+ *  discovery_key or the keys set before: one new is announced and searched at
+ *  once, one gone no longer is. `count` 0 leaves none, so the node finds and is
+ *  found by nobody over the DHT until some are set. Before or after rats_start(),
+ *  from any thread. RATS_ERR_INVALID_ARG for a NULL or empty key. */
+RATS_API rats_error_t rats_dht_set_keys(rats_t node, const char* const* keys, size_t count);
+
 /** mDNS discovery on the local network. */
 RATS_API rats_error_t rats_enable_mdns(rats_t node);
 

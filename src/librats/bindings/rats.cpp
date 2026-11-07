@@ -527,6 +527,19 @@ rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discove
     });
 }
 
+rats_error_t rats_dht_set_keys(rats_t node, const char* const* keys, size_t count) {
+    if (count > 0 && !keys) return RATS_ERR_INVALID_ARG;
+    std::vector<std::string> list;
+    list.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (!keys[i] || !*keys[i]) return RATS_ERR_INVALID_ARG;
+        list.emplace_back(keys[i]);
+    }
+    if (!node->dht) return RATS_ERR_NOT_ENABLED;
+    node->dht->set_keys(list);
+    return RATS_OK;
+}
+
 rats_error_t rats_enable_mdns(rats_t node) {
     return enable(node, node->mdns, [] { return std::make_unique<MdnsDiscovery>(); });
 }

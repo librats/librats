@@ -126,7 +126,7 @@ Enable each before `start()`.
 
 | Subsystem | Enable | Then |
 |---|---|---|
-| DHT discovery | `enableDht()`, `enableDht(port, discoveryKey)` | — |
+| DHT discovery | `enableDht()`, `enableDht(port, discoveryKey)` | `dhtSetKeys(...)` changes the keys, also while running |
 | mDNS discovery | `enableMdns()` | — |
 | Peer exchange | `enablePeerExchange()` | — |
 | Port mapping | `enablePortMapping()`, `enablePortMapping(upnp, natpmp)` | — |
@@ -137,6 +137,7 @@ Enable each before `start()`.
 | File transfer | `enableFileTransfer(tempDir)` | `onFileOffer`, `onFileProgress`, `onFileComplete`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`, `cancelFile`, `pauseFile`, `resumeFile` |
 | Ping | `enablePing()` | `peerRttMs(peerId)` |
 | Reconnection | `enableReconnect()` | `addReconnect`, `removeReconnect` |
+| Reconnection, lost peers too | `enableReconnectLost(lostForMs)` | as above; a peer lost (not one that left) is redialed where it was last seen for `lostForMs` |
 
 ### NAT traversal
 

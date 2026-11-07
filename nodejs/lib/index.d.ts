@@ -108,6 +108,8 @@ declare module 'librats' {
     udpReceiveBudget?: number;
     /** Kernel segmentation offload for UDP where available. Default true. */
     udpOffload?: boolean;
+    /** Silence from a peer after which its UDP connection is closed as lost (`'idle-timeout'`); keep-alives go out four times within it. Default 0 (45 s). */
+    udpIdleTimeoutMs?: number;
 
     /** I/O threads. Default 0 (1). */
     reactorThreads?: number;
@@ -275,6 +277,12 @@ declare module 'librats' {
 
     /** Mainline DHT discovery. `discoveryKey` defaults to the protocol, so only nodes that could connect find each other. */
     enableDht(port?: number, discoveryKey?: string): void;
+    /**
+     * The keys the DHT announces and searches from now on, in place of `discoveryKey` or the
+     * keys set before: a new one is announced and searched at once, one gone no longer is. An
+     * empty array leaves none. Needs `enableDht()`; works before and after `start()`.
+     */
+    dhtSetKeys(keys: string[]): void;
     /** mDNS discovery on the local network. */
     enableMdns(): void;
     /** Peers trade the addresses of peers they hold: one contact is enough to find the rest. */
@@ -363,6 +371,13 @@ declare module 'librats' {
     peerRttMs(peerId: string): number | null;
     /** Redial dropped peers with backoff; with `dataDir` the list survives restarts. */
     enableReconnect(): void;
+    /**
+     * `enableReconnect()`, and a peer lost — its connection closed by neither side: gone quiet
+     * past the idle timeout, or stopped answering — is dialed again where it was last known for
+     * `lostForMs`, until it is back over any route. A peer that left is not. Enable before
+     * start, instead of `enableReconnect()`.
+     */
+    enableReconnectLost(lostForMs: number): void;
     /** Keep an address connected. May be called while running. */
     addReconnect(host: string, port: number): void;
     removeReconnect(host: string, port: number): void;

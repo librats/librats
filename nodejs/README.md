@@ -89,7 +89,7 @@ expired live messages) or with `onPeerPath`.
 
 | | enable before start | then |
 |---|---|---|
-| DHT discovery | `enableDht(port?, discoveryKey?)` | |
+| DHT discovery | `enableDht(port?, discoveryKey?)` | `dhtSetKeys([...])` changes the keys, also while running |
 | mDNS discovery | `enableMdns()` | |
 | Peer exchange | `enablePeerExchange()` | |
 | Port mapping | `enablePortMapping(upnp?, natpmp?)` | |
@@ -100,6 +100,7 @@ expired live messages) or with `onPeerPath`.
 | File transfer | `enableFileTransfer(tempDir?)` | `onFileOffer`, `onFileProgress`, `onFileComplete`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`, `cancelFile`, `pauseFile`, `resumeFile` |
 | Ping | `enablePing()` | `peerRttMs(id)` |
 | Reconnection | `enableReconnect()` | `addReconnect(host, port)`, `removeReconnect(host, port)` |
+| Reconnection, lost peers too | `enableReconnectLost(lostForMs)` | as above; a peer lost (not one that left) is redialed where it was last seen for `lostForMs` |
 
 ### Pub/sub and JSON
 

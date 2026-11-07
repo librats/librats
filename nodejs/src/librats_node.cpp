@@ -310,6 +310,7 @@ bool to_config(Napi::Env env, const Napi::Object& cfg, rats_config_t& c, ConfigS
         return false;
     if (cfg_number(env, cfg, "udpReceiveWindow", 9007199254740991.0, n)) c.udp_receive_window = static_cast<size_t>(n);
     if (cfg_number(env, cfg, "udpReceiveBudget", 9007199254740991.0, n)) c.udp_receive_budget = static_cast<size_t>(n);
+    if (cfg_number(env, cfg, "udpIdleTimeoutMs", 4294967295.0, n)) c.udp_idle_timeout_ms = static_cast<uint32_t>(n);
     if (cfg_number(env, cfg, "reactorThreads", 1024, n)) c.reactor_threads = static_cast<size_t>(n);
     if (env.IsExceptionPending()) return false;
 
@@ -487,6 +488,7 @@ private:
 
     // discovery and NAT traversal
     void EnableDht(const Napi::CallbackInfo& info);
+    void DhtSetKeys(const Napi::CallbackInfo& info);
     void EnableMdns(const Napi::CallbackInfo& info);
     void EnablePeerExchange(const Napi::CallbackInfo& info);
     void EnablePortMapping(const Napi::CallbackInfo& info);
@@ -529,6 +531,7 @@ private:
     void EnablePing(const Napi::CallbackInfo& info);
     Napi::Value PeerRttMs(const Napi::CallbackInfo& info);
     void EnableReconnect(const Napi::CallbackInfo& info);
+    void EnableReconnectLost(const Napi::CallbackInfo& info);
     void AddReconnect(const Napi::CallbackInfo& info);
     void RemoveReconnect(const Napi::CallbackInfo& info);
 };
@@ -805,6 +808,29 @@ void RatsNode::EnableDht(const Napi::CallbackInfo& info) {
         key_ptr = key.c_str();
     }
     throw_on_error(info.Env(), rats_enable_dht(node_, port, key_ptr));
+}
+
+void RatsNode::DhtSetKeys(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    if (info.Length() < 1 || !info[0].IsArray()) {
+        throw_type(info.Env(), "Expected keys (array of strings)");
+        return;
+    }
+    const Napi::Array list = info[0].As<Napi::Array>();
+    std::vector<std::string> keys;
+    keys.reserve(list.Length());
+    for (uint32_t i = 0; i < list.Length(); ++i) {
+        const Napi::Value item = list.Get(i);
+        if (!item.IsString()) {
+            throw_type(info.Env(), "Expected keys (array of strings)");
+            return;
+        }
+        keys.push_back(item.As<Napi::String>().Utf8Value());
+    }
+    std::vector<const char*> ptrs;
+    ptrs.reserve(keys.size());
+    for (const auto& k : keys) ptrs.push_back(k.c_str());
+    throw_on_error(info.Env(), rats_dht_set_keys(node_, ptrs.data(), ptrs.size()));
 }
 
 void RatsNode::EnableMdns(const Napi::CallbackInfo& info) {
@@ -1100,6 +1126,13 @@ void RatsNode::EnableReconnect(const Napi::CallbackInfo& info) {
     throw_on_error(info.Env(), rats_enable_reconnect(node_));
 }
 
+void RatsNode::EnableReconnectLost(const Napi::CallbackInfo& info) {
+    if (!require_node(info)) return;
+    double lost_for = 0;
+    if (!arg_uint(info, 0, "lostForMs", 4294967295.0, lost_for)) return;
+    throw_on_error(info.Env(), rats_enable_reconnect_lost(node_, static_cast<uint32_t>(lost_for)));
+}
+
 void RatsNode::AddReconnect(const Napi::CallbackInfo& info) {
     if (!require_node(info)) return;
     std::string host;
@@ -1151,6 +1184,7 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("on", &RatsNode::On),
 
         InstanceMethod("enableDht", &RatsNode::EnableDht),
+        InstanceMethod("dhtSetKeys", &RatsNode::DhtSetKeys),
         InstanceMethod("enableMdns", &RatsNode::EnableMdns),
         InstanceMethod("enablePeerExchange", &RatsNode::EnablePeerExchange),
         InstanceMethod("enablePortMapping", &RatsNode::EnablePortMapping),
@@ -1186,6 +1220,7 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("enablePing", &RatsNode::EnablePing),
         InstanceMethod("peerRttMs", &RatsNode::PeerRttMs),
         InstanceMethod("enableReconnect", &RatsNode::EnableReconnect),
+        InstanceMethod("enableReconnectLost", &RatsNode::EnableReconnectLost),
         InstanceMethod("addReconnect", &RatsNode::AddReconnect),
         InstanceMethod("removeReconnect", &RatsNode::RemoveReconnect),
     });

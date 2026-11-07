@@ -119,6 +119,12 @@ export interface RatsConfig {
   udpReceiveBudget?: number
   /** Kernel segmentation offload for UDP where the OS has it. Default true. */
   udpOffload?: boolean
+  /**
+   * Silence from a peer after which its UDP connection is closed as lost
+   * ('idle_timeout'); keep-alives go out four times within it. Shorter notices
+   * a vanished peer sooner, longer wakes the radio less. Default 45 s.
+   */
+  udpIdleTimeoutMs?: number
 
   /** I/O threads. Default 1, which is plenty for a phone. */
   reactorThreads?: number
@@ -479,6 +485,14 @@ export interface RatsNode
   enableDht(config?: DhtConfig): void
 
   /**
+   * The keys the DHT announces and searches from now on, in place of
+   * `discoveryKey` or the keys set before: a new one is announced and searched
+   * at once, one gone no longer is. An empty array leaves none. Needs
+   * `enableDht()`; unlike it, works after `start()` too.
+   */
+  dhtSetKeys(keys: string[]): void
+
+  /**
    * Find peers on the local network over mDNS. On iOS 14+ raw multicast needs
    * the com.apple.developer.networking.multicast entitlement.
    */
@@ -667,9 +681,34 @@ export interface RatsNode
    */
   enableReconnect(): void
 
+  /**
+   * `enableReconnect()`, and a peer lost — its connection closed by neither
+   * side: gone quiet past the idle timeout, or stopped answering — is dialed
+   * again where it was last known for `lostForMs`, until it is back over any
+   * route. A peer that left is not. Made for a phone that changes networks.
+   * Instead of `enableReconnect()`, not as well.
+   */
+  enableReconnectLost(lostForMs: number): void
+
   /** Keep host:port connected. Throws if the host does not resolve. */
   addReconnect(host: string, port: number): void
 
   /** Stop keeping host:port connected and forget it. */
   removeReconnect(host: string, port: number): void
+
+  // ─── process-wide (use the top-level helpers in index.ts) ───
+
+  /**
+   * Log level of the whole library, every node in the process: 'debug',
+   * 'info' (the default), 'warn' or 'error'. A string rather than a union:
+   * Nitro would name the enumerators DEBUG and ERROR, which are macros in
+   * debug iOS builds and on Windows.
+   */
+  setLogLevel(level: string): void
+
+  /** Also write the library's logs to `path`; undefined stops it. */
+  setLogFile(path?: string): void
+
+  /** Library version with the build number, e.g. "2.3.7.884". */
+  readonly libraryVersion: string
 }

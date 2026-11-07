@@ -105,6 +105,7 @@ public:
 
   // — discovery —
   void enableDht(const std::optional<DhtConfig>& config) override;
+  void dhtSetKeys(const std::vector<std::string>& keys) override;
   void enableMdns() override;
   void enablePeerExchange() override;
 
@@ -169,8 +170,14 @@ public:
   void enablePing() override;
   std::optional<double> peerRttMs(const std::string& peerId) override;
   void enableReconnect() override;
+  void enableReconnectLost(double lostForMs) override;
   void addReconnect(const std::string& host, double port) override;
   void removeReconnect(const std::string& host, double port) override;
+
+  // — process-wide —
+  void setLogLevel(const std::string& level) override;
+  void setLogFile(const std::optional<std::string>& path) override;
+  std::string getLibraryVersion() override;
 
 private:
   /**

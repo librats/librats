@@ -76,6 +76,41 @@ export function createNode(config?: RatsConfig): RatsNode {
   return node
 }
 
+// --- process-wide ------------------------------------------------------------
+// Logging and the version belong to the library, not to a node. Nitro has no
+// free functions, so they are reached through one RatsNode kept for the purpose,
+// which is never configured and so never builds a node or opens a socket.
+
+/** Log level of the whole library. */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+let processWide: RatsNode | undefined
+function library(): RatsNode {
+  if (processWide === undefined) {
+    processWide = NitroModules.createHybridObject<RatsNode>('RatsNode')
+  }
+  return processWide
+}
+
+/**
+ * Set the log level of every node in the process. The default is 'info'; on
+ * Android every line also goes to logcat, so 'warn' is a sensible release
+ * setting.
+ */
+export function setLogLevel(level: LogLevel): void {
+  library().setLogLevel(level)
+}
+
+/** Also write the library's logs to `path`; undefined stops it. */
+export function setLogFile(path?: string): void {
+  library().setLogFile(path)
+}
+
+/** Library version with the build number, e.g. "2.3.7.884". */
+export function libraryVersion(): string {
+  return library().libraryVersion
+}
+
 // --- UTF-8 helpers ---------------------------------------------------------
 // librats channels carry raw bytes, so text has to be encoded somewhere. These
 // live here because Hermes does **not** provide `TextDecoder` (it does provide

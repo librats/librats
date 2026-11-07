@@ -97,6 +97,7 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
         udpReceiveWindow: 1 << 20,
         udpReceiveBudget: 4 << 20,
         udpOffload: false,
+        udpIdleTimeoutMs: 5000,
         reactorThreads: 2,
         networkMonitor: false,
       });
@@ -117,6 +118,7 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
       assert.throws(() => new RatsNode({ preferredTransport: 'relay' }), TypeError);
       assert.throws(() => new RatsNode({ listenPort: 70000 }), RangeError);
       assert.throws(() => new RatsNode({ transportFallbackMs: 0 }), RangeError);
+      assert.throws(() => new RatsNode({ udpIdleTimeoutMs: -1 }), RangeError);
       assert.throws(() => new RatsNode(42), TypeError);
     });
 
@@ -160,6 +162,24 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
       assert.strictEqual(node.cancelFile(NOBODY, 12345), false);
       assert.throws(() => node.send(NOBODY, 'c', 'x'), (err) => err.code === 'NO_SUCH_PEER');
       assert.throws(() => node.send('not-hex', 'c', 'x'), (err) => err.code === 'INVALID_ARG');
+    });
+
+    it('changes the DHT keys once the DHT is enabled', function () {
+      assert.throws(() => node.dhtSetKeys(['room/a']), (err) => err.code === 'NOT_ENABLED');
+      node.enableDht();
+      node.dhtSetKeys(['room/a', 'room/b']);
+      node.dhtSetKeys([]);   // none: found by nobody over the DHT
+      assert.throws(() => node.dhtSetKeys(['']), (err) => err.code === 'INVALID_ARG');
+      assert.throws(() => node.dhtSetKeys('room/a'), TypeError);
+      assert.throws(() => node.dhtSetKeys(['room/a', 7]), TypeError);
+    });
+
+    it('enables reconnection of lost peers before start only', function () {
+      assert.throws(() => node.enableReconnectLost(-5), RangeError);
+      node.enableReconnectLost(30000);
+      node.addReconnect('127.0.0.1', 1);
+      node.start();
+      assert.throws(() => node.enableReconnectLost(30000), (err) => err.code === 'ALREADY_STARTED');
     });
 
     it('is inert once destroyed', function () {

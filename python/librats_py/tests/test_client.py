@@ -44,7 +44,8 @@ def test_defaults(node):
 def test_config_keywords_reach_the_node():
     with RatsNode(security=Security.PLAINTEXT, protocol="myapp/2.0", max_peers=10,
                   transports=TransportMask.TCP, transport_fallback_ms=FALLBACK_NEVER,
-                  udp_offload=False, reactor_threads=2, network_monitor=False) as n:
+                  udp_offload=False, udp_idle_timeout_ms=5000, reactor_threads=2,
+                  network_monitor=False) as n:
         assert n.protocol == "myapp/2.0"
         assert n.max_peers == 10
         n.start()
@@ -117,6 +118,28 @@ def test_every_subsystem_enables_before_start(node):
         node.punch_peer("0" * 64)
     with pytest.raises(RatsNotFoundError):
         node.cancel_file(node.local_id, 999999)
+
+
+@native
+def test_dht_keys_can_be_set(node):
+    with pytest.raises(RatsNotEnabledError):
+        node.dht_set_keys(["room/a"])
+    node.enable_dht()
+    node.dht_set_keys(["room/a", "room/b"])
+    node.dht_set_keys([])             # none: found by nobody over the DHT
+    with pytest.raises(RatsInvalidArgError):
+        node.dht_set_keys([""])
+    with pytest.raises(TypeError):
+        node.dht_set_keys("room/a")   # one string is not a list of keys
+
+
+@native
+def test_reconnect_lost_enables_before_start_only(node):
+    node.enable_reconnect_lost(30000)
+    node.add_reconnect("127.0.0.1", 1)
+    node.start()
+    with pytest.raises(RatsAlreadyStartedError):
+        node.enable_reconnect_lost(30000)
 
 
 @native

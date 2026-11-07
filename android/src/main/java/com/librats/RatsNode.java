@@ -2,6 +2,7 @@ package com.librats;
 
 import android.util.Log;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 
@@ -86,6 +87,7 @@ public class RatsNode implements AutoCloseable {
         long udpReceiveWindow;
         long udpReceiveBudget;
         boolean udpOffload = true;
+        int udpIdleTimeoutMs;
         int reactorThreads;
         boolean networkMonitor = true;
 
@@ -211,6 +213,17 @@ public class RatsNode implements AutoCloseable {
         /** Kernel segmentation offload for UDP where the system has it. Default true. */
         public Config udpOffload(boolean enable) {
             this.udpOffload = enable;
+            return this;
+        }
+
+        /**
+         * Silence from a peer after which its UDP connection is closed as lost
+         * ({@link CloseReason#IDLE_TIMEOUT}); keep-alives go out four times within
+         * it. Shorter notices a vanished peer sooner, longer wakes the radio less.
+         * Default 0: 45 s.
+         */
+        public Config udpIdleTimeoutMs(int ms) {
+            this.udpIdleTimeoutMs = (int) nonNegative(ms, "udpIdleTimeoutMs");
             return this;
         }
 
@@ -499,6 +512,25 @@ public class RatsNode implements AutoCloseable {
         enableDht(0, null);
     }
 
+    /**
+     * The keys the DHT announces and searches from now on, in place of the
+     * discovery key or the keys set before: a new one is announced and searched
+     * at once, one gone no longer is. No keys leaves none, so the node finds and
+     * is found by nobody over the DHT. Needs {@link #enableDht()}; works before
+     * and after start, from any thread.
+     *
+     * @throws RatsException INVALID_ARG for a null or empty key, NOT_ENABLED
+     *                       without the DHT
+     */
+    public void dhtSetKeys(String... keys) {
+        check(nativeDhtSetKeys(ptr(), keys == null ? new String[0] : keys), "set DHT keys");
+    }
+
+    /** {@link #dhtSetKeys(String...)} from a collection. */
+    public void dhtSetKeys(Collection<String> keys) {
+        dhtSetKeys(keys.toArray(new String[0]));
+    }
+
     /** mDNS discovery on the local network. */
     public void enableMdns() {
         check(nativeEnableMdns(ptr()), "enable mDNS");
@@ -733,6 +765,18 @@ public class RatsNode implements AutoCloseable {
         check(nativeEnableReconnect(ptr()), "enable reconnect");
     }
 
+    /**
+     * {@link #enableReconnect()}, and a peer lost — its connection closed by
+     * neither side: gone quiet past the idle timeout, or stopped answering — is
+     * dialed again where it was last known for {@code lostForMs}, until it is back
+     * over any route. A peer that left is not. Made for a phone changing networks.
+     * Enable before start, instead of {@link #enableReconnect()}.
+     */
+    public void enableReconnectLost(int lostForMs) {
+        if (lostForMs < 0) throw new IllegalArgumentException("lostForMs must be >= 0, got " + lostForMs);
+        check(nativeEnableReconnectLost(ptr(), lostForMs), "enable reconnect of lost peers");
+    }
+
     /** Keeps an address connected. May be called while running. */
     public void addReconnect(String host, int port) {
         check(nativeAddReconnect(ptr(), host, port), "add reconnect target " + host + ":" + port);
@@ -832,6 +876,7 @@ public class RatsNode implements AutoCloseable {
     private static native int nativeOnPeerPath(long ptr, PathCallback callback);
 
     private static native int nativeEnableDht(long ptr, int dhtPort, String discoveryKey);
+    private static native int nativeDhtSetKeys(long ptr, String[] keys);
     private static native int nativeEnableMdns(long ptr);
     private static native int nativeEnablePeerExchange(long ptr);
 
@@ -868,6 +913,7 @@ public class RatsNode implements AutoCloseable {
     private static native int nativeEnablePing(long ptr);
     private static native long nativePeerRttMs(long ptr, String peerId);
     private static native int nativeEnableReconnect(long ptr);
+    private static native int nativeEnableReconnectLost(long ptr, int lostForMs);
     private static native int nativeAddReconnect(long ptr, String host, int port);
     private static native int nativeRemoveReconnect(long ptr, String host, int port);
 

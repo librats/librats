@@ -95,6 +95,7 @@ class RatsNode {
   // ---- discovery and NAT traversal (enable before start) ----
 
   enableDht(port = 0, discoveryKey) { this._native.enableDht(port, discoveryKey); }
+  dhtSetKeys(keys) { this._native.dhtSetKeys(keys); }
   enableMdns() { this._native.enableMdns(); }
   enablePeerExchange() { this._native.enablePeerExchange(); }
   enablePortMapping(upnp = true, natpmp = true) { this._native.enablePortMapping(upnp, natpmp); }
@@ -138,6 +139,7 @@ class RatsNode {
   enablePing() { this._native.enablePing(); }
   peerRttMs(peerId) { return this._native.peerRttMs(peerId); }
   enableReconnect() { this._native.enableReconnect(); }
+  enableReconnectLost(lostForMs) { this._native.enableReconnectLost(lostForMs); }
   addReconnect(host, port) { this._native.addReconnect(host, port); }
   removeReconnect(host, port) { this._native.removeReconnect(host, port); }
 }
