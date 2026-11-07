@@ -213,6 +213,7 @@ private:
     
     // Service processing
     void extract_service_from_response(const DnsMessage& response, const std::string& sender_ip);
+    static bool same_dns_name(std::string a, std::string b);
     bool is_librats_service(const std::string& service_name) const;
     void add_or_update_service(const MdnsService& service);
     

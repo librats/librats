@@ -384,11 +384,14 @@ bool MdnsClient::join_multicast_group() {
         LOG_MDNS_WARN("Failed to set multicast TTL");
     }
     
-    // Disable loopback
-    int loopback = 0;
+    // Loopback on: two nodes on one host (two apps, or two instances of one) are
+    // each other's only way to meet here, and with it off neither hears the other.
+    // Our own packets come back too; extract_service_from_response() drops our own
+    // announcement by its instance name.
+    int loopback = 1;
     if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_LOOP, 
                    reinterpret_cast<const char*>(&loopback), sizeof(loopback)) < 0) {
-        LOG_MDNS_WARN("Failed to disable multicast loopback");
+        LOG_MDNS_WARN("Failed to enable multicast loopback");
     }
     
     LOG_MDNS_INFO("Joined IPv4 multicast group: " << MDNS_MULTICAST_IPv4 << " on interface " << local_ip_address_);
@@ -484,14 +487,9 @@ void MdnsClient::receiver_loop() {
             continue;
         }
 
-        std::string sender_ip = sender.ip.to_string();
-
-        // Ignore packets from ourselves
-        if (sender_ip == local_ip_address_) {
-            continue;
-        }
-
-        handle_received_packet(packet, sender_ip);
+        // No filtering by sender address: another node on this host sends from the
+        // same one. Our own announcement is recognised by name instead.
+        handle_received_packet(packet, sender.ip.to_string());
     }
 
     LOG_MDNS_DEBUG("mDNS receiver loop ended");
@@ -701,25 +699,28 @@ void MdnsClient::extract_service_from_response(const DnsMessage& response, const
     }
     
     // Only add service if we have the essential information
-    if (has_ptr && has_srv && !service.service_name.empty() && service.port > 0) {
-        add_or_update_service(service);
+    if (!has_ptr || !has_srv || service.service_name.empty() || service.port == 0) return;
+
+    // Our own announcement, looped back to us (or our answer to our own query).
+    if (announcing_.load() &&
+        same_dns_name(service.service_name, create_service_instance_name(service_instance_name_))) {
+        return;
     }
+
+    add_or_update_service(service);
 }
 
 bool MdnsClient::is_librats_service(const std::string& service_name) const {
-    // Normalize both names - remove trailing dots for comparison
-    std::string name1 = service_name;
-    std::string name2 = service_type_;
-    
-    // Remove trailing dots
-    while (!name1.empty() && name1.back() == '.') name1.pop_back();
-    while (!name2.empty() && name2.back() == '.') name2.pop_back();
-    
-    // Case-insensitive comparison
-    std::transform(name1.begin(), name1.end(), name1.begin(), ::tolower);
-    std::transform(name2.begin(), name2.end(), name2.begin(), ::tolower);
-    
-    return name1 == name2;
+    return same_dns_name(service_name, service_type_);
+}
+
+bool MdnsClient::same_dns_name(std::string a, std::string b) {
+    // DNS names compare case-insensitively, with or without the root's trailing dot.
+    while (!a.empty() && a.back() == '.') a.pop_back();
+    while (!b.empty() && b.back() == '.') b.pop_back();
+    std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+    std::transform(b.begin(), b.end(), b.begin(), ::tolower);
+    return a == b;
 }
 
 void MdnsClient::add_or_update_service(const MdnsService& service) {

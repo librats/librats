@@ -6,6 +6,10 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace librats;
 
@@ -171,4 +175,52 @@ TEST_F(MdnsTest, StopDoesNotWaitOutAPollInterval) {
     EXPECT_LT(worst_ms, kMaxStopMs)
         << "slowest stop() took " << worst_ms << " ms over " << kCycles
         << " cycles — the receiver is waiting out a timeout instead of being woken";
+}
+
+// Two nodes on one host meet over mDNS like any other two: they send from the same
+// address, so nothing may be filtered by it, and multicast has to loop back. Each
+// one also hears its own announcement and must not report it.
+TEST_F(MdnsTest, TwoClientsOnOneHostFindEachOther) {
+    // Unique names, so another run on the network cannot stand in for the peer.
+    const std::string tag = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 1000000007);
+    const std::string name_a = "same-host-a-" + tag;
+    const std::string name_b = "same-host-b-" + tag;
+
+    struct Seen {
+        std::mutex mutex;
+        std::vector<std::string> names;
+        bool has(const std::string& part) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return std::any_of(names.begin(), names.end(),
+                               [&](const std::string& n) { return n.find(part) != std::string::npos; });
+        }
+    } seen_by_a, seen_by_b;
+
+    MdnsClient a(name_a, 8201);
+    MdnsClient b(name_b, 8202);
+    for (auto [client, seen] : {std::pair{&a, &seen_by_a}, std::pair{&b, &seen_by_b}}) {
+        client->set_service_callback([seen = seen](const MdnsService& service, bool) {
+            std::lock_guard<std::mutex> lock(seen->mutex);
+            seen->names.push_back(service.service_name);
+        });
+        ASSERT_TRUE(client->start());
+        ASSERT_TRUE(client->start_discovery());
+    }
+    ASSERT_TRUE(a.announce_service(name_a, 8201));
+    ASSERT_TRUE(b.announce_service(name_b, 8202));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline &&
+           !(seen_by_a.has(name_b) && seen_by_b.has(name_a))) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    EXPECT_TRUE(seen_by_a.has(name_b)) << "a never saw b";
+    EXPECT_TRUE(seen_by_b.has(name_a)) << "b never saw a";
+    EXPECT_FALSE(seen_by_a.has(name_a)) << "a reported its own announcement";
+    EXPECT_FALSE(seen_by_b.has(name_b)) << "b reported its own announcement";
+
+    a.stop();
+    b.stop();
 }
