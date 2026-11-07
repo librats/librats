@@ -326,9 +326,11 @@ bool Node::start() {
 
     // Attach subsystems (registers their message handlers, event subscriptions
     // and service providers) BEFORE any reactor thread runs, so the router and the
-    // event/service tables are fully built with no concurrent writes.
+    // event/service tables are fully built with no concurrent writes. Once per
+    // subsystem for the node's life: what it registers is never cleared, so
+    // attaching again on a restart would deliver every event to it twice.
     NodeContext ctx{*this, events_, services_};
-    for (auto& s : subsystems_) s->attach(ctx);
+    for (; attached_ < subsystems_.size(); ++attached_) subsystems_[attached_]->attach(ctx);
 
     // Path sampling costs a timer and a look at every peer each interval, so it
     // runs only when asked for: by the config, or by someone listening (a

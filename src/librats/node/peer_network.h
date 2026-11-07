@@ -170,6 +170,9 @@ struct NodeContext;  // node/node_context.h — bundles network + events + servi
 /// reaches the rest of the node only through the NodeContext it is attached to
 /// (the peer mesh via ctx.network, host events via ctx.events, sibling modules via
 /// ctx.services). A subsystem is mocked in tests by faking those interfaces.
+///
+/// attach() is called once, at the first start() after the subsystem was added;
+/// start() and stop() then pair up for every run of a node that is restarted.
 class RATS_API Subsystem {
 public:
     virtual ~Subsystem() = default;

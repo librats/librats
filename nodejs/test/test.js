@@ -265,3 +265,46 @@ describe('librats Node.js bindings', { timeout: 30_000 }, function () {
     }
   });
 });
+
+describe('Teardown', () => {
+  // A Worker that ends while its nodes are busy never calls destroy(): Node
+  // tears the environment down around them. The nodes must be gone before the
+  // thread-safe functions their threads call through, and a callback still
+  // queued then must be dropped — either mistake brings the whole process down,
+  // this test runner with it.
+  it('survives Workers ended mid-traffic without destroy()', async function () {
+    const { Worker } = require('worker_threads');
+    const body = `
+      const { parentPort, workerData } = require('worker_threads');
+      const { RatsNode, setLogLevel } = require(workerData.lib);
+      setLogLevel('error');
+      const a = new RatsNode({ bindAddress: '127.0.0.1' });
+      const b = new RatsNode({ dialOnly: true });
+      a.on('chat', (peer, data) => { try { a.send(peer, 'chat', data); } catch (e) {} });
+      b.on('chat', () => {});
+      b.onPeerConnected((peer) => {
+        parentPort.postMessage('busy');
+        const buf = Buffer.alloc(32 * 1024, 7);
+        const tick = () => {
+          try { for (let k = 0; k < 50 && b.peerWritable(peer); k++) b.send(peer, 'chat', buf); }
+          catch (e) { return; }
+          setImmediate(tick);
+        };
+        tick();
+        if (workerData.exit) setTimeout(() => process.exit(0), 40);
+      });
+      a.start(); b.start();
+      b.connect('127.0.0.1', a.listenPort);
+    `;
+    const lib = require.resolve('../lib/index');
+    for (let i = 0; i < 6; i++) {
+      const exit = i % 2 === 1;
+      const w = new Worker(body, { eval: true, workerData: { lib, exit } });
+      await new Promise((resolve, reject) => {
+        w.on('message', () => { if (!exit) setTimeout(() => w.terminate(), 30 + i * 10); });
+        w.on('error', reject);
+        w.on('exit', resolve);
+      });
+    }
+  });
+});

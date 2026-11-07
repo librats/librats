@@ -51,6 +51,7 @@ class RatsConfig(Structure):
         ("udp_receive_window", c_size_t),
         ("udp_receive_budget", c_size_t),
         ("disable_udp_offload", c_int),
+        ("udp_idle_timeout_ms", c_uint32),
         # runtime
         ("reactor_threads", c_size_t),
         ("disable_network_monitor", c_int),

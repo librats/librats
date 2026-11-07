@@ -38,7 +38,10 @@
           "AdditionalOptions": [ "/std:c++17" ]
         }
       },
-      "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS" ],
+      # SWALLOW_UNTHROWABLE: a callback still queued when a Worker or the process
+      # is torn down is called into an environment that can no longer run JS; its
+      # failure must be dropped, not turned into napi_fatal_error.
+      "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS", "NODE_API_SWALLOW_UNTHROWABLE_EXCEPTIONS" ],
       "conditions": [
         ["OS=='win'", {
           # Link the prebuilt static archive produced by scripts/build-librats.js

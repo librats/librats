@@ -502,6 +502,51 @@ TEST(NodeTest, RestartCycles) {
     }
 }
 
+// A subsystem is attached once for the node's life, however often the node is
+// restarted: what attach() registers is never cleared, so attaching again would
+// deliver every peer event to it once more per restart. One added between runs is
+// attached at the next start.
+TEST(NodeTest, RestartAttachesEachSubsystemOnce) {
+    struct Counting final : Subsystem {
+        std::atomic<int> attaches{0}, starts{0}, stops{0}, connected{0};
+        void attach(NodeContext& ctx) override {
+            ++attaches;
+            ctx.network.on_peer_connected([this](const Peer&) { ++connected; });
+        }
+        void start() override { ++starts; }
+        void stop() override { ++stops; }
+    };
+
+    Node server(server_config());
+    Node client(client_config());
+    auto* first = client.add_subsystem(std::make_unique<Counting>());
+    Counting* late = nullptr;
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        if (cycle == 1) late = client.add_subsystem(std::make_unique<Counting>());
+        ASSERT_TRUE(server.start()) << "cycle " << cycle;
+        ASSERT_TRUE(client.start()) << "cycle " << cycle;
+
+        client.connect("127.0.0.1", server.listen_port());
+        ASSERT_TRUE(wait_for([&] { return first->connected.load() == cycle + 1; }))
+            << "cycle " << cycle << ": connected " << first->connected.load();
+        if (late) EXPECT_TRUE(wait_for([&] { return late->connected.load() == cycle; }));
+
+        client.stop();
+        server.stop();
+    }
+
+    // Settle: a second delivery of the last event would land by now.
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(first->attaches.load(), 1);
+    EXPECT_EQ(first->connected.load(), 3);
+    EXPECT_EQ(first->starts.load(), 3);
+    EXPECT_EQ(first->stops.load(), 3);
+    ASSERT_NE(late, nullptr);
+    EXPECT_EQ(late->attaches.load(), 1);
+    EXPECT_EQ(late->connected.load(), 2);
+}
+
 // Hostile / degenerate inputs are no-ops, not crashes.
 TEST(NodeTest, RobustAgainstBadInputs) {
     // start() fails (returns false) when the bind address is not a local interface.

@@ -112,6 +112,7 @@ class RatsNode:
         udp_receive_window: int = 0,
         udp_receive_budget: int = 0,
         udp_offload: bool = True,
+        udp_idle_timeout_ms: int = 0,
         reactor_threads: int = 0,
         network_monitor: bool = True,
     ):
@@ -144,6 +145,9 @@ class RatsNode:
             udp_receive_budget: Bytes all UDP connections together may hold out of
                 order; 0 = 64 MiB.
             udp_offload: Use the kernel's UDP segmentation offload where present.
+            udp_idle_timeout_ms: Silence from a peer after which its UDP
+                connection is closed as lost (``CloseReason.IDLE_TIMEOUT``);
+                keep-alives go out four times within it. 0 = 45 s.
             reactor_threads: I/O threads; 0 = 1.
             network_monitor: Watch the host for interface and address changes.
 
@@ -174,6 +178,7 @@ class RatsNode:
         cfg.udp_receive_window = udp_receive_window
         cfg.udp_receive_budget = udp_receive_budget
         cfg.disable_udp_offload = int(not udp_offload)
+        cfg.udp_idle_timeout_ms = udp_idle_timeout_ms
         cfg.reactor_threads = reactor_threads
         cfg.disable_network_monitor = int(not network_monitor)
 

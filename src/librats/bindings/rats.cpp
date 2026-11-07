@@ -162,6 +162,30 @@ SendOptions send_options(uint32_t lifetime_ms) {
     return options;
 }
 
+// Marks a thread as running a callback of one node, for as long as the callback
+// runs; nested callbacks stack. Every callback the C caller registered is entered
+// through one, so rats_stop()/rats_destroy() can tell they were called from inside
+// the node's own callback — where stopping would join the very thread making the
+// call (a reactor, or a subsystem's worker). The scopes are what make that
+// detectable wherever the callback runs, not just on a reactor.
+struct CallbackScope {
+    const rats_node* node;
+    CallbackScope*   outer;
+    static thread_local CallbackScope* innermost;
+
+    explicit CallbackScope(const rats_node* n) : node(n), outer(innermost) { innermost = this; }
+    ~CallbackScope() { innermost = outer; }
+    CallbackScope(const CallbackScope&) = delete;
+    CallbackScope& operator=(const CallbackScope&) = delete;
+
+    static bool inside(const rats_node* n) {
+        for (const CallbackScope* s = innermost; s; s = s->outer)
+            if (s->node == n) return true;
+        return false;
+    }
+};
+thread_local CallbackScope* CallbackScope::innermost = nullptr;
+
 // Translate the zero-means-default C config into a NodeConfig. nullopt for a
 // config no node can run with, which rats_create() reports as NULL rather than
 // leaving the caller to find out from a node that never connects.
@@ -284,7 +308,14 @@ rats_t rats_create(const rats_config_t* config) {
     }
 }
 
-void rats_destroy(rats_t node) { delete node; }
+void rats_destroy(rats_t node) {
+    if (node && CallbackScope::inside(node)) {
+        LOG_ERROR("capi", "rats_destroy() called from inside one of the node's own callbacks; "
+                          "refused (it would join the calling thread). Destroy it from another thread.");
+        return;
+    }
+    delete node;
+}
 
 rats_error_t rats_start(rats_t node) {
     if (node->started) return RATS_ERR_ALREADY_STARTED;
@@ -294,6 +325,11 @@ rats_error_t rats_start(rats_t node) {
 }
 
 void rats_stop(rats_t node) {
+    if (CallbackScope::inside(node)) {
+        LOG_ERROR("capi", "rats_stop() called from inside one of the node's own callbacks; "
+                          "refused (it would join the calling thread). Stop it from another thread.");
+        return;
+    }
     node->node->stop();
     node->started = false;
 }
@@ -410,7 +446,8 @@ rats_error_t rats_path_stats(rats_t node, const char* peer_id, rats_path_stats_t
 rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on_peer_connected([cb, user](const Peer& peer) {
+    node->node->on_peer_connected([node, cb, user](const Peer& peer) {
+        CallbackScope scope(node);
         cb(user, peer.id().to_hex().c_str());
     });
     return RATS_OK;
@@ -419,7 +456,8 @@ rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user) {
 rats_error_t rats_on_peer_disconnected(rats_t node, rats_disconnect_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on_peer_disconnected([cb, user](const PeerId& id, CloseReason reason) {
+    node->node->on_peer_disconnected([node, cb, user](const PeerId& id, CloseReason reason) {
+        CallbackScope scope(node);
         cb(user, id.to_hex().c_str(), to_c(reason));
     });
     return RATS_OK;
@@ -428,7 +466,8 @@ rats_error_t rats_on_peer_disconnected(rats_t node, rats_disconnect_cb cb, void*
 rats_error_t rats_on_dial_failed(rats_t node, rats_dial_failed_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on_dial_failed([cb, user](const Address& address) {
+    node->node->on_dial_failed([node, cb, user](const Address& address) {
+        CallbackScope scope(node);
         cb(user, address.to_string().c_str());
     });
     return RATS_OK;
@@ -437,7 +476,8 @@ rats_error_t rats_on_dial_failed(rats_t node, rats_dial_failed_cb cb, void* user
 rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on_peer_writable([cb, user](const Peer& peer) {
+    node->node->on_peer_writable([node, cb, user](const Peer& peer) {
+        CallbackScope scope(node);
         cb(user, peer.id().to_hex().c_str());
     });
     return RATS_OK;
@@ -446,7 +486,8 @@ rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user) {
 rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on_peer_path([cb, user](const Peer& peer, const PathStats& stats) {
+    node->node->on_peer_path([node, cb, user](const Peer& peer, const PathStats& stats) {
+        CallbackScope scope(node);
         const rats_path_stats_t c = to_c(stats);
         cb(user, peer.id().to_hex().c_str(), &c);
     });
@@ -456,7 +497,8 @@ rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user) {
 rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user) {
     if (!channel || !cb) return RATS_ERR_INVALID_ARG;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->node->on(channel, [cb, user](const Peer& peer, ByteView data) {
+    node->node->on(channel, [node, cb, user](const Peer& peer, ByteView data) {
+        CallbackScope scope(node);
         cb(user, peer.id().to_hex().c_str(), data.data(), data.size());
     });
     return RATS_OK;
@@ -545,7 +587,9 @@ rats_error_t rats_enable_pubsub(rats_t node) {
 rats_error_t rats_subscribe(rats_t node, const char* topic, rats_topic_cb cb, void* user) {
     if (!topic || !cb) return RATS_ERR_INVALID_ARG;
     if (!node->pubsub) return RATS_ERR_NOT_ENABLED;
-    node->pubsub->subscribe(topic, [cb, user](const PeerId& from, const std::string& t, ByteView data) {
+    node->pubsub->subscribe(topic, [node, cb, user](const PeerId& from, const std::string& t,
+                                                    ByteView data) {
+        CallbackScope scope(node);
         cb(user, from.to_hex().c_str(), t.c_str(), data.data(), data.size());
     });
     return RATS_OK;
@@ -572,8 +616,9 @@ rats_error_t rats_enable_json(rats_t node) {
 }
 
 namespace {
-MessageJson::Handler json_handler(rats_json_cb cb, void* user) {
-    return [cb, user](const PeerId& from, const Json& data) {
+MessageJson::Handler json_handler(rats_t node, rats_json_cb cb, void* user) {
+    return [node, cb, user](const PeerId& from, const Json& data) {
+        CallbackScope scope(node);
         cb(user, from.to_hex().c_str(), data.dump().c_str());
     };
 }
@@ -582,14 +627,14 @@ MessageJson::Handler json_handler(rats_json_cb cb, void* user) {
 rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user) {
     if (!type || !cb) return RATS_ERR_INVALID_ARG;
     if (!node->json) return RATS_ERR_NOT_ENABLED;
-    node->json->on(type, json_handler(cb, user));
+    node->json->on(type, json_handler(node, cb, user));
     return RATS_OK;
 }
 
 rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void* user) {
     if (!type || !cb) return RATS_ERR_INVALID_ARG;
     if (!node->json) return RATS_ERR_NOT_ENABLED;
-    node->json->once(type, json_handler(cb, user));
+    node->json->once(type, json_handler(node, cb, user));
     return RATS_OK;
 }
 
@@ -632,7 +677,8 @@ rats_error_t rats_on_file_offer(rats_t node, rats_file_offer_cb cb, void* user) 
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (!node->files) return RATS_ERR_NOT_ENABLED;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->files->on_offer([cb, user](const FileTransfer::Offer& o) {
+    node->files->on_offer([node, cb, user](const FileTransfer::Offer& o) {
+        CallbackScope scope(node);
         cb(user, o.from.to_hex().c_str(), o.id, o.name.c_str(), o.size, o.is_directory ? 1 : 0);
     });
     return RATS_OK;
@@ -642,7 +688,8 @@ rats_error_t rats_on_file_progress(rats_t node, rats_file_progress_cb cb, void* 
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (!node->files) return RATS_ERR_NOT_ENABLED;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->files->on_progress([cb, user](const FileTransfer::Progress& p) {
+    node->files->on_progress([node, cb, user](const FileTransfer::Progress& p) {
+        CallbackScope scope(node);
         const std::string peer = p.peer.to_hex();
         rats_file_progress_t c{};
         c.transfer_id        = p.id;
@@ -664,8 +711,9 @@ rats_error_t rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* 
     if (!cb) return RATS_ERR_INVALID_ARG;
     if (!node->files) return RATS_ERR_NOT_ENABLED;
     if (node->started) return RATS_ERR_ALREADY_STARTED;
-    node->files->on_complete([cb, user](const PeerId& peer, uint64_t id, bool success,
-                                        const std::string& path) {
+    node->files->on_complete([node, cb, user](const PeerId& peer, uint64_t id, bool success,
+                                              const std::string& path) {
+        CallbackScope scope(node);
         cb(user, peer.to_hex().c_str(), id, success ? 1 : 0, path.c_str());
     });
     return RATS_OK;

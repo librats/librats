@@ -86,6 +86,7 @@ out and the library default applies.
 | `udp_receive_window` | 16 MiB | ceiling of one UDP connection's flow-control window |
 | `udp_receive_budget` | 64 MiB | out-of-order bytes all UDP connections together may hold |
 | `udp_offload` | `True` | kernel UDP segmentation offload where available |
+| `udp_idle_timeout_ms` | 45 s | silence after which a UDP peer is dropped as lost (`CloseReason.IDLE_TIMEOUT`) |
 | `reactor_threads` | 1 | I/O threads |
 | `network_monitor` | `True` | watch the host for interface and address changes |
 

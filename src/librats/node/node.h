@@ -392,6 +392,10 @@ private:
     std::unique_ptr<Dialer>           dialer_;      ///< transport choice + fallback race
 
     std::vector<std::unique_ptr<Subsystem>> subsystems_;
+    /// How many of subsystems_ have been attached. What attach() registers
+    /// (handlers, event subscriptions, services) lives as long as the node, so a
+    /// restart must not attach again — only one added since the last start.
+    size_t                                  attached_ = 0;
 
     // Host network-change watch. The monitor signals on its own thread; the
     // maintenance thread does the (possibly blocking) EventBus emit off it, so

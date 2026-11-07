@@ -388,12 +388,36 @@ public:
 private:
     rats_t node_ = nullptr;
     std::vector<std::unique_ptr<Callback>> callbacks_;
+    napi_env cleanup_env_ = nullptr;   ///< where CleanupHook is registered, if it is
+
+    // An environment that goes away (a Worker ending, the process exiting) runs
+    // its cleanup hooks newest first, and every thread-safe function registers one
+    // that frees it. librats' threads call through those functions until
+    // rats_destroy() joins them, so the node must be destroyed before any of them
+    // is freed — before the garbage collector would get to this object, if it
+    // ever does. Hence this hook, re-registered after each thread-safe function
+    // is created so that it stays the newest and runs first.
+    static void CleanupHook(void* arg) {
+        auto* self = static_cast<RatsNode*>(arg);
+        self->cleanup_env_ = nullptr;   // running now: nothing left to remove
+        self->Teardown();
+    }
+    void arm_cleanup(napi_env env) {
+        disarm_cleanup();
+        if (napi_add_env_cleanup_hook(env, CleanupHook, this) == napi_ok) cleanup_env_ = env;
+    }
+    void disarm_cleanup() {
+        if (!cleanup_env_) return;
+        napi_remove_env_cleanup_hook(cleanup_env_, CleanupHook, this);
+        cleanup_env_ = nullptr;
+    }
 
     // A new callback slot for `fn`. Undone by drop_last() when librats refuses it.
     Callback* add_callback(Napi::Env env, const Napi::Function& fn, const char* name) {
         auto cb = std::make_unique<Callback>();
         cb->tsfn = Napi::ThreadSafeFunction::New(env, fn, name, 0, 1);
         callbacks_.push_back(std::move(cb));
+        arm_cleanup(env);   // newer than the function's own hook
         return callbacks_.back().get();
     }
     void drop_last() {
@@ -416,6 +440,7 @@ private:
     // Destroy the node first — that joins the reactor threads, so nothing calls
     // back afterwards — then let the thread-safe functions go. Idempotent.
     void Teardown() {
+        disarm_cleanup();
         if (node_) {
             rats_destroy(node_);
             node_ = nullptr;
@@ -525,7 +550,9 @@ RatsNode::RatsNode(const Napi::CallbackInfo& info) : Napi::ObjectWrap<RatsNode>(
     if (!node_) {
         throw_code(env, "INVALID_CONFIG",
                    "no transport left to run, or a preferredTransport that is turned off");
+        return;
     }
+    arm_cleanup(env);
 }
 
 void RatsNode::Start(const Napi::CallbackInfo& info) {

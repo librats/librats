@@ -25,7 +25,10 @@
  * internal reactor thread — keep them short and never block in them. Register
  * them before rats_start(); the node-level ones refuse afterwards
  * (RATS_ERR_ALREADY_STARTED). Strings and structs handed to a callback are valid
- * only for the duration of the call.
+ * only for the duration of the call. A callback must not stop or destroy its own
+ * node — that would join the thread running it — so rats_stop() and
+ * rats_destroy() called from inside one are refused (logged, nothing done); do
+ * it from a thread of your own.
  *
  * Memory: the string arrays rats_peer_ids() and rats_observed_addresses()
  * return are released with rats_strings_free(). Every `const char*` the library
@@ -213,14 +216,17 @@ typedef struct {
  *  saved there. No socket is opened until rats_start(). */
 RATS_API rats_t rats_create(const rats_config_t* config);
 
-/** Stop the node if running and free it. The handle is invalid afterwards. */
+/** Stop the node if running and free it. The handle is invalid afterwards.
+ *  Refused (nothing done) from inside one of the node's own callbacks. */
 RATS_API void rats_destroy(rats_t node);
 
 /** Open the sockets, start the I/O threads and every enabled subsystem.
  *  RATS_ERR_ALREADY_STARTED, or RATS_ERR_BIND if the listen port is taken. */
 RATS_API rats_error_t rats_start(rats_t node);
 
-/** Close every connection and stop. Idempotent. */
+/** Close every connection and stop. Idempotent. Refused (nothing done) from
+ *  inside one of the node's own callbacks. rats_start() runs it again; every
+ *  enabled subsystem and registered callback carries over. */
 RATS_API void rats_stop(rats_t node);
 
 /* ─── This node ───────────────────────────────────────────────────────────── */

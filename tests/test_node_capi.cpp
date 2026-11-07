@@ -248,6 +248,39 @@ TEST(NodeCApiTest, LifecycleRules) {
     rats_destroy(b);
 }
 
+// Stopping or destroying a node from inside its own callback would join the
+// thread making the call; both are refused and the node runs on.
+TEST(NodeCApiTest, ACallbackCannotStopItsOwnNode) {
+    rats_t server = make_server();
+    rats_t client = make_client();
+
+    struct Ctx { rats_t node; rats_t other; std::atomic<int> calls{0}; };
+    Ctx srv{server, client};
+    ASSERT_EQ(rats_on(server, "stop", [](void* user, const char* peer, const void*, size_t) {
+        auto* ctx = static_cast<Ctx*>(user);
+        rats_stop(ctx->node);
+        rats_destroy(ctx->node);
+        rats_send(ctx->node, peer, "stopped", "x", 1, 0);   // still a live node
+        ctx->calls++;
+    }, &srv), RATS_OK);
+    CollectCtx client_ctx;
+    ASSERT_EQ(rats_on(client, "stopped", collect_cb, &client_ctx), RATS_OK);
+
+    connect_pair(client, server);
+    ASSERT_EQ(rats_send(client, rats_local_id(server), "stop", "x", 1, 0), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(client_ctx.mu); return client_ctx.got == "x"; }))
+        << "the server did not answer after refusing to stop from its callback";
+    EXPECT_EQ(srv.calls.load(), 1);
+    EXPECT_NE(rats_transports(server), 0u);
+    EXPECT_EQ(rats_peer_count(server), 1u);
+
+    // From a thread that is no callback of the server's, stopping it works.
+    rats_stop(server);
+    EXPECT_EQ(rats_transports(server), 0u);
+    rats_destroy(client);
+    rats_destroy(server);
+}
+
 TEST(NodeCApiTest, ConnectSendAndEcho) {
     rats_t server = make_server();
     rats_t client = make_client();
