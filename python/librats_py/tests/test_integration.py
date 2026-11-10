@@ -179,3 +179,29 @@ def test_relay(nodes):
     a.connect_via_relay(b.local_id)
     assert wait_for(lambda: a.peer_count == 2 and b.peer_count == 2, timeout=20)
     assert a.peer_info(b.local_id).transport == Transport.RELAY
+
+
+def test_stop_and_destroy_refused_inside_own_callback(nodes):
+    # The C side refuses both (they would join the thread running the callback);
+    # the binding must say so instead of marking a still-running node destroyed.
+    server, client = nodes(), nodes(dial_only=True)
+    outcome = []
+
+    def on_chat(peer, data):
+        for call in (server.stop, server.destroy):
+            try:
+                call()
+                outcome.append("returned")
+            except RuntimeError:
+                outcome.append("refused")
+        # A different node may be stopped from here.
+        other.destroy()
+        outcome.append("other destroyed")
+
+    other = RatsNode()
+    server.on("chat", on_chat)
+    link(client, server)
+    client.send(server.local_id, "chat", b"x")
+    assert wait_for(lambda: len(outcome) == 3)
+    assert outcome == ["refused", "refused", "other destroyed"]
+    assert server.running and server.peer_count == 1

@@ -13,6 +13,7 @@ the pointer until the node is destroyed.
 
 import json
 import sys
+import threading
 import weakref
 from ctypes import byref, c_char_p, c_int, c_size_t, c_uint64, string_at
 from typing import Any, Callable, List, Optional
@@ -51,13 +52,22 @@ def _report(exc: BaseException, where: str) -> None:
     print(f"[librats_py] exception in {where} callback: {exc!r}", file=sys.stderr)
 
 
-def _guard(where: str, fn: Callable) -> Callable:
-    """Wrap a trampoline so a Python exception never unwinds into C."""
+# Which node's callback the current thread is inside, if any (its _token).
+_in_callback = threading.local()
+
+
+def _guarded(where: str, fn: Callable, token: object) -> Callable:
+    """Wrap a trampoline so a Python exception never unwinds into C, and record
+    whose callback is running so stop()/destroy() can refuse from inside it."""
     def call(*args):
+        outer = getattr(_in_callback, 'token', None)
+        _in_callback.token = token
         try:
             fn(*args)
         except BaseException as exc:  # noqa: B902 — nothing may cross into C
             _report(exc, where)
+        finally:
+            _in_callback.token = outer
     return call
 
 
@@ -158,6 +168,9 @@ class RatsNode:
         self._lib = get_librats().lib
         self._handle = None
         self._running = False
+        # Identifies this node's callbacks to _guarded() without the thunks
+        # holding a reference to the node itself.
+        self._token = object()
         # Every CFUNCTYPE handed to C, kept until the node is destroyed.
         self._thunks: List[Any] = []
 
@@ -214,8 +227,20 @@ class RatsNode:
         check_error(self._lib.rats_start(self._h), "start")
         self._running = True
 
+    def _refuse_inside_own_callback(self, what: str) -> None:
+        # The C side refuses this too (it would join the thread running the
+        # callback) but cannot say so; without this check the Python object
+        # would believe the node gone while it keeps running.
+        if getattr(_in_callback, 'token', None) is self._token:
+            raise RuntimeError(f"{what}() called from inside one of this node's own "
+                               "callbacks; call it from another thread")
+
     def stop(self) -> None:
-        """Close every connection and stop. Idempotent."""
+        """Close every connection and stop. Idempotent.
+
+        Raises RuntimeError when called from inside one of this node's callbacks.
+        """
+        self._refuse_inside_own_callback("stop")
         if self._handle is not None:
             self._lib.rats_stop(self._handle)
         self._running = False
@@ -227,8 +252,10 @@ class RatsNode:
     def destroy(self) -> None:
         """Stop and free the native node now rather than at garbage collection.
 
-        Idempotent; every other method raises afterwards.
+        Idempotent; every other method raises afterwards. Raises RuntimeError
+        when called from inside one of this node's callbacks.
         """
+        self._refuse_inside_own_callback("destroy")
         if self._handle is not None:
             self._finalizer()
             self._handle = None
@@ -369,9 +396,12 @@ class RatsNode:
         self._thunks.append(thunk)
         return thunk
 
+    def _guard(self, where: str, fn: Callable) -> Callable:
+        return _guarded(where, fn, self._token)
+
     def on_peer_connected(self, callback: PeerCallback) -> None:
         """``callback(peer_id)`` when a peer connects."""
-        thunk = self._keep(PeerCallbackType(_guard(
+        thunk = self._keep(PeerCallbackType(self._guard(
             "peer connected", lambda _u, pid: callback(_s(pid)))))
         check_error(self._lib.rats_on_peer_connected(self._h, thunk, None), "on_peer_connected")
 
@@ -382,7 +412,7 @@ class RatsNode:
         ``SLOW_CONSUMER`` means this node sent faster than the link drained, and
         redialing only repeats it.
         """
-        thunk = self._keep(DisconnectCallbackType(_guard(
+        thunk = self._keep(DisconnectCallbackType(self._guard(
             "peer disconnected", lambda _u, pid, why: callback(_s(pid), CloseReason(why)))))
         check_error(self._lib.rats_on_peer_disconnected(self._h, thunk, None),
                     "on_peer_disconnected")
@@ -391,13 +421,13 @@ class RatsNode:
         """``callback(address)`` when a dial to a numeric address failed over every
         transport tried — one made by :meth:`connect` or by a discovery
         subsystem. A dial by hostname is not reported."""
-        thunk = self._keep(DialFailedCallbackType(_guard(
+        thunk = self._keep(DialFailedCallbackType(self._guard(
             "dial failed", lambda _u, addr: callback(_s(addr)))))
         check_error(self._lib.rats_on_dial_failed(self._h, thunk, None), "on_dial_failed")
 
     def on_peer_writable(self, callback: PeerCallback) -> None:
         """``callback(peer_id)`` when a peer whose queue had filled has room again."""
-        thunk = self._keep(PeerCallbackType(_guard(
+        thunk = self._keep(PeerCallbackType(self._guard(
             "peer writable", lambda _u, pid: callback(_s(pid)))))
         check_error(self._lib.rats_on_peer_writable(self._h, thunk, None), "on_peer_writable")
 
@@ -405,14 +435,14 @@ class RatsNode:
         """``callback(peer_id, stats: PathStats)`` for every connected peer, every
         ``path_sample_ms`` (100 ms if 0). Registering turns sampling on; it runs
         once per peer per interval, so keep it cheap."""
-        thunk = self._keep(PathCallbackType(_guard(
+        thunk = self._keep(PathCallbackType(self._guard(
             "peer path", lambda _u, pid, st: callback(
                 _s(pid), _path_stats(RatsPathStats.from_address(st))))))
         check_error(self._lib.rats_on_peer_path(self._h, thunk, None), "on_peer_path")
 
     def on(self, channel: str, callback: MessageCallback) -> None:
         """``callback(peer_id, data: bytes)`` for messages on a named channel."""
-        thunk = self._keep(MessageCallbackType(_guard(
+        thunk = self._keep(MessageCallbackType(self._guard(
             f"'{channel}' message", lambda _u, pid, data, n: callback(_s(pid), _bytes(data, n)))))
         check_error(self._lib.rats_on(self._h, _b(channel), thunk, None), f"on('{channel}')")
 
@@ -500,7 +530,7 @@ class RatsNode:
     def subscribe(self, topic: str, callback: TopicCallback) -> None:
         """``callback(peer_id, topic, data: bytes)``. One handler per topic: a second
         subscribe replaces the first."""
-        thunk = self._keep(TopicCallbackType(_guard(
+        thunk = self._keep(TopicCallbackType(self._guard(
             f"topic '{topic}'",
             lambda _u, pid, t, data, n: callback(_s(pid), _s(t), _bytes(data, n)))))
         check_error(self._lib.rats_subscribe(self._h, _b(topic), thunk, None),
@@ -522,7 +552,7 @@ class RatsNode:
         check_error(self._lib.rats_enable_json(self._h), "enable_json")
 
     def _json_thunk(self, type_name: str, callback: JsonCallback):
-        return self._keep(JsonCallbackType(_guard(
+        return self._keep(JsonCallbackType(self._guard(
             f"JSON '{type_name}'", lambda _u, pid, text: callback(_s(pid), json.loads(text)))))
 
     def on_json(self, type_name: str, callback: JsonCallback) -> None:
@@ -565,7 +595,7 @@ class RatsNode:
         """``callback(peer_id, transfer_id, name, size, is_directory)`` for each
         incoming offer; answer with :meth:`accept_file` or :meth:`reject_file`.
         One handler: a second call replaces the first."""
-        thunk = self._keep(FileOfferCallbackType(_guard(
+        thunk = self._keep(FileOfferCallbackType(self._guard(
             "file offer", lambda _u, pid, tid, name, size, is_dir: callback(
                 _s(pid), int(tid), _s(name), int(size), bool(is_dir)))))
         check_error(self._lib.rats_on_file_offer(self._h, thunk, None), "on_file_offer")
@@ -580,12 +610,12 @@ class RatsNode:
                 bytes_transferred=c.bytes_transferred, total_bytes=c.total_bytes,
                 files_completed=c.files_completed, total_files=c.total_files,
                 rate_bytes_per_sec=c.rate_bytes_per_sec))
-        thunk = self._keep(FileProgressCallbackType(_guard("file progress", trampoline)))
+        thunk = self._keep(FileProgressCallbackType(self._guard("file progress", trampoline)))
         check_error(self._lib.rats_on_file_progress(self._h, thunk, None), "on_file_progress")
 
     def on_file_complete(self, callback: FileCompleteCallback) -> None:
         """``callback(peer_id, transfer_id, success, path)`` when a transfer ends."""
-        thunk = self._keep(FileCompleteCallbackType(_guard(
+        thunk = self._keep(FileCompleteCallbackType(self._guard(
             "file complete", lambda _u, pid, tid, ok, path: callback(
                 _s(pid), int(tid), bool(ok), _s(path)))))
         check_error(self._lib.rats_on_file_complete(self._h, thunk, None), "on_file_complete")

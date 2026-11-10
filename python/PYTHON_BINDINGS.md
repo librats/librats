@@ -35,10 +35,15 @@ How the package is put together, for whoever changes it. Usage is in
 
 ## Callbacks
 
-Each user callback is wrapped by `_guard()` in `core.py`, which converts the C
-arguments (`c_char_p` → `str`, `void*` + length → `bytes`, struct pointers →
+Each user callback is wrapped by `RatsNode._guard()` in `core.py`, which converts
+the C arguments (`c_char_p` → `str`, `void*` + length → `bytes`, struct pointers →
 dataclasses via `Structure.from_address`) and catches every exception, so
-nothing unwinds into C.
+nothing unwinds into C. The wrapper also records, in a thread-local, which
+node's callback is running: `rats_stop()` / `rats_destroy()` are refused from
+inside the node's own callback without telling the caller, so `stop()` and
+`destroy()` check first and raise `RuntimeError`, instead of marking a node
+destroyed that is in fact still running. The record is a per-node token rather
+than the node, so the thunks hold no reference to it.
 
 Every `CFUNCTYPE` object is appended to `RatsNode._thunks` and kept until the
 node is gone. That includes handlers later replaced (`subscribe` again,
