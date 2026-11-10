@@ -2,8 +2,8 @@ name: Publish to PyPI
 
 # The Python package loads the native librats library through ctypes, so it ships
 # as one wheel per platform (tagged py3-none-<platform>, valid for every Python 3).
-# Both a release and a manual run publish to PyPI: a release under its tag's
-# version, a manual run as <last tag>.devN (a pre-release pip skips by default).
+# A release publishes to PyPI under its tag's version; a manual run only builds
+# (wheels land in the run's artifacts, versioned <last tag>.devN).
 
 on:
   release:
@@ -92,6 +92,7 @@ jobs:
           path: wheelhouse/*.whl
 
   publish-pypi:
+    if: github.event_name == 'release'
     needs: wheels
     runs-on: ubuntu-latest
     environment: pypi
