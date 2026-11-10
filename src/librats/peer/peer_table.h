@@ -144,6 +144,10 @@ public:
     /// Snapshot of all known peers (for the public API / persistence). Read lock.
     std::vector<PeerInfo> snapshot() const;
 
+    /// The live route of every peer: the one connection each is reached over,
+    /// whatever other links to it are still open. Read lock.
+    std::vector<PeerRoute> routes() const;
+
     size_t size() const noexcept { return count_.load(std::memory_order_relaxed); }
 
 private:

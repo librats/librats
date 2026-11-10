@@ -198,4 +198,12 @@ std::vector<PeerInfo> PeerTable::snapshot() const {
     return out;
 }
 
+std::vector<PeerRoute> PeerTable::routes() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<PeerRoute> out;
+    out.reserve(peers_.size());
+    for (const auto& [id, entry] : peers_) out.push_back(entry.route);
+    return out;
+}
+
 } // namespace librats

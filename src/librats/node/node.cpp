@@ -618,11 +618,22 @@ bool Node::send_to(const PeerId& to, FrameHeader header, ByteView payload, SendO
 }
 
 bool Node::broadcast_all(FrameHeader header, ByteView payload, SendOptions options) {
+    // To each peer once, over its live route. Not to every connection a reactor
+    // holds: a peer's second link — a standby (hold_standby), or the loser of a
+    // race not torn down yet — is Established too, and a frame sent on it as well
+    // arrives twice.
+    std::vector<std::vector<ConnId>> to(reactors_->size());
+    for (const PeerRoute& route : peers_.routes()) to[route.reactor].push_back(route.conn);
+
     auto data = std::make_shared<const Bytes>(payload.to_bytes());
     const Deadline deadline = deadline_of(options);
     const uint64_t tag = tag_of(options);
     const uint8_t rank = rank_of(options);
-    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data, deadline, tag, rank); });
+    for (size_t i = 0; i < to.size(); ++i) {
+        if (to[i].empty()) continue;
+        reactors_->by_index(static_cast<uint8_t>(i))
+            .broadcast(header, data, std::move(to[i]), deadline, tag, rank);
+    }
     return peers_.all_writable();
 }
 

@@ -271,11 +271,12 @@ void Reactor::close_conn(ConnId id, CloseReason reason, bool spare_established) 
     });
 }
 
-void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload, Deadline deadline,
-                        uint64_t tag, uint8_t rank) {
-    execute([this, header, payload = std::move(payload), deadline, tag, rank] {
-        for (auto& [id, conn] : conns_) {
-            if (conn->state() == ConnState::Established)
+void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload,
+                        std::vector<ConnId> to, Deadline deadline, uint64_t tag, uint8_t rank) {
+    execute([this, header, payload = std::move(payload), to = std::move(to), deadline, tag, rank] {
+        for (const ConnId id : to) {
+            Connection* conn = find(id);   // gone meanwhile: nothing to send it on
+            if (conn && conn->state() == ConnState::Established)
                 conn->send(header, ByteView(*payload), deadline, tag, rank);
         }
     });

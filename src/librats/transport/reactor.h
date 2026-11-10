@@ -189,13 +189,17 @@ public:
     /// the one thread that can read the connection's state without racing it.
     void cancel_dial(ConnId id, CloseReason reason);
 
-    /// Send a frame to every Established connection on this reactor — live until
-    /// `deadline`, if it has one, with `tag` and `rank` (see Connection::send).
-    /// Thread-safe: the iteration runs on the reactor thread. The payload is shared
-    /// across connections (the per-peer encryption still happens in each one's
-    /// transport).
-    void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload, Deadline deadline = {},
-                   uint64_t tag = 0, uint8_t rank = 0);
+    /// Send a frame to each of the connections `to` on this reactor that is still
+    /// Established — live until `deadline`, if it has one, with `tag` and `rank`
+    /// (see Connection::send). The caller names them because "every connection
+    /// here" is not "every peer": a peer can have a second link open beside the
+    /// one it is reached over (a standby, a loser not torn down yet), and a frame
+    /// sent on both arrives twice. Thread-safe: the iteration runs on the reactor
+    /// thread. The payload is shared across connections (the per-peer encryption
+    /// still happens in each one's transport).
+    void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload,
+                   std::vector<ConnId> to, Deadline deadline = {}, uint64_t tag = 0,
+                   uint8_t rank = 0);
 
     // — timers (reactor thread, or via post/execute) —
     TimerId schedule(std::chrono::milliseconds delay, Task on_fire);

@@ -483,6 +483,41 @@ TEST(NodeTest, WhatWasSaidOnALinkThatLostTheRaceIsSaidAgain) {
     }
 }
 
+// A second link to a peer that loses to the one it already has is held open as a
+// standby for a few seconds (Node::hold_standby), with nothing sent on it. A
+// broadcast must respect that: it reaches the peer once, over its live link —
+// not once per open connection, which delivered every broadcast twice while a
+// standby was held (seen when mDNS and a manual connect() met the same peer).
+TEST(NodeTest, BroadcastSkipsALinkHeldAsStandby) {
+    Node a(server_config()), b(server_config());
+    std::atomic<int> got_a{0}, got_b{0};
+    a.on("all", [&](const Peer&, ByteView) { ++got_a; });
+    b.on("all", [&](const Peer&, ByteView) { ++got_b; });
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+
+    // Both ends keep the link the smaller id dialed, so the second link — dialed
+    // the other way — is the one turned down and held at both ends.
+    Node& smaller = a.local_id() < b.local_id() ? a : b;
+    Node& larger  = &smaller == &a ? b : a;
+    smaller.connect("127.0.0.1", larger.listen_port());
+    ASSERT_TRUE(wait_for([&] { return a.peer_count() == 1 && b.peer_count() == 1; }));
+    larger.connect("127.0.0.1", smaller.listen_port());
+    ASSERT_TRUE(wait_for([&] { return a.standbys() == 1 && b.standbys() == 1; }))
+        << "a holds " << a.standbys() << ", b " << b.standbys();
+
+    a.broadcast("all", ByteView(std::string("from a")));
+    b.broadcast("all", ByteView(std::string("from b")));
+    ASSERT_TRUE(wait_for([&] { return got_a > 0 && got_b > 0; }));
+    std::this_thread::sleep_for(300ms);  // a second copy, if any, lands well within this
+    EXPECT_EQ(got_a.load(), 1);
+    EXPECT_EQ(got_b.load(), 1);
+    EXPECT_EQ(a.standbys(), 1u) << "the standby closed before the broadcasts were checked";
+
+    a.stop();
+    b.stop();
+}
+
 // One Node instance can be started, stopped, and started again — sockets rebind
 // and threads relaunch cleanly across cycles.
 TEST(NodeTest, RestartCycles) {
