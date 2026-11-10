@@ -1,21 +1,24 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+# >= 77 for the SPDX `license` string; setup.py needs setuptools.command.bdist_wheel (>= 70.1).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "librats-py"
-version = "2.0.0"
+name = "librats"
+dynamic = ["version"]
 description = "Python bindings for librats P2P networking library"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "librats contributors"},
 ]
+keywords = ["p2p", "networking", "file-transfer", "gossipsub", "pubsub", "dht", "mdns", "noise"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -40,10 +43,14 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/DEgITx/librats"
+Homepage = "https://github.com/librats/librats/tree/master/python"
 Documentation = "https://librats.com"
-Repository = "https://github.com/DEgITx/librats"
-"Bug Tracker" = "https://github.com/DEgITx/librats/issues"
+Repository = "https://github.com/librats/librats"
+"Bug Tracker" = "https://github.com/librats/librats/issues"
+
+[tool.setuptools.dynamic]
+# Single source of truth; the publish workflow rewrites it from the release tag.
+version = {attr = "librats_py.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["librats_py*"]

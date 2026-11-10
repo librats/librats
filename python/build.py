@@ -57,10 +57,22 @@ def build_native_library():
     build_dir = PROJECT_ROOT / "build" / "python"
     build_dir.mkdir(parents=True, exist_ok=True)
     print("Building the librats shared library (CMake)...")
-    run_command(["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir),
+    configure = ["cmake", "-S", str(PROJECT_ROOT), "-B", str(build_dir),
                  "-DCMAKE_BUILD_TYPE=Release", "-DRATS_SHARED_LIBRARY=ON",
                  "-DRATS_STATIC_LIBRARY=OFF", "-DRATS_BUILD_TESTS=OFF",
-                 "-DRATS_BUILD_CLIENT=OFF", "-DRATS_BUILD_EXAMPLES=OFF"])
+                 "-DRATS_BUILD_CLIENT=OFF", "-DRATS_BUILD_EXAMPLES=OFF"]
+    # CI checkouts are shallow and tagless, so the git-derived version would fall
+    # back to 1.0.0; the publish workflow passes the release version explicitly.
+    if os.environ.get("RATS_VERSION"):
+        configure.append(f"-DRATS_VERSION_OVERRIDE={os.environ['RATS_VERSION']}")
+    if os.name == 'nt':
+        # Link the MSVC C++ runtime statically: Python ships vcruntime140.dll but
+        # not msvcp140.dll, so a /MD build fails to load on machines without the
+        # VC++ redistributable. CMP0091 makes CMake honour the setting (the
+        # project's cmake_minimum_required predates it).
+        configure += ["-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
+                      "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>"]
+    run_command(configure)
     run_command(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel"])
     _copy_built_library(build_dir)
 
@@ -143,8 +155,9 @@ def package():
     # Install build dependencies
     run_command([sys.executable, "-m", "pip", "install", "build"])
     
-    # Build packages
-    run_command([sys.executable, "-m", "build"])
+    # Build packages. Run from the repo root: from this directory `-m build`
+    # would import this very script instead of the `build` package.
+    run_command([sys.executable, "-m", "build", str(Path(__file__).parent)], cwd=PROJECT_ROOT)
     
     print("✓ Distribution packages created in dist/")
 

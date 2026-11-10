@@ -1,0 +1,107 @@
+name: Publish to PyPI
+
+# The Python package loads the native librats library through ctypes, so it ships
+# as one wheel per platform (tagged py3-none-<platform>, valid for every Python 3).
+# Both a release and a manual run publish to PyPI: a release under its tag's
+# version, a manual run as <last tag>.devN (a pre-release pip skips by default).
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      base: ${{ steps.v.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="$(git describe --tags --abbrev=0)"
+          fi
+          BASE="${TAG#v}"
+          BASE="${BASE%%-*}"   # 3.1.0-beta.1 -> 3.1.0 for CMake
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            VERSION="${TAG#v}"
+          else
+            VERSION="${BASE}.dev${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Python package version: $VERSION (library $BASE)"
+
+  wheels:
+    needs: version
+    name: wheel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp version and license
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import re, pathlib
+          p = pathlib.Path("python/librats_py/__init__.py")
+          s = p.read_text(encoding="utf-8")
+          s = re.sub(r'^__version__ = ".*"$', '__version__ = "${{ needs.version.outputs.version }}"', s, count=1, flags=re.M)
+          p.write_text(s, encoding="utf-8")
+          EOF
+          grep -n '^__version__' python/librats_py/__init__.py
+          cp LICENSE python/LICENSE
+
+      - uses: pypa/cibuildwheel@v4.3.5
+        with:
+          package-dir: python
+          output-dir: wheelhouse
+        env:
+          # The wheel does not depend on the interpreter, so build it once.
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: native
+          CIBW_ARCHS_MACOS: universal2
+          CIBW_BEFORE_BUILD: "python {package}/build.py --build-native"
+          CIBW_ENVIRONMENT: RATS_VERSION=${{ needs.version.outputs.base }}
+          CIBW_ENVIRONMENT_MACOS: >-
+            RATS_VERSION=${{ needs.version.outputs.base }}
+            MACOSX_DEPLOYMENT_TARGET=11.0
+            CMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          # rats.dll links the C++ runtime statically and is loaded via ctypes,
+          # so there is nothing for delvewheel to bundle.
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
+          CIBW_TEST_COMMAND: python -c "import librats_py as r; print('librats', r.version(), 'package', r.__version__)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish-pypi:
+    needs: wheels
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing (OIDC), no token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
