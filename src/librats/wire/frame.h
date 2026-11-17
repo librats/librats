@@ -50,6 +50,7 @@ enum class MessageType : uint8_t {
     Relay     = 10, ///< relayed circuits: a peer's connection carried through a third node (Relay)
     Media     = 11, ///< real-time media: live frames and their control plane (ratcast's MediaService)
     Rendezvous = 12, ///< meeting under a key at a server, which introduces the peers (Rendezvous)
+    Remote    = 13, ///< remote control: input and the state that answers it, small and ordered (claimed by an application, as Media is)
 };
 
 /// Fixed header of an inner message.

@@ -348,6 +348,7 @@ here:
 | `Relay` (10) | `Relay` (relayed circuits: a peer's connection carried through a third node) |
 | `Media` (11) | reserved for real-time media — live frames and their control plane; not a librats subsystem, claimed by an application such as ratcast's `MediaService` |
 | `Rendezvous` (12) | `Rendezvous` (meeting under a key at a server, which introduces the peers) |
+| `Remote` (13) | reserved for remote control — input events and the state that answers them (cursor, displays), reliable and ordered at `Interactive` priority; not a librats subsystem, claimed by an application |
 
 **`MessageRouter` (`src/librats/wire/message_router.h`)** does the dispatch. Non-`App`
 frames go to the handler registered for their `MessageType`. `App` frames are

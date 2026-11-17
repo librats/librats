@@ -48,6 +48,10 @@ constexpr Priority priority_of(MessageType type) noexcept {
         // keyframe requests, each of which stands between a receiver and a
         // picture it can decode again. Small, rare and latency-bound.
         case MessageType::Media:     return Priority::Interactive;
+        // A key pressed or the pointer moved at a remote computer, and the
+        // cursor that answers it: a person waits on each, and a picture of the
+        // same moment goes as live messages behind them.
+        case MessageType::Remote:    return Priority::Interactive;
         // A file is the one thing here that is all bulk. Storage stays Normal: its
         // lane carries a store's small requests as well as its snapshots, and the
         // requests must not wait out everything else that is queued.
