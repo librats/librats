@@ -744,6 +744,14 @@ NoiseError NoiseSession::handshake_step(
     
     /* Check if handshake completed */
     if (handshake_.is_handshake_complete()) {
+        /* XX authenticates both ends: a completed handshake must carry the peer's
+         * static key. If it does not, the peer sent empty frames that skipped
+         * read_message, and splitting here would establish an unauthenticated
+         * session (remote static all-zero). Refuse it. */
+        if (!handshake_.has_remote_static()) {
+            LOG_NOISE_ERROR("Session handshake step: completed without remote static key");
+            return NoiseError::INVALID_STATE;
+        }
         err = handshake_.split(send_cipher_, recv_cipher_);
         if (err != NoiseError::OK) {
             LOG_NOISE_ERROR("Session handshake step: split failed with error " << static_cast<int>(err));
