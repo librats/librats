@@ -691,6 +691,52 @@ TEST_F(NoiseSessionTest, FullSession) {
     EXPECT_FALSE(responder.is_handshake_complete());
 }
 
+// A peer that sends empty handshake frames presents no static key. The initiator
+// must not treat the handshake as complete: read_message is skipped for an empty
+// frame, so the remote static key is never set, yet write_message still advances
+// the handshake. Driving two empty frames must not reach transport-ready with an
+// all-zero remote static key (that would be an unauthenticated session an active
+// MITM could establish and read).
+TEST_F(NoiseSessionTest, EmptyFramesDoNotCompleteInitiatorHandshake) {
+    NoiseKeyPair initiator_static;
+    noise_generate_keypair(initiator_static);
+
+    NoiseSession initiator;
+    EXPECT_EQ(initiator.start(true, &initiator_static), NoiseError::OK);
+
+    uint8_t message[1024];
+    size_t message_len = sizeof(message);
+    bool need_to_send = false;
+
+    // Legitimate first message (-> e).
+    EXPECT_EQ(initiator.handshake_step(nullptr, 0, message, &message_len, &need_to_send),
+              NoiseError::OK);
+    EXPECT_FALSE(initiator.is_handshake_complete());
+
+    // The peer answers with two empty frames instead of (e, ee, s, es).
+    for (int i = 0; i < 2; i++) {
+        message_len = sizeof(message);
+        need_to_send = false;
+        initiator.handshake_step(nullptr, 0, message, &message_len, &need_to_send);
+    }
+
+    EXPECT_FALSE(initiator.is_handshake_complete());
+
+    // If the handshake ever does complete, it must be against a real remote key,
+    // never the all-zero default of an unauthenticated peer.
+    if (initiator.is_handshake_complete()) {
+        const uint8_t* remote_static = initiator.get_remote_static_public();
+        bool all_zero = true;
+        for (int i = 0; i < NOISE_DH_SIZE; i++) {
+            if (remote_static[i] != 0) {
+                all_zero = false;
+                break;
+            }
+        }
+        EXPECT_FALSE(all_zero);
+    }
+}
+
 // =============================================================================
 // Utility Function Tests
 // =============================================================================
